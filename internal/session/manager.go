@@ -69,18 +69,32 @@ func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate
 	updates := make(chan PairUpdate)
 	go func() {
 		defer close(updates)
-		for evt := range qr {
-			switch evt.Event {
-			case "code":
-				updates <- PairUpdate{QR: evt.Code}
-			case "success":
-				updates <- PairUpdate{Connected: true}
-			default:
-				pairErr := evt.Error
-				if pairErr == nil {
-					pairErr = fmt.Errorf("whatsmeow-gateway: pairing ended with event %q", evt.Event)
+		for {
+			select {
+			case evt, ok := <-qr:
+				if !ok {
+					return
 				}
-				updates <- PairUpdate{Err: pairErr}
+				var update PairUpdate
+				switch evt.Event {
+				case "code":
+					update = PairUpdate{QR: evt.Code}
+				case "success":
+					update = PairUpdate{Connected: true}
+				default:
+					pairErr := evt.Error
+					if pairErr == nil {
+						pairErr = fmt.Errorf("whatsmeow-gateway: pairing ended with event %q", evt.Event)
+					}
+					update = PairUpdate{Err: pairErr}
+				}
+				select {
+				case updates <- update:
+				case <-ctx.Done():
+					return
+				}
+			case <-ctx.Done():
+				return
 			}
 		}
 	}()
@@ -88,7 +102,7 @@ func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate
 	return updates, nil
 }
 
-func (m *Manager) EnsureConnected(ctx context.Context, channelID string) error {
+func (m *Manager) EnsureConnected(channelID string) error {
 	client, err := m.client(channelID)
 	if err != nil {
 		return err

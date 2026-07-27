@@ -20,7 +20,6 @@ type WAClient interface {
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
 	AddEventHandler(handler func(any)) uint32
 	Disconnect()
-	Logout(ctx context.Context) error
 }
 
 type waClient struct {
@@ -67,8 +66,4 @@ func (w *waClient) AddEventHandler(handler func(any)) uint32 {
 
 func (w *waClient) Disconnect() {
 	w.client.Disconnect()
-}
-
-func (w *waClient) Logout(ctx context.Context) error {
-	return w.client.Logout(ctx)
 }

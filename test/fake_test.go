@@ -90,10 +90,6 @@ func (f *fakeWAClient) AddEventHandler(handler func(any)) uint32 {
 
 func (f *fakeWAClient) Disconnect() {}
 
-func (f *fakeWAClient) Logout(ctx context.Context) error {
-	return nil
-}
-
 func (f *fakeWAClient) emit(evt any) {
 	f.mu.Lock()
 	handlers := append([]func(any){}, f.handlers...)

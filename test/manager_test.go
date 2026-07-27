@@ -62,7 +62,7 @@ func TestManagerDispatchesMessageEventWithChannelID(t *testing.T) {
 		recv <- received{channelID: channelID, evt: evt}
 	})
 
-	if err := mgr.EnsureConnected(context.Background(), "channel-2"); err != nil {
+	if err := mgr.EnsureConnected("channel-2"); err != nil {
 		t.Fatalf("EnsureConnected failed: %v", err)
 	}
 
@@ -93,7 +93,7 @@ func TestManagerDropsSessionOnLoggedOut(t *testing.T) {
 		return newFakeWAClient(), nil
 	})
 
-	if err := mgr.EnsureConnected(context.Background(), "channel-3"); err != nil {
+	if err := mgr.EnsureConnected("channel-3"); err != nil {
 		t.Fatalf("EnsureConnected failed: %v", err)
 	}
 	if callCount != 1 {
@@ -102,7 +102,7 @@ func TestManagerDropsSessionOnLoggedOut(t *testing.T) {
 
 	first.emit(&events.LoggedOut{})
 
-	if err := mgr.EnsureConnected(context.Background(), "channel-3"); err != nil {
+	if err := mgr.EnsureConnected("channel-3"); err != nil {
 		t.Fatalf("EnsureConnected after logout failed: %v", err)
 	}
 	if callCount != 2 {
@@ -129,5 +129,44 @@ func TestManagerSendReturnsIDAndTimestamp(t *testing.T) {
 	}
 	if !gotTS.Equal(ts) {
 		t.Fatalf("expected timestamp %v, got %v", ts, gotTS)
+	}
+}
+
+func TestManagerPairGoroutineStopsOnContextCancel(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.qrItems = []whatsmeow.QRChannelItem{
+		{Event: "code", Code: "qr-code-1"},
+		{Event: "code", Code: "qr-code-2"},
+		whatsmeow.QRChannelSuccess,
+	}
+
+	mgr := session.NewManager(func(channelID string) (session.WAClient, error) {
+		return fake, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	updates, err := mgr.Pair(ctx, "channel-5")
+	if err != nil {
+		t.Fatalf("Pair failed: %v", err)
+	}
+
+	first := <-updates
+	if first.QR != "qr-code-1" {
+		t.Fatalf("expected first update QR=qr-code-1, got %+v", first)
+	}
+
+	cancel()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case _, ok := <-updates:
+			if !ok {
+				return
+			}
+		case <-deadline:
+			t.Fatal("Pair goroutine did not stop after context cancellation (leak)")
+		}
 	}
 }
