@@ -2,13 +2,19 @@ package mapper
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
+
+var ErrSkip = errors.New("mapper: inbound message has no mappable user content")
+
+const maxUnwrapDepth = 8
 
 type Downloader interface {
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
@@ -88,7 +94,7 @@ func BuildInbound(ctx context.Context, dl Downloader, s3 MediaStore, channelID, 
 		Timestamp:         strconv.FormatInt(evt.Info.Timestamp.Unix(), 10),
 	}
 
-	msg := evt.Message
+	msg := unwrapMessage(evt.Message)
 	switch {
 	case msg.GetConversation() != "":
 		out.Type = "text"
@@ -177,10 +183,30 @@ func BuildInbound(ctx context.Context, dl Downloader, s3 MediaStore, channelID, 
 		out.ContextMessageID = arr.GetContextInfo().GetStanzaID()
 
 	default:
-		return InboundEvent{}, fmt.Errorf("mapper: unsupported inbound message")
+		return InboundEvent{}, ErrSkip
 	}
 
 	return out, nil
+}
+
+func unwrapMessage(msg *waE2E.Message) *waE2E.Message {
+	for i := 0; i < maxUnwrapDepth; i++ {
+		switch {
+		case msg.GetEphemeralMessage().GetMessage() != nil:
+			msg = msg.GetEphemeralMessage().GetMessage()
+		case msg.GetViewOnceMessage().GetMessage() != nil:
+			msg = msg.GetViewOnceMessage().GetMessage()
+		case msg.GetViewOnceMessageV2().GetMessage() != nil:
+			msg = msg.GetViewOnceMessageV2().GetMessage()
+		case msg.GetViewOnceMessageV2Extension().GetMessage() != nil:
+			msg = msg.GetViewOnceMessageV2Extension().GetMessage()
+		case msg.GetDocumentWithCaptionMessage().GetMessage() != nil:
+			msg = msg.GetDocumentWithCaptionMessage().GetMessage()
+		default:
+			return msg
+		}
+	}
+	return msg
 }
 
 func contactFrom(displayName, vcard string) InboundContact {

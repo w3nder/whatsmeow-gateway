@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -319,6 +320,10 @@ func (g *gateway) handleInboundMessage(channelID string, evt *events.Message) {
 
 	inbound, err := mapper.BuildInbound(g.workCtx, client, g.mediaStore, channelID, g.tenantFor(channelID), evt)
 	if err != nil {
+		if errors.Is(err, mapper.ErrSkip) {
+			g.logger.Debug("gateway: skip non-content inbound event", "channel_id", channelID)
+			return
+		}
 		g.logger.Error("gateway: build inbound event", "channel_id", channelID, "error", err)
 		return
 	}
