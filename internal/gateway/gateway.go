@@ -35,6 +35,7 @@ type Deps struct {
 	MediaStore           mapper.MediaStore
 	InstanceID           string
 	ShardLockTTL         time.Duration
+	SendTimeout          time.Duration
 	ShutdownDrainTimeout time.Duration
 	Logger               *slog.Logger
 }
@@ -49,6 +50,7 @@ type gateway struct {
 	mediaStore           mapper.MediaStore
 	instanceID           string
 	shardLockTTL         time.Duration
+	sendTimeout          time.Duration
 	shutdownDrainTimeout time.Duration
 	logger               *slog.Logger
 
@@ -69,6 +71,7 @@ func Run(ctx context.Context, deps Deps) error {
 		mediaStore:           deps.MediaStore,
 		instanceID:           deps.InstanceID,
 		shardLockTTL:         deps.ShardLockTTL,
+		sendTimeout:          sendTimeout(deps.SendTimeout),
 		shutdownDrainTimeout: deps.ShutdownDrainTimeout,
 		logger:               deps.Logger,
 		workCtx:              context.WithoutCancel(ctx),
@@ -76,6 +79,15 @@ func Run(ctx context.Context, deps Deps) error {
 	}
 
 	return g.run(ctx)
+}
+
+const defaultSendTimeout = 30 * time.Second
+
+func sendTimeout(d time.Duration) time.Duration {
+	if d <= 0 {
+		return defaultSendTimeout
+	}
+	return d
 }
 
 func (g *gateway) run(ctx context.Context) error {
@@ -242,6 +254,12 @@ func (g *gateway) publishChannelError(ctx context.Context, tenantID, userID, cha
 func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) error {
 	g.setTenant(cmd.ChannelID, cmd.TenantID)
 
+	g.logger.Info("gateway: send command received",
+		"message_id", cmd.MessageID,
+		"channel_id", cmd.ChannelID,
+		"to", cmd.To,
+		"type", cmd.Type)
+
 	providerID := dedupe.DeterministicProviderID(cmd.MessageID)
 
 	alreadySent, existingProviderID, err := g.dedupe.Begin(ctx, cmd.MessageID, providerID)
@@ -260,6 +278,9 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 		return nil
 	}
 
+	sendCtx, cancel := context.WithTimeout(ctx, g.sendTimeout)
+	defer cancel()
+
 	if err := g.manager.EnsureConnected(cmd.ChannelID); err != nil {
 		return g.publishSendFailure(ctx, cmd, providerID, fmt.Errorf("gateway: ensure connected %s: %w", cmd.ChannelID, err))
 	}
@@ -269,15 +290,17 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 		return fmt.Errorf("gateway: resolve client %s: %w", cmd.ChannelID, err)
 	}
 
-	to, msg, err := mapper.BuildOutbound(ctx, client, cmd, fetchMediaURL)
+	to, msg, err := mapper.BuildOutbound(sendCtx, client, cmd, fetchMediaURL)
 	if err != nil {
 		return g.publishSendFailure(ctx, cmd, providerID, fmt.Errorf("gateway: build outbound %s: %w", cmd.MessageID, err))
 	}
 
-	id, ts, err := g.manager.Send(ctx, cmd.ChannelID, to, msg, providerID)
+	id, ts, err := g.manager.Send(sendCtx, cmd.ChannelID, to, msg, providerID)
 	if err != nil {
 		return g.publishSendFailure(ctx, cmd, providerID, fmt.Errorf("gateway: send %s: %w", cmd.MessageID, err))
 	}
+
+	g.logger.Info("gateway: message sent to whatsapp", "message_id", cmd.MessageID, "provider_message_id", id, "channel_id", cmd.ChannelID)
 
 	if err := g.dedupe.MarkSent(ctx, cmd.MessageID); err != nil {
 		return fmt.Errorf("gateway: mark sent %s: %w", cmd.MessageID, err)
@@ -332,25 +355,39 @@ func (g *gateway) handleSessionEvent(channelID string, evt any) {
 }
 
 func (g *gateway) handleInboundMessage(channelID string, evt *events.Message) {
+	g.logger.Info("gateway: inbound event received",
+		"channel_id", channelID,
+		"message_id", evt.Info.ID,
+		"from", evt.Info.Sender.String(),
+		"push_name", evt.Info.PushName,
+		"from_me", evt.Info.IsFromMe)
+
 	client, err := g.waClientFor(channelID)
 	if err != nil {
-		g.logger.Error("gateway: resolve client for inbound event", "channel_id", channelID, "error", err)
+		g.logger.Error("gateway: resolve client for inbound event", "channel_id", channelID, "message_id", evt.Info.ID, "error", err)
 		return
 	}
 
 	inbound, err := mapper.BuildInbound(g.workCtx, client, client, g.mediaStore, channelID, g.tenantFor(channelID), evt)
 	if err != nil {
 		if errors.Is(err, mapper.ErrSkip) {
-			g.logger.Debug("gateway: skip non-content inbound event", "channel_id", channelID)
+			g.logger.Info("gateway: skip non-content inbound event", "channel_id", channelID, "message_id", evt.Info.ID)
 			return
 		}
-		g.logger.Error("gateway: build inbound event", "channel_id", channelID, "error", err)
+		g.logger.Error("gateway: build inbound event", "channel_id", channelID, "message_id", evt.Info.ID, "error", err)
 		return
 	}
 
 	if err := g.publisher.PublishInbound(g.workCtx, inbound); err != nil {
-		g.logger.Error("gateway: publish inbound event", "channel_id", channelID, "error", err)
+		g.logger.Error("gateway: publish inbound event", "channel_id", channelID, "message_id", evt.Info.ID, "error", err)
+		return
 	}
+
+	g.logger.Info("gateway: inbound event published to sender.events",
+		"channel_id", channelID,
+		"message_id", evt.Info.ID,
+		"tenant_id", g.tenantFor(channelID),
+		"routing_key", amqp.InboundRoutingKey)
 }
 
 func (g *gateway) handleReceipt(channelID string, evt *events.Receipt) {
