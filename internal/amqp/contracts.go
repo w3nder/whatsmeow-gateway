@@ -35,3 +35,9 @@ type GatewaySendCommand struct {
 	Contacts  []ContactPayload `json:"contacts,omitempty"`
 	ReplyTo   *ReplyToPayload  `json:"replyTo,omitempty"`
 }
+
+type PairCommand struct {
+	TenantID  string `json:"tenantId"`
+	ChannelID string `json:"channelId"`
+	UserID    string `json:"userId"`
+}
