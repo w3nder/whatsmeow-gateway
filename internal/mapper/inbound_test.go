@@ -450,6 +450,249 @@ func TestBuildInboundUnsupportedMessage(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unsupported message")
 	}
+	if !errors.Is(err, mapper.ErrSkip) {
+		t.Fatalf("expected mapper.ErrSkip for an empty message, got %v", err)
+	}
+}
+
+func TestBuildInboundProtocolMessageIsSkipped(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.protocol-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ProtocolMessage: &waE2E.ProtocolMessage{
+				Type: waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(),
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if !errors.Is(err, mapper.ErrSkip) {
+		t.Fatalf("expected mapper.ErrSkip for a protocolMessage, got %v", err)
+	}
+	if out.Type != "" || out.Text != nil || out.Media != nil {
+		t.Fatalf("expected zero-value InboundEvent for a skipped message, got %+v", out)
+	}
+}
+
+func TestBuildInboundSenderKeyDistributionMessageIsSkipped(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.skd-1", "5511999999999"),
+		Message: &waE2E.Message{
+			SenderKeyDistributionMessage: &waE2E.SenderKeyDistributionMessage{
+				GroupID: proto.String("120363000000000000@g.us"),
+			},
+		},
+	}
+
+	_, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if !errors.Is(err, mapper.ErrSkip) {
+		t.Fatalf("expected mapper.ErrSkip for a senderKeyDistributionMessage, got %v", err)
+	}
+}
+
+func TestBuildInboundEmptyMessageIsSkipped(t *testing.T) {
+	evt := &events.Message{
+		Info:    baseInfo("wamid.empty-1", "5511999999999"),
+		Message: &waE2E.Message{},
+	}
+
+	_, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if !errors.Is(err, mapper.ErrSkip) {
+		t.Fatalf("expected mapper.ErrSkip for an empty message, got %v", err)
+	}
+}
+
+func TestBuildInboundEphemeralWrappedTextIsUnwrapped(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.ephemeral-text-1", "5511999999999"),
+		Message: &waE2E.Message{
+			EphemeralMessage: &waE2E.FutureProofMessage{
+				Message: &waE2E.Message{Conversation: proto.String("disappearing hello")},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "text" {
+		t.Fatalf("expected Type=text, got %q", out.Type)
+	}
+	if out.Text == nil || out.Text.Body != "disappearing hello" {
+		t.Fatalf("expected Text.Body=disappearing hello, got %+v", out.Text)
+	}
+}
+
+func TestBuildInboundEphemeralWrappedImageIsUnwrappedAndDownloaded(t *testing.T) {
+	dl := fakeDownloader{data: []byte("ephemeral image bytes")}
+	store := &fakeMediaStore{}
+	evt := &events.Message{
+		Info: baseInfo("wamid.ephemeral-image-1", "5511999999999"),
+		Message: &waE2E.Message{
+			EphemeralMessage: &waE2E.FutureProofMessage{
+				Message: &waE2E.Message{
+					ImageMessage: &waE2E.ImageMessage{
+						Mimetype: proto.String("image/jpeg"),
+						Caption:  proto.String("ephemeral caption"),
+					},
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), dl, store, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "image" {
+		t.Fatalf("expected Type=image, got %q", out.Type)
+	}
+	if out.Media == nil || out.Media.MimeType != "image/jpeg" || out.Media.Caption != "ephemeral caption" {
+		t.Fatalf("unexpected media: %+v", out.Media)
+	}
+	if len(store.puts) != 1 {
+		t.Fatalf("expected exactly 1 store.Put call, got %d", len(store.puts))
+	}
+}
+
+func TestBuildInboundViewOnceWrappedMessageIsUnwrapped(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.viewonce-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ViewOnceMessage: &waE2E.FutureProofMessage{
+				Message: &waE2E.Message{
+					ImageMessage: &waE2E.ImageMessage{Mimetype: proto.String("image/png")},
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{data: []byte("bytes")}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "image" {
+		t.Fatalf("expected Type=image, got %q", out.Type)
+	}
+}
+
+func TestBuildInboundViewOnceV2WrappedMessageIsUnwrapped(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.viewoncev2-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ViewOnceMessageV2: &waE2E.FutureProofMessage{
+				Message: &waE2E.Message{
+					VideoMessage: &waE2E.VideoMessage{Mimetype: proto.String("video/mp4")},
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{data: []byte("bytes")}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "video" {
+		t.Fatalf("expected Type=video, got %q", out.Type)
+	}
+}
+
+func TestBuildInboundViewOnceV2ExtensionWrappedMessageIsUnwrapped(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.viewoncev2ext-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ViewOnceMessageV2Extension: &waE2E.FutureProofMessage{
+				Message: &waE2E.Message{
+					AudioMessage: &waE2E.AudioMessage{Mimetype: proto.String("audio/ogg")},
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{data: []byte("bytes")}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "audio" {
+		t.Fatalf("expected Type=audio, got %q", out.Type)
+	}
+}
+
+func TestBuildInboundDocumentWithCaptionWrappedMessageIsUnwrapped(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.docwithcaption-1", "5511999999999"),
+		Message: &waE2E.Message{
+			DocumentWithCaptionMessage: &waE2E.FutureProofMessage{
+				Message: &waE2E.Message{
+					DocumentMessage: &waE2E.DocumentMessage{
+						Mimetype: proto.String("application/pdf"),
+						FileName: proto.String("wrapped.pdf"),
+					},
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{data: []byte("bytes")}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "document" {
+		t.Fatalf("expected Type=document, got %q", out.Type)
+	}
+	if out.Media == nil || out.Media.Filename != "wrapped.pdf" {
+		t.Fatalf("unexpected media: %+v", out.Media)
+	}
+}
+
+func TestBuildInboundNestedEphemeralWrappingDocumentWithCaptionIsUnwrapped(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.nested-1", "5511999999999"),
+		Message: &waE2E.Message{
+			EphemeralMessage: &waE2E.FutureProofMessage{
+				Message: &waE2E.Message{
+					DocumentWithCaptionMessage: &waE2E.FutureProofMessage{
+						Message: &waE2E.Message{
+							DocumentMessage: &waE2E.DocumentMessage{
+								Mimetype: proto.String("application/pdf"),
+								FileName: proto.String("nested.pdf"),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{data: []byte("bytes")}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "document" {
+		t.Fatalf("expected Type=document, got %q", out.Type)
+	}
+	if out.Media == nil || out.Media.Filename != "nested.pdf" {
+		t.Fatalf("unexpected media: %+v", out.Media)
+	}
+}
+
+func TestBuildInboundUnknownAfterUnwrapIsSkipped(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.unknown-after-unwrap-1", "5511999999999"),
+		Message: &waE2E.Message{
+			EphemeralMessage: &waE2E.FutureProofMessage{
+				Message: &waE2E.Message{
+					StickerMessage: &waE2E.StickerMessage{Mimetype: proto.String("image/webp")},
+				},
+			},
+		},
+	}
+
+	_, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if !errors.Is(err, mapper.ErrSkip) {
+		t.Fatalf("expected mapper.ErrSkip for an unknown message after unwrap, got %v", err)
+	}
 }
 
 func TestBuildStatusDelivered(t *testing.T) {

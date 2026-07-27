@@ -428,6 +428,32 @@ func TestGatewayEndToEnd(t *testing.T) {
 		t.Fatalf("expected phoneNumberId=%s, got %s", channelID, inboundEvt.PhoneNumberID)
 	}
 
+	skipMsg := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Sender: types.NewJID("15559876543", types.DefaultUserServer)},
+			ID:            "wamid.skip-1",
+			PushName:      "Jane Doe",
+			Timestamp:     time.Now(),
+		},
+		Message: &waE2E.Message{
+			ProtocolMessage: &waE2E.ProtocolMessage{Type: waE2E.ProtocolMessage_MESSAGE_EDIT.Enum()},
+		},
+	}
+	fake.emit(skipMsg)
+
+	skipDeadline := time.After(3 * time.Second)
+skipWait:
+	for {
+		select {
+		case d := <-deliveries:
+			if d.RoutingKey == gatewayamqp.InboundRoutingKey {
+				t.Fatalf("expected no whatsapp.inbound.v1 for a protocolMessage (non-user-content), got body %s", d.Body)
+			}
+		case <-skipDeadline:
+			break skipWait
+		}
+	}
+
 	cancel()
 
 	select {
