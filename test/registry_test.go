@@ -74,6 +74,56 @@ func TestRegistryStoreSaveUpsertsOnConflict(t *testing.T) {
 	}
 }
 
+func TestRegistryStoreDeleteRemovesRowSoItIsNotResumed(t *testing.T) {
+	dsn := startPostgresForGateway(t)
+	ctx := context.Background()
+
+	store, err := registry.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("registry.Open failed: %v", err)
+	}
+	t.Cleanup(store.Close)
+
+	if err := store.Save(ctx, "channel-logged-out", "jid@s.whatsapp.net", "tenant-1"); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	sessions, err := store.ForShards(ctx, []int{0}, func(string) int { return 0 })
+	if err != nil {
+		t.Fatalf("ForShards (before delete) failed: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected the saved row to be present before Delete, got %+v", sessions)
+	}
+
+	if err := store.Delete(ctx, "channel-logged-out"); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+
+	sessions, err = store.ForShards(ctx, []int{0}, func(string) int { return 0 })
+	if err != nil {
+		t.Fatalf("ForShards (after delete) failed: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("expected Delete to remove the row so it is never resumed, got %+v", sessions)
+	}
+}
+
+func TestRegistryStoreDeleteOfUnknownChannelIsNoop(t *testing.T) {
+	dsn := startPostgresForGateway(t)
+	ctx := context.Background()
+
+	store, err := registry.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("registry.Open failed: %v", err)
+	}
+	t.Cleanup(store.Close)
+
+	if err := store.Delete(ctx, "channel-never-saved"); err != nil {
+		t.Fatalf("expected Delete of an unknown channel to be a no-op, got error: %v", err)
+	}
+}
+
 func TestRegistryStoreForShardsExcludesUnownedShards(t *testing.T) {
 	dsn := startPostgresForGateway(t)
 	ctx := context.Background()

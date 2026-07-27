@@ -215,7 +215,9 @@ func (g *gateway) persistSession(ctx context.Context, channelID, tenantID string
 
 	jid := client.DeviceJID()
 	if jid == nil {
-		return nil
+		err := fmt.Errorf("device jid is nil after pair success")
+		g.logger.Error("gateway: persist session", "channel_id", channelID, "error", err)
+		return err
 	}
 
 	if err := g.registry.Save(ctx, channelID, jid.String(), tenantID); err != nil {
@@ -302,6 +304,9 @@ func (g *gateway) handleSessionEvent(channelID string, evt any) {
 		g.handleReceipt(channelID, e)
 	case *events.LoggedOut:
 		g.clearTenant(channelID)
+		if err := g.registry.Delete(g.workCtx, channelID); err != nil {
+			g.logger.Error("gateway: delete session on logout", "channel_id", channelID, "error", err)
+		}
 	}
 }
 
@@ -354,6 +359,9 @@ func NewWAClientFactory(container *sqlstore.Container, waLogger waLog.Logger) se
 		device, err := store.DeviceFor(context.Background(), container, jid)
 		if err != nil {
 			return nil, fmt.Errorf("gateway: resolve device for channel %s: %w", channelID, err)
+		}
+		if device == nil {
+			return nil, fmt.Errorf("gateway: no stored device for channel %s (jid %s)", channelID, jid)
 		}
 		return session.NewWAClient(device, waLogger), nil
 	}

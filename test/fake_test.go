@@ -45,6 +45,15 @@ func (f *fakeWAClient) QRChannel(ctx context.Context) (<-chan whatsmeow.QRChanne
 	f.mu.Lock()
 	f.qrChannelCalls++
 	items := f.qrItems
+	if f.deviceJID == nil {
+		for _, item := range items {
+			if item == whatsmeow.QRChannelSuccess {
+				jid := types.NewJID("15550000000", types.DefaultUserServer)
+				f.deviceJID = &jid
+				break
+			}
+		}
+	}
 	f.mu.Unlock()
 
 	ch := make(chan whatsmeow.QRChannelItem, len(items))

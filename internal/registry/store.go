@@ -49,6 +49,13 @@ func (s *Store) Save(ctx context.Context, channelID, jid, tenantID string) error
 	return nil
 }
 
+func (s *Store) Delete(ctx context.Context, channelID string) error {
+	if _, err := s.pool.Exec(ctx, `DELETE FROM gateway_channel_sessions WHERE channel_id = $1`, channelID); err != nil {
+		return fmt.Errorf("registry: delete %s: %w", channelID, err)
+	}
+	return nil
+}
+
 func (s *Store) ForShards(ctx context.Context, shards []int, shardFn func(channelID string) int) ([]ChannelSession, error) {
 	owned := make(map[int]struct{}, len(shards))
 	for _, shard := range shards {
