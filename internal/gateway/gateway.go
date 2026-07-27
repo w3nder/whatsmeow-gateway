@@ -296,6 +296,8 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 }
 
 func (g *gateway) publishSendFailure(ctx context.Context, cmd amqp.GatewaySendCommand, providerID string, cause error) error {
+	g.logger.Error("gateway: send failed", "message_id", cmd.MessageID, "channel_id", cmd.ChannelID, "error", cause)
+
 	if err := g.publisher.PublishStatus(ctx, mapper.StatusEvent{
 		ProviderMessageID: providerID,
 		OpaqueMessageID:   cmd.MessageID,
@@ -336,7 +338,7 @@ func (g *gateway) handleInboundMessage(channelID string, evt *events.Message) {
 		return
 	}
 
-	inbound, err := mapper.BuildInbound(g.workCtx, client, g.mediaStore, channelID, g.tenantFor(channelID), evt)
+	inbound, err := mapper.BuildInbound(g.workCtx, client, client, g.mediaStore, channelID, g.tenantFor(channelID), evt)
 	if err != nil {
 		if errors.Is(err, mapper.ErrSkip) {
 			g.logger.Debug("gateway: skip non-content inbound event", "channel_id", channelID)

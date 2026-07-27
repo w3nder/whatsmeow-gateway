@@ -102,6 +102,10 @@ func (f *fakeWAClient) Download(ctx context.Context, msg whatsmeow.DownloadableM
 	return nil, nil
 }
 
+func (f *fakeWAClient) PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error) {
+	return types.JID{}, false, nil
+}
+
 func (f *fakeWAClient) AddEventHandler(handler func(any)) uint32 {
 	f.mu.Lock()
 	defer f.mu.Unlock()

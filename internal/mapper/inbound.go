@@ -20,6 +20,10 @@ type Downloader interface {
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
 }
 
+type PNResolver interface {
+	PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error)
+}
+
 type MediaStore interface {
 	Put(ctx context.Context, key, mime string, data []byte) error
 }
@@ -67,6 +71,8 @@ type InboundReaction struct {
 type InboundEvent struct {
 	PhoneNumberID     string           `json:"phoneNumberId"`
 	From              string           `json:"from"`
+	SenderLid         string           `json:"senderLid,omitempty"`
+	SenderPn          string           `json:"senderPn,omitempty"`
 	ProfileName       string           `json:"profileName,omitempty"`
 	ProviderMessageID string           `json:"providerMessageId"`
 	Timestamp         string           `json:"timestamp"`
@@ -92,10 +98,18 @@ type StatusEvent struct {
 	Error             *StatusError `json:"error,omitempty"`
 }
 
-func BuildInbound(ctx context.Context, dl Downloader, s3 MediaStore, channelID, tenantID string, evt *events.Message) (InboundEvent, error) {
+func BuildInbound(ctx context.Context, dl Downloader, resolver PNResolver, s3 MediaStore, channelID, tenantID string, evt *events.Message) (InboundEvent, error) {
+	senderLid, senderPn := resolveSenderIdentifiers(ctx, resolver, evt.Info.Sender, evt.Info.SenderAlt)
+	from := senderPn
+	if from == "" {
+		from = senderLid
+	}
+
 	out := InboundEvent{
 		PhoneNumberID:     channelID,
-		From:              evt.Info.Sender.User,
+		From:              from,
+		SenderLid:         senderLid,
+		SenderPn:          senderPn,
 		ProfileName:       evt.Info.PushName,
 		ProviderMessageID: evt.Info.ID,
 		Timestamp:         strconv.FormatInt(evt.Info.Timestamp.Unix(), 10),
@@ -214,6 +228,28 @@ func unwrapMessage(msg *waE2E.Message) *waE2E.Message {
 		}
 	}
 	return msg
+}
+
+func resolveSenderIdentifiers(ctx context.Context, resolver PNResolver, sender, senderAlt types.JID) (senderLid, senderPn string) {
+	switch sender.Server {
+	case types.HiddenUserServer:
+		senderLid = sender.User
+		if senderAlt.Server == types.DefaultUserServer {
+			senderPn = senderAlt.User
+		} else if resolver != nil {
+			if pn, ok, err := resolver.PNForLID(ctx, sender); err == nil && ok && pn.Server == types.DefaultUserServer {
+				senderPn = pn.User
+			}
+		}
+	case types.DefaultUserServer:
+		senderPn = sender.User
+		if senderAlt.Server == types.HiddenUserServer {
+			senderLid = senderAlt.User
+		}
+	default:
+		senderPn = sender.User
+	}
+	return senderLid, senderPn
 }
 
 func contactFrom(displayName, vcard string) InboundContact {

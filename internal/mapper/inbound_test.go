@@ -32,6 +32,16 @@ func (f fakeDownloader) Download(ctx context.Context, msg whatsmeow.Downloadable
 	return f.data, f.err
 }
 
+type fakePNResolver struct {
+	pn    types.JID
+	found bool
+	err   error
+}
+
+func (f fakePNResolver) PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error) {
+	return f.pn, f.found, f.err
+}
+
 type fakeMediaStore struct {
 	puts []recordedPut
 	err  error
@@ -60,7 +70,7 @@ func TestBuildInboundText(t *testing.T) {
 		Message: &waE2E.Message{Conversation: proto.String("hello there")},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
@@ -87,6 +97,124 @@ func TestBuildInboundText(t *testing.T) {
 	}
 }
 
+func TestBuildInboundLIDSenderWithPNAltPopulatesBothIdentifiers(t *testing.T) {
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Sender:    types.NewJID("173907587899617", types.HiddenUserServer),
+				SenderAlt: types.NewJID("5511988887777", types.DefaultUserServer),
+			},
+			ID:        "wamid.lid-1",
+			PushName:  "Jane Doe",
+			Timestamp: time.Unix(1700000000, 0),
+		},
+		Message: &waE2E.Message{Conversation: proto.String("hello there")},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.SenderLid != "173907587899617" {
+		t.Fatalf("expected SenderLid=173907587899617, got %q", out.SenderLid)
+	}
+	if out.SenderPn != "5511988887777" {
+		t.Fatalf("expected SenderPn=5511988887777, got %q", out.SenderPn)
+	}
+	if out.From != "5511988887777" {
+		t.Fatalf("expected From=5511988887777, got %q", out.From)
+	}
+}
+
+func TestBuildInboundLIDSenderNoAltResolvesSenderPNViaStore(t *testing.T) {
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Sender: types.NewJID("173907587899617", types.HiddenUserServer),
+			},
+			ID:        "wamid.lid-2",
+			PushName:  "Jane Doe",
+			Timestamp: time.Unix(1700000000, 0),
+		},
+		Message: &waE2E.Message{Conversation: proto.String("hello there")},
+	}
+
+	resolver := fakePNResolver{pn: types.NewJID("5511999999999", types.DefaultUserServer), found: true}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, resolver, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.SenderLid != "173907587899617" {
+		t.Fatalf("expected SenderLid=173907587899617, got %q", out.SenderLid)
+	}
+	if out.SenderPn != "5511999999999" {
+		t.Fatalf("expected SenderPn=5511999999999 (resolved via store), got %q", out.SenderPn)
+	}
+	if out.From != "5511999999999" {
+		t.Fatalf("expected From=5511999999999, got %q", out.From)
+	}
+}
+
+func TestBuildInboundLIDSenderUnknownMappingKeepsLIDOnly(t *testing.T) {
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Sender: types.NewJID("173907587899617", types.HiddenUserServer),
+			},
+			ID:        "wamid.lid-3",
+			PushName:  "Jane Doe",
+			Timestamp: time.Unix(1700000000, 0),
+		},
+		Message: &waE2E.Message{Conversation: proto.String("hello there")},
+	}
+
+	resolver := fakePNResolver{found: false}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, resolver, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.SenderLid != "173907587899617" {
+		t.Fatalf("expected SenderLid=173907587899617, got %q", out.SenderLid)
+	}
+	if out.SenderPn != "" {
+		t.Fatalf("expected SenderPn empty (mapping unknown), got %q", out.SenderPn)
+	}
+	if out.From != "173907587899617" {
+		t.Fatalf("expected From=173907587899617 (last-resort LID fallback), got %q", out.From)
+	}
+}
+
+func TestBuildInboundPNSenderWithLIDAltPopulatesBothIdentifiers(t *testing.T) {
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Sender:    types.NewJID("5511999999999", types.DefaultUserServer),
+				SenderAlt: types.NewJID("173907587899617", types.HiddenUserServer),
+			},
+			ID:        "wamid.pn-1",
+			PushName:  "Jane Doe",
+			Timestamp: time.Unix(1700000000, 0),
+		},
+		Message: &waE2E.Message{Conversation: proto.String("hello there")},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.SenderPn != "5511999999999" {
+		t.Fatalf("expected SenderPn=5511999999999, got %q", out.SenderPn)
+	}
+	if out.SenderLid != "173907587899617" {
+		t.Fatalf("expected SenderLid=173907587899617, got %q", out.SenderLid)
+	}
+	if out.From != "5511999999999" {
+		t.Fatalf("expected From=5511999999999, got %q", out.From)
+	}
+}
+
 func TestBuildInboundExtendedTextWithReply(t *testing.T) {
 	evt := &events.Message{
 		Info: baseInfo("wamid.text-2", "5511999999999"),
@@ -98,7 +226,7 @@ func TestBuildInboundExtendedTextWithReply(t *testing.T) {
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
@@ -127,7 +255,7 @@ func TestBuildInboundImageDownloadsAndStores(t *testing.T) {
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), dl, store, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), dl, nil, store, "channel-1", "tenant-1", evt)
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
@@ -178,7 +306,7 @@ func TestBuildInboundVideo(t *testing.T) {
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), dl, store, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), dl, nil, store, "channel-1", "tenant-1", evt)
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
@@ -202,7 +330,7 @@ func TestBuildInboundAudio(t *testing.T) {
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), dl, store, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), dl, nil, store, "channel-1", "tenant-1", evt)
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
@@ -228,7 +356,7 @@ func TestBuildInboundDocument(t *testing.T) {
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), dl, store, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), dl, nil, store, "channel-1", "tenant-1", evt)
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
@@ -248,7 +376,7 @@ func TestBuildInboundMediaDownloadErrorPropagates(t *testing.T) {
 		Message: &waE2E.Message{ImageMessage: &waE2E.ImageMessage{Mimetype: proto.String("image/jpeg")}},
 	}
 
-	_, err := mapper.BuildInbound(context.Background(), dl, store, "channel-1", "tenant-1", evt)
+	_, err := mapper.BuildInbound(context.Background(), dl, nil, store, "channel-1", "tenant-1", evt)
 	if err == nil {
 		t.Fatal("expected error when download fails")
 	}
@@ -265,7 +393,7 @@ func TestBuildInboundMediaStoreErrorPropagates(t *testing.T) {
 		Message: &waE2E.Message{ImageMessage: &waE2E.ImageMessage{Mimetype: proto.String("image/jpeg")}},
 	}
 
-	_, err := mapper.BuildInbound(context.Background(), dl, store, "channel-1", "tenant-1", evt)
+	_, err := mapper.BuildInbound(context.Background(), dl, nil, store, "channel-1", "tenant-1", evt)
 	if err == nil {
 		t.Fatal("expected error when media store fails")
 	}
@@ -284,7 +412,7 @@ func TestBuildInboundLocation(t *testing.T) {
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
@@ -313,7 +441,7 @@ func TestBuildInboundLocationZeroCoordinatesSurviveRoundTrip(t *testing.T) {
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
@@ -355,7 +483,7 @@ func TestBuildInboundContact(t *testing.T) {
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
@@ -387,7 +515,7 @@ func TestBuildInboundContactsArray(t *testing.T) {
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
@@ -422,7 +550,7 @@ func TestBuildInboundReaction(t *testing.T) {
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
@@ -446,7 +574,7 @@ func TestBuildInboundUnsupportedMessage(t *testing.T) {
 		Message: &waE2E.Message{},
 	}
 
-	_, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	_, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
 	if err == nil {
 		t.Fatal("expected error for unsupported message")
 	}
@@ -465,7 +593,7 @@ func TestBuildInboundProtocolMessageIsSkipped(t *testing.T) {
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
 	if !errors.Is(err, mapper.ErrSkip) {
 		t.Fatalf("expected mapper.ErrSkip for a protocolMessage, got %v", err)
 	}
@@ -484,7 +612,7 @@ func TestBuildInboundSenderKeyDistributionMessageIsSkipped(t *testing.T) {
 		},
 	}
 
-	_, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	_, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
 	if !errors.Is(err, mapper.ErrSkip) {
 		t.Fatalf("expected mapper.ErrSkip for a senderKeyDistributionMessage, got %v", err)
 	}
@@ -496,7 +624,7 @@ func TestBuildInboundEmptyMessageIsSkipped(t *testing.T) {
 		Message: &waE2E.Message{},
 	}
 
-	_, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	_, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
 	if !errors.Is(err, mapper.ErrSkip) {
 		t.Fatalf("expected mapper.ErrSkip for an empty message, got %v", err)
 	}
@@ -512,7 +640,7 @@ func TestBuildInboundEphemeralWrappedTextIsUnwrapped(t *testing.T) {
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
@@ -541,7 +669,7 @@ func TestBuildInboundEphemeralWrappedImageIsUnwrappedAndDownloaded(t *testing.T)
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), dl, store, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), dl, nil, store, "channel-1", "tenant-1", evt)
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
@@ -568,7 +696,7 @@ func TestBuildInboundViewOnceWrappedMessageIsUnwrapped(t *testing.T) {
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{data: []byte("bytes")}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{data: []byte("bytes")}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
@@ -589,7 +717,7 @@ func TestBuildInboundViewOnceV2WrappedMessageIsUnwrapped(t *testing.T) {
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{data: []byte("bytes")}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{data: []byte("bytes")}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
@@ -610,7 +738,7 @@ func TestBuildInboundViewOnceV2ExtensionWrappedMessageIsUnwrapped(t *testing.T) 
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{data: []byte("bytes")}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{data: []byte("bytes")}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
@@ -634,7 +762,7 @@ func TestBuildInboundDocumentWithCaptionWrappedMessageIsUnwrapped(t *testing.T) 
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{data: []byte("bytes")}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{data: []byte("bytes")}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
@@ -665,7 +793,7 @@ func TestBuildInboundNestedEphemeralWrappingDocumentWithCaptionIsUnwrapped(t *te
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{data: []byte("bytes")}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{data: []byte("bytes")}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
@@ -689,7 +817,7 @@ func TestBuildInboundUnknownAfterUnwrapIsSkipped(t *testing.T) {
 		},
 	}
 
-	_, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	_, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
 	if !errors.Is(err, mapper.ErrSkip) {
 		t.Fatalf("expected mapper.ErrSkip for an unknown message after unwrap, got %v", err)
 	}

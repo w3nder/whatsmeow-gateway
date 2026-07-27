@@ -18,6 +18,7 @@ type WAClient interface {
 	SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID) (whatsmeow.SendResponse, error)
 	Upload(ctx context.Context, data []byte, mt whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
+	PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error)
 	AddEventHandler(handler func(any)) uint32
 	Disconnect()
 }
@@ -58,6 +59,14 @@ func (w *waClient) Upload(ctx context.Context, data []byte, mt whatsmeow.MediaTy
 
 func (w *waClient) Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error) {
 	return w.client.Download(ctx, msg)
+}
+
+func (w *waClient) PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error) {
+	pn, err := w.client.Store.LIDs.GetPNForLID(ctx, lid)
+	if err != nil {
+		return types.JID{}, false, err
+	}
+	return pn, !pn.IsEmpty(), nil
 }
 
 func (w *waClient) AddEventHandler(handler func(any)) uint32 {
