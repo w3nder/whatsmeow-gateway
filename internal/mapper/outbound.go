@@ -23,6 +23,9 @@ func BuildOutbound(ctx context.Context, up Uploader, cmd amqp.GatewaySendCommand
 	if err != nil {
 		return types.JID{}, nil, fmt.Errorf("mapper: parse recipient jid %q: %w", cmd.To, err)
 	}
+	if to.User == "" {
+		return types.JID{}, nil, fmt.Errorf("mapper: invalid recipient jid %q", cmd.To)
+	}
 
 	switch cmd.Type {
 	case "text":

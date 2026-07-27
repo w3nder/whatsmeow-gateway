@@ -66,6 +66,15 @@ func TestBuildOutboundTextAddressesByLIDJID(t *testing.T) {
 	}
 }
 
+func TestBuildOutboundRejectsBareNumberRecipient(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{To: "5511999999999", Type: "text", Text: "hello"}
+
+	_, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	if err == nil {
+		t.Fatal("expected error for bare number recipient without JID server")
+	}
+}
+
 func TestBuildOutboundTextReply(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{
 		To:   "5511999999999@s.whatsapp.net",
