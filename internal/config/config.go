@@ -20,6 +20,7 @@ type Config struct {
 	SendPacePerSec       float64
 	Prefetch             int
 	ShardLockTTL         time.Duration
+	SendTimeout          time.Duration
 	ShutdownDrainTimeout time.Duration
 }
 
@@ -38,6 +39,7 @@ func Load() (Config, error) {
 		SendPacePerSec:       1,
 		Prefetch:             32,
 		ShardLockTTL:         24 * time.Hour,
+		SendTimeout:          30 * time.Second,
 		ShutdownDrainTimeout: 20 * time.Second,
 	}
 	if c.AMQPURL == "" || c.SessionDSN == "" || c.RedisURL == "" || c.InstanceID == "" {

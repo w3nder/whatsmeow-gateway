@@ -36,8 +36,19 @@ func main() {
 
 	waLogger, logger := logging.New()
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		logger.Info("shutdown signal received, draining")
+		cancel()
+		<-sigCh
+		logger.Warn("second shutdown signal, forcing exit")
+		os.Exit(1)
+	}()
 
 	if err := run(ctx, cfg, waLogger, logger); err != nil {
 		logger.Error("gateway run failed", "error", err)
@@ -124,6 +135,7 @@ func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *
 		MediaStore:           mediaStore,
 		InstanceID:           cfg.InstanceID,
 		ShardLockTTL:         cfg.ShardLockTTL,
+		SendTimeout:          cfg.SendTimeout,
 		ShutdownDrainTimeout: cfg.ShutdownDrainTimeout,
 		Logger:               logger,
 	})
