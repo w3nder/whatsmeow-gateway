@@ -22,8 +22,13 @@ type fakeWAClient struct {
 
 	connectCalls int
 
-	sendResp whatsmeow.SendResponse
-	sendErr  error
+	sendResp  whatsmeow.SendResponse
+	sendErr   error
+	sendCalls int
+	lastTo    types.JID
+	lastMsg   *waE2E.Message
+
+	disconnectCalls int
 
 	handlers []func(any)
 }
@@ -70,6 +75,9 @@ func (f *fakeWAClient) DeviceJID() *types.JID {
 func (f *fakeWAClient) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message) (whatsmeow.SendResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.sendCalls++
+	f.lastTo = to
+	f.lastMsg = msg
 	return f.sendResp, f.sendErr
 }
 
@@ -88,7 +96,23 @@ func (f *fakeWAClient) AddEventHandler(handler func(any)) uint32 {
 	return uint32(len(f.handlers))
 }
 
-func (f *fakeWAClient) Disconnect() {}
+func (f *fakeWAClient) Disconnect() {
+	f.mu.Lock()
+	f.disconnectCalls++
+	f.mu.Unlock()
+}
+
+func (f *fakeWAClient) disconnectCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.disconnectCalls
+}
+
+func (f *fakeWAClient) sendCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sendCalls
+}
 
 func (f *fakeWAClient) emit(evt any) {
 	f.mu.Lock()

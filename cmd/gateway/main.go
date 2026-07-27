@@ -2,13 +2,24 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
+	rabbitmq "github.com/rabbitmq/amqp091-go"
+	goredis "github.com/redis/go-redis/v9"
+	waLog "go.mau.fi/whatsmeow/util/log"
+
+	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
 	"github.com/w3nder/whatsmeow-gateway/internal/config"
 	"github.com/w3nder/whatsmeow-gateway/internal/gateway"
 	"github.com/w3nder/whatsmeow-gateway/internal/logging"
+	"github.com/w3nder/whatsmeow-gateway/internal/media"
+	"github.com/w3nder/whatsmeow-gateway/internal/ownership"
+	"github.com/w3nder/whatsmeow-gateway/internal/session"
+	"github.com/w3nder/whatsmeow-gateway/internal/store"
 )
 
 func main() {
@@ -23,8 +34,77 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := gateway.Run(ctx, cfg, waLogger, logger); err != nil {
+	if err := run(ctx, cfg, waLogger, logger); err != nil {
 		logger.Error("gateway run failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *slog.Logger) error {
+	conn, err := rabbitmq.Dial(cfg.AMQPURL)
+	if err != nil {
+		return fmt.Errorf("main: dial rabbitmq: %w", err)
+	}
+	defer func() {
+		if err := conn.Close(); err != nil && err != rabbitmq.ErrClosed {
+			logger.Error("main: close rabbitmq connection", "error", err)
+		}
+	}()
+
+	consumer, err := amqp.NewConsumer(conn, amqp.ConsumerConfig{Prefetch: cfg.Prefetch})
+	if err != nil {
+		return fmt.Errorf("main: new consumer: %w", err)
+	}
+
+	publisher, err := amqp.NewPublisher(conn)
+	if err != nil {
+		return fmt.Errorf("main: new publisher: %w", err)
+	}
+	defer func() {
+		if err := publisher.Close(); err != nil {
+			logger.Error("main: close publisher", "error", err)
+		}
+	}()
+
+	redisOpts, err := goredis.ParseURL(cfg.RedisURL)
+	if err != nil {
+		return fmt.Errorf("main: parse redis url: %w", err)
+	}
+	redisClient := goredis.NewClient(redisOpts)
+	defer func() {
+		if err := redisClient.Close(); err != nil {
+			logger.Error("main: close redis client", "error", err)
+		}
+	}()
+
+	ownershipStore := ownership.NewStore(redisClient, cfg.ShardCount)
+
+	sessionContainer, err := store.Open(ctx, cfg.SessionDSN, waLogger)
+	if err != nil {
+		return fmt.Errorf("main: open session store: %w", err)
+	}
+
+	mediaStore, err := media.NewS3Store(ctx, media.S3Config{
+		Bucket:          cfg.S3Bucket,
+		Region:          cfg.S3Region,
+		Endpoint:        cfg.S3Endpoint,
+		AccessKeyID:     cfg.S3AccessKeyID,
+		SecretAccessKey: cfg.S3SecretAccessKey,
+	})
+	if err != nil {
+		return fmt.Errorf("main: new media store: %w", err)
+	}
+
+	manager := session.NewManager(gateway.NewWAClientFactory(sessionContainer, waLogger))
+
+	return gateway.Run(ctx, gateway.Deps{
+		Consumer:     consumer,
+		Publisher:    publisher,
+		Manager:      manager,
+		Ownership:    ownershipStore,
+		MediaStore:   mediaStore,
+		InstanceID:   cfg.InstanceID,
+		ShardLockTTL: cfg.ShardLockTTL,
+		Logger:       logger,
+	})
 }

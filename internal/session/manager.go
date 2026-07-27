@@ -125,6 +125,10 @@ func (m *Manager) Send(ctx context.Context, channelID string, to types.JID, msg 
 	return resp.ID, resp.Timestamp, nil
 }
 
+func (m *Manager) Client(channelID string) (WAClient, error) {
+	return m.client(channelID)
+}
+
 func (m *Manager) DisconnectAll() {
 	m.mu.Lock()
 	sessions := make([]WAClient, 0, len(m.sessions))
