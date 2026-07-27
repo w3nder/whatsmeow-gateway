@@ -250,6 +250,7 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 	if alreadySent {
 		if err := g.publisher.PublishStatus(ctx, mapper.StatusEvent{
 			ProviderMessageID: existingProviderID,
+			OpaqueMessageID:   cmd.MessageID,
 			Status:            "sent",
 			Timestamp:         strconv.FormatInt(time.Now().Unix(), 10),
 		}); err != nil {
@@ -259,7 +260,7 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 	}
 
 	if err := g.manager.EnsureConnected(cmd.ChannelID); err != nil {
-		return fmt.Errorf("gateway: ensure connected %s: %w", cmd.ChannelID, err)
+		return g.publishSendFailure(ctx, cmd, providerID, fmt.Errorf("gateway: ensure connected %s: %w", cmd.ChannelID, err))
 	}
 
 	client, err := g.waClientFor(cmd.ChannelID)
@@ -269,12 +270,12 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 
 	to, msg, err := mapper.BuildOutbound(ctx, client, cmd, fetchMediaURL)
 	if err != nil {
-		return fmt.Errorf("gateway: build outbound %s: %w", cmd.MessageID, err)
+		return g.publishSendFailure(ctx, cmd, providerID, fmt.Errorf("gateway: build outbound %s: %w", cmd.MessageID, err))
 	}
 
 	id, ts, err := g.manager.Send(ctx, cmd.ChannelID, to, msg, providerID)
 	if err != nil {
-		return fmt.Errorf("gateway: send %s: %w", cmd.MessageID, err)
+		return g.publishSendFailure(ctx, cmd, providerID, fmt.Errorf("gateway: send %s: %w", cmd.MessageID, err))
 	}
 
 	if err := g.dedupe.MarkSent(ctx, cmd.MessageID); err != nil {
@@ -283,12 +284,29 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 
 	if err := g.publisher.PublishStatus(ctx, mapper.StatusEvent{
 		ProviderMessageID: id,
+		OpaqueMessageID:   cmd.MessageID,
 		Status:            "sent",
 		Timestamp:         strconv.FormatInt(ts.Unix(), 10),
 	}); err != nil {
 		return fmt.Errorf("gateway: publish sent status %s: %w", cmd.MessageID, err)
 	}
 
+	return nil
+}
+
+func (g *gateway) publishSendFailure(ctx context.Context, cmd amqp.GatewaySendCommand, providerID string, cause error) error {
+	if err := g.publisher.PublishStatus(ctx, mapper.StatusEvent{
+		ProviderMessageID: providerID,
+		OpaqueMessageID:   cmd.MessageID,
+		Status:            "failed",
+		Timestamp:         strconv.FormatInt(time.Now().Unix(), 10),
+		Error: &mapper.StatusError{
+			Code:   "gateway_send_error",
+			Reason: cause.Error(),
+		},
+	}); err != nil {
+		return fmt.Errorf("gateway: publish failed status %s: %w", cmd.MessageID, err)
+	}
 	return nil
 }
 
