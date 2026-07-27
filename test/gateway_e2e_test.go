@@ -71,6 +71,139 @@ func waitForDelivery(t *testing.T, deliveries <-chan rabbitmq.Delivery, wantRout
 	}
 }
 
+func TestGatewayPartialBootFailureClosesConsumerAndReleasesShards(t *testing.T) {
+	conn := startRabbitMQ(t)
+	redisClient := startRedis(t)
+
+	consumer, err := gatewayamqp.NewConsumer(conn, gatewayamqp.ConsumerConfig{Prefetch: 10})
+	if err != nil {
+		t.Fatalf("NewConsumer failed: %v", err)
+	}
+
+	publisher, err := gatewayamqp.NewPublisher(conn)
+	if err != nil {
+		t.Fatalf("NewPublisher failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := publisher.Close(); err != nil {
+			t.Errorf("publisher.Close failed: %v", err)
+		}
+	})
+
+	deleteCh, err := conn.Channel()
+	if err != nil {
+		t.Fatalf("failed to open delete channel: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := deleteCh.Close(); err != nil && err != rabbitmq.ErrClosed {
+			t.Errorf("failed to close delete channel: %v", err)
+		}
+	})
+	if _, err := deleteCh.QueueDelete(gatewayamqp.GatewaySendQueue, false, false, false); err != nil {
+		t.Fatalf("failed to delete %s to force a StartSend failure: %v", gatewayamqp.GatewaySendQueue, err)
+	}
+
+	const shardCount = 4
+	ownershipStore := ownership.NewStore(redisClient, shardCount)
+
+	fake := newFakeWAClient()
+	fake.qrItems = []whatsmeow.QRChannelItem{
+		{Event: "code", Code: "leaked-consumer-qr"},
+		whatsmeow.QRChannelSuccess,
+	}
+	mgr := session.NewManager(func(channelID string) (session.WAClient, error) {
+		return fake, nil
+	})
+
+	mediaStore, err := media.NewS3Store(context.Background(), media.S3Config{
+		Bucket:          "gateway-partial-boot-unused",
+		Region:          "us-east-1",
+		Endpoint:        "http://127.0.0.1:1",
+		AccessKeyID:     "unused",
+		SecretAccessKey: "unused",
+	})
+	if err != nil {
+		t.Fatalf("NewS3Store failed: %v", err)
+	}
+
+	_, logger := logging.New()
+
+	const instanceID = "gateway-partial-boot-instance"
+
+	runCtx, runCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer runCancel()
+
+	runErr := gateway.Run(runCtx, gateway.Deps{
+		Consumer:             consumer,
+		Publisher:            publisher,
+		Manager:              mgr,
+		Ownership:            ownershipStore,
+		MediaStore:           mediaStore,
+		InstanceID:           instanceID,
+		ShardLockTTL:         30 * time.Second,
+		ShutdownDrainTimeout: 5 * time.Second,
+		Logger:               logger,
+	})
+	if runErr == nil {
+		t.Fatal("expected gateway.Run to fail when the send queue no longer exists")
+	}
+
+	releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer releaseCancel()
+	for shard := 0; shard < shardCount; shard++ {
+		ok, err := ownershipStore.Claim(releaseCtx, shard, "another-instance", 5*time.Second)
+		if err != nil {
+			t.Fatalf("Claim(shard %d) after partial-boot failure failed: %v", shard, err)
+		}
+		if !ok {
+			t.Fatalf("expected shard %d to be released after partial-boot failure, ownership was not released", shard)
+		}
+	}
+
+	probeCh, err := conn.Channel()
+	if err != nil {
+		t.Fatalf("failed to open probe channel: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := probeCh.Close(); err != nil {
+			t.Errorf("failed to close probe channel: %v", err)
+		}
+	})
+	probeQ, err := probeCh.QueueDeclare("", false, true, true, false, nil)
+	if err != nil {
+		t.Fatalf("failed to declare probe queue: %v", err)
+	}
+	for _, rk := range []string{gatewayamqp.ChannelQRRoutingKey, gatewayamqp.ChannelStatusRoutingKey} {
+		if err := probeCh.QueueBind(probeQ.Name, rk, gatewayamqp.EventsExchange, false, nil); err != nil {
+			t.Fatalf("failed to bind probe queue to %s: %v", rk, err)
+		}
+	}
+	deliveries, err := probeCh.Consume(probeQ.Name, "", true, false, false, false, nil)
+	if err != nil {
+		t.Fatalf("failed to consume probe queue: %v", err)
+	}
+
+	staleCmd := gatewayamqp.PairCommand{TenantID: "tenant-stale", ChannelID: "channel-stale", UserID: "user-stale"}
+	staleBody, err := json.Marshal(staleCmd)
+	if err != nil {
+		t.Fatalf("failed to marshal stale pair command: %v", err)
+	}
+	publishCtx, publishCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer publishCancel()
+	if err := probeCh.PublishWithContext(publishCtx, gatewayamqp.GatewayPairExchange, "0", false, false, rabbitmq.Publishing{
+		ContentType: "application/json",
+		Body:        staleBody,
+	}); err != nil {
+		t.Fatalf("failed to publish stale pair command: %v", err)
+	}
+
+	select {
+	case d := <-deliveries:
+		t.Fatalf("expected no channel.qr/channel.status after a partial-boot failure (the already-started pair consumer must be closed), got routing key %q body %s", d.RoutingKey, d.Body)
+	case <-time.After(3 * time.Second):
+	}
+}
+
 func TestGatewayEndToEnd(t *testing.T) {
 	conn := startRabbitMQ(t)
 	redisClient := startRedis(t)
@@ -159,14 +292,15 @@ func TestGatewayEndToEnd(t *testing.T) {
 	runErrCh := make(chan error, 1)
 	go func() {
 		runErrCh <- gateway.Run(ctx, gateway.Deps{
-			Consumer:     consumer,
-			Publisher:    publisher,
-			Manager:      mgr,
-			Ownership:    ownershipStore,
-			MediaStore:   mediaStore,
-			InstanceID:   instanceID,
-			ShardLockTTL: 30 * time.Second,
-			Logger:       logger,
+			Consumer:             consumer,
+			Publisher:            publisher,
+			Manager:              mgr,
+			Ownership:            ownershipStore,
+			MediaStore:           mediaStore,
+			InstanceID:           instanceID,
+			ShardLockTTL:         30 * time.Second,
+			ShutdownDrainTimeout: 10 * time.Second,
+			Logger:               logger,
 		})
 	}()
 

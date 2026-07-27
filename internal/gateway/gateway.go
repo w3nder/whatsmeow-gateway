@@ -22,25 +22,27 @@ import (
 )
 
 type Deps struct {
-	Consumer     *amqp.Consumer
-	Publisher    *amqp.Publisher
-	Manager      *session.Manager
-	Ownership    *ownership.Store
-	MediaStore   mapper.MediaStore
-	InstanceID   string
-	ShardLockTTL time.Duration
-	Logger       *slog.Logger
+	Consumer             *amqp.Consumer
+	Publisher            *amqp.Publisher
+	Manager              *session.Manager
+	Ownership            *ownership.Store
+	MediaStore           mapper.MediaStore
+	InstanceID           string
+	ShardLockTTL         time.Duration
+	ShutdownDrainTimeout time.Duration
+	Logger               *slog.Logger
 }
 
 type gateway struct {
-	consumer     *amqp.Consumer
-	publisher    *amqp.Publisher
-	manager      *session.Manager
-	ownership    *ownership.Store
-	mediaStore   mapper.MediaStore
-	instanceID   string
-	shardLockTTL time.Duration
-	logger       *slog.Logger
+	consumer             *amqp.Consumer
+	publisher            *amqp.Publisher
+	manager              *session.Manager
+	ownership            *ownership.Store
+	mediaStore           mapper.MediaStore
+	instanceID           string
+	shardLockTTL         time.Duration
+	shutdownDrainTimeout time.Duration
+	logger               *slog.Logger
 
 	workCtx context.Context
 
@@ -50,16 +52,17 @@ type gateway struct {
 
 func Run(ctx context.Context, deps Deps) error {
 	g := &gateway{
-		consumer:        deps.Consumer,
-		publisher:       deps.Publisher,
-		manager:         deps.Manager,
-		ownership:       deps.Ownership,
-		mediaStore:      deps.MediaStore,
-		instanceID:      deps.InstanceID,
-		shardLockTTL:    deps.ShardLockTTL,
-		logger:          deps.Logger,
-		workCtx:         context.WithoutCancel(ctx),
-		tenantByChannel: make(map[string]string),
+		consumer:             deps.Consumer,
+		publisher:            deps.Publisher,
+		manager:              deps.Manager,
+		ownership:            deps.Ownership,
+		mediaStore:           deps.MediaStore,
+		instanceID:           deps.InstanceID,
+		shardLockTTL:         deps.ShardLockTTL,
+		shutdownDrainTimeout: deps.ShutdownDrainTimeout,
+		logger:               deps.Logger,
+		workCtx:              context.WithoutCancel(ctx),
+		tenantByChannel:      make(map[string]string),
 	}
 
 	return g.run(ctx)
@@ -73,10 +76,12 @@ func (g *gateway) run(ctx context.Context) error {
 	g.manager.OnEvent(g.handleSessionEvent)
 
 	if err := g.consumer.StartPair(ctx, g.PairHandler); err != nil {
+		g.closeConsumerForFailedBoot()
 		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
 		return fmt.Errorf("gateway: start pair consumer: %w", err)
 	}
 	if err := g.consumer.StartSend(g.workCtx, g.SendHandler); err != nil {
+		g.closeConsumerForFailedBoot()
 		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
 		return fmt.Errorf("gateway: start send consumer: %w", err)
 	}
@@ -85,9 +90,7 @@ func (g *gateway) run(ctx context.Context) error {
 	<-ctx.Done()
 	g.logger.Info("gateway stopping")
 
-	if err := g.consumer.Close(); err != nil {
-		g.logger.Error("gateway: close consumer", "error", err)
-	}
+	g.closeConsumerWithDrainDeadline()
 
 	g.manager.DisconnectAll()
 
@@ -97,6 +100,28 @@ func (g *gateway) run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (g *gateway) closeConsumerForFailedBoot() {
+	if err := g.consumer.Close(); err != nil {
+		g.logger.Error("gateway: close consumer after failed boot", "error", err)
+	}
+}
+
+func (g *gateway) closeConsumerWithDrainDeadline() {
+	done := make(chan error, 1)
+	go func() {
+		done <- g.consumer.Close()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			g.logger.Error("gateway: close consumer", "error", err)
+		}
+	case <-time.After(g.shutdownDrainTimeout):
+		g.logger.Error("gateway: consumer drain deadline exceeded, proceeding with shutdown", "timeout", g.shutdownDrainTimeout)
+	}
 }
 
 func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand) error {
@@ -192,6 +217,8 @@ func (g *gateway) handleSessionEvent(channelID string, evt any) {
 		g.handleInboundMessage(channelID, e)
 	case *events.Receipt:
 		g.handleReceipt(channelID, e)
+	case *events.LoggedOut:
+		g.clearTenant(channelID)
 	}
 }
 
@@ -231,6 +258,12 @@ func (g *gateway) tenantFor(channelID string) string {
 	g.tenantMu.RLock()
 	defer g.tenantMu.RUnlock()
 	return g.tenantByChannel[channelID]
+}
+
+func (g *gateway) clearTenant(channelID string) {
+	g.tenantMu.Lock()
+	delete(g.tenantByChannel, channelID)
+	g.tenantMu.Unlock()
 }
 
 func NewWAClientFactory(container *sqlstore.Container, waLogger waLog.Logger) session.ClientFactory {

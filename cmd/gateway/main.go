@@ -98,13 +98,14 @@ func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *
 	manager := session.NewManager(gateway.NewWAClientFactory(sessionContainer, waLogger))
 
 	return gateway.Run(ctx, gateway.Deps{
-		Consumer:     consumer,
-		Publisher:    publisher,
-		Manager:      manager,
-		Ownership:    ownershipStore,
-		MediaStore:   mediaStore,
-		InstanceID:   cfg.InstanceID,
-		ShardLockTTL: cfg.ShardLockTTL,
-		Logger:       logger,
+		Consumer:             consumer,
+		Publisher:            publisher,
+		Manager:              manager,
+		Ownership:            ownershipStore,
+		MediaStore:           mediaStore,
+		InstanceID:           cfg.InstanceID,
+		ShardLockTTL:         cfg.ShardLockTTL,
+		ShutdownDrainTimeout: cfg.ShutdownDrainTimeout,
+		Logger:               logger,
 	})
 }
