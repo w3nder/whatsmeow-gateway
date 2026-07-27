@@ -17,7 +17,7 @@ type PairUpdate struct {
 	Err       error
 }
 
-type ClientFactory func(channelID string) (WAClient, error)
+type ClientFactory func(channelID string, jid *types.JID) (WAClient, error)
 
 type Manager struct {
 	factory ClientFactory
@@ -151,7 +151,7 @@ func (m *Manager) client(channelID string) (WAClient, error) {
 		return c, nil
 	}
 
-	c, err := m.factory(channelID)
+	c, err := m.factory(channelID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -167,6 +167,36 @@ func (m *Manager) client(channelID string) (WAClient, error) {
 
 	m.sessions[channelID] = c
 	return c, nil
+}
+
+func (m *Manager) Resume(ctx context.Context, channelID string, jid types.JID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, ok := m.sessions[channelID]; ok {
+		return nil
+	}
+
+	c, err := m.factory(channelID, &jid)
+	if err != nil {
+		return fmt.Errorf("session: resume device for channel %s: %w", channelID, err)
+	}
+
+	if err := c.Connect(); err != nil {
+		return fmt.Errorf("session: connect resumed channel %s: %w", channelID, err)
+	}
+
+	c.AddEventHandler(func(evt any) {
+		if _, ok := evt.(*events.LoggedOut); ok {
+			m.mu.Lock()
+			delete(m.sessions, channelID)
+			m.mu.Unlock()
+		}
+		m.dispatch(channelID, evt)
+	})
+
+	m.sessions[channelID] = c
+	return nil
 }
 
 func (m *Manager) dispatch(channelID string, evt any) {

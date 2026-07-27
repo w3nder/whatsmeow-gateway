@@ -20,7 +20,8 @@ type fakeWAClient struct {
 	qrItems    []whatsmeow.QRChannelItem
 	connectErr error
 
-	connectCalls int
+	connectCalls   int
+	qrChannelCalls int
 
 	sendResp  whatsmeow.SendResponse
 	sendErr   error
@@ -42,6 +43,7 @@ func newFakeWAClient() *fakeWAClient {
 
 func (f *fakeWAClient) QRChannel(ctx context.Context) (<-chan whatsmeow.QRChannelItem, error) {
 	f.mu.Lock()
+	f.qrChannelCalls++
 	items := f.qrItems
 	f.mu.Unlock()
 
@@ -114,6 +116,18 @@ func (f *fakeWAClient) sendCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.sendCalls
+}
+
+func (f *fakeWAClient) qrChannelCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.qrChannelCalls
+}
+
+func (f *fakeWAClient) connectCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.connectCalls
 }
 
 func (f *fakeWAClient) emit(evt any) {

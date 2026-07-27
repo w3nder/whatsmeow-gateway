@@ -19,7 +19,7 @@ func TestManagerPairEmitsQRThenSuccess(t *testing.T) {
 		whatsmeow.QRChannelSuccess,
 	}
 
-	mgr := session.NewManager(func(channelID string) (session.WAClient, error) {
+	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
 		return fake, nil
 	})
 
@@ -49,7 +49,7 @@ func TestManagerPairEmitsQRThenSuccess(t *testing.T) {
 
 func TestManagerDispatchesMessageEventWithChannelID(t *testing.T) {
 	fake := newFakeWAClient()
-	mgr := session.NewManager(func(channelID string) (session.WAClient, error) {
+	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
 		return fake, nil
 	})
 
@@ -85,7 +85,7 @@ func TestManagerDispatchesMessageEventWithChannelID(t *testing.T) {
 func TestManagerDropsSessionOnLoggedOut(t *testing.T) {
 	first := newFakeWAClient()
 	callCount := 0
-	mgr := session.NewManager(func(channelID string) (session.WAClient, error) {
+	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
 		callCount++
 		if callCount == 1 {
 			return first, nil
@@ -115,7 +115,7 @@ func TestManagerSendReturnsIDAndTimestamp(t *testing.T) {
 	ts := time.Now().Truncate(time.Second)
 	fake.sendResp = whatsmeow.SendResponse{ID: "msg-1", Timestamp: ts}
 
-	mgr := session.NewManager(func(channelID string) (session.WAClient, error) {
+	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
 		return fake, nil
 	})
 
@@ -135,6 +135,57 @@ func TestManagerSendReturnsIDAndTimestamp(t *testing.T) {
 	}
 }
 
+func TestManagerResumeConnectsWithoutQR(t *testing.T) {
+	fake := newFakeWAClient()
+
+	var factoryCalledWithJID *types.JID
+	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
+		factoryCalledWithJID = jid
+		return fake, nil
+	})
+
+	jid := types.NewJID("15551234567", types.DefaultUserServer)
+
+	if err := mgr.Resume(context.Background(), "channel-resume-1", jid); err != nil {
+		t.Fatalf("Resume failed: %v", err)
+	}
+
+	if factoryCalledWithJID == nil || *factoryCalledWithJID != jid {
+		t.Fatalf("expected the factory to be called with the stored jid %v, got %v", jid, factoryCalledWithJID)
+	}
+	if fake.connectCallCount() != 1 {
+		t.Fatalf("expected Connect called once, got %d", fake.connectCallCount())
+	}
+	if fake.qrChannelCallCount() != 0 {
+		t.Fatalf("expected no QR flow during Resume, got %d QRChannel calls", fake.qrChannelCallCount())
+	}
+}
+
+func TestManagerResumeRegistersSessionForSubsequentUse(t *testing.T) {
+	fake := newFakeWAClient()
+
+	factoryCalls := 0
+	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
+		factoryCalls++
+		return fake, nil
+	})
+
+	jid := types.NewJID("15551234567", types.DefaultUserServer)
+	if err := mgr.Resume(context.Background(), "channel-resume-2", jid); err != nil {
+		t.Fatalf("Resume failed: %v", err)
+	}
+	if factoryCalls != 1 {
+		t.Fatalf("expected factory called once during Resume, got %d", factoryCalls)
+	}
+
+	if err := mgr.EnsureConnected("channel-resume-2"); err != nil {
+		t.Fatalf("EnsureConnected after Resume failed: %v", err)
+	}
+	if factoryCalls != 1 {
+		t.Fatalf("expected EnsureConnected to reuse the resumed session, factory called %d times", factoryCalls)
+	}
+}
+
 func TestManagerPairGoroutineStopsOnContextCancel(t *testing.T) {
 	fake := newFakeWAClient()
 	fake.qrItems = []whatsmeow.QRChannelItem{
@@ -143,7 +194,7 @@ func TestManagerPairGoroutineStopsOnContextCancel(t *testing.T) {
 		whatsmeow.QRChannelSuccess,
 	}
 
-	mgr := session.NewManager(func(channelID string) (session.WAClient, error) {
+	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
 		return fake, nil
 	})
 

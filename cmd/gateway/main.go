@@ -19,6 +19,7 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/logging"
 	"github.com/w3nder/whatsmeow-gateway/internal/media"
 	"github.com/w3nder/whatsmeow-gateway/internal/ownership"
+	"github.com/w3nder/whatsmeow-gateway/internal/registry"
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
 	"github.com/w3nder/whatsmeow-gateway/internal/store"
 )
@@ -91,6 +92,12 @@ func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *
 	}
 	defer dedupeStore.Close()
 
+	registryStore, err := registry.Open(ctx, cfg.SessionDSN)
+	if err != nil {
+		return fmt.Errorf("main: open registry store: %w", err)
+	}
+	defer registryStore.Close()
+
 	mediaStore, err := media.NewS3Store(ctx, media.S3Config{
 		Bucket:          cfg.S3Bucket,
 		Region:          cfg.S3Region,
@@ -110,6 +117,7 @@ func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *
 		Manager:              manager,
 		Ownership:            ownershipStore,
 		Dedupe:               dedupeStore,
+		Registry:             registryStore,
 		MediaStore:           mediaStore,
 		InstanceID:           cfg.InstanceID,
 		ShardLockTTL:         cfg.ShardLockTTL,

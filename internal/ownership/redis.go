@@ -47,6 +47,10 @@ func NewStore(client *redis.Client, shardCount int) *Store {
 	return &Store{client: client, shardCount: shardCount}
 }
 
+func (s *Store) ShardCount() int {
+	return s.shardCount
+}
+
 func shardOwnerKey(shard int) string {
 	return fmt.Sprintf("%s%d", shardOwnerKeyPrefix, shard)
 }

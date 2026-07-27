@@ -8,6 +8,7 @@ import (
 
 	rabbitmq "github.com/rabbitmq/amqp091-go"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/types"
 
 	gatewayamqp "github.com/w3nder/whatsmeow-gateway/internal/amqp"
 	"github.com/w3nder/whatsmeow-gateway/internal/dedupe"
@@ -16,6 +17,7 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
 	"github.com/w3nder/whatsmeow-gateway/internal/media"
 	"github.com/w3nder/whatsmeow-gateway/internal/ownership"
+	"github.com/w3nder/whatsmeow-gateway/internal/registry"
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
 )
 
@@ -47,7 +49,7 @@ func TestGatewaySendHandlerDedupesRedeliveredCommand(t *testing.T) {
 	fake := newFakeWAClient()
 	fake.sendResp = whatsmeow.SendResponse{ID: expectedProviderID, Timestamp: time.Now().Truncate(time.Second)}
 
-	mgr := session.NewManager(func(channelID string) (session.WAClient, error) {
+	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
 		return fake, nil
 	})
 
@@ -70,6 +72,12 @@ func TestGatewaySendHandlerDedupesRedeliveredCommand(t *testing.T) {
 		t.Fatalf("dedupe.Open failed: %v", err)
 	}
 	t.Cleanup(dedupeStore.Close)
+
+	registryStore, err := registry.Open(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("registry.Open failed: %v", err)
+	}
+	t.Cleanup(registryStore.Close)
 
 	probeCh, err := conn.Channel()
 	if err != nil {
@@ -104,6 +112,7 @@ func TestGatewaySendHandlerDedupesRedeliveredCommand(t *testing.T) {
 			Manager:              mgr,
 			Ownership:            ownershipStore,
 			Dedupe:               dedupeStore,
+			Registry:             registryStore,
 			MediaStore:           mediaStore,
 			InstanceID:           instanceID,
 			ShardLockTTL:         30 * time.Second,

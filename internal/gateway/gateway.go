@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/dedupe"
 	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
 	"github.com/w3nder/whatsmeow-gateway/internal/ownership"
+	"github.com/w3nder/whatsmeow-gateway/internal/registry"
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
 	"github.com/w3nder/whatsmeow-gateway/internal/store"
 )
@@ -28,6 +30,7 @@ type Deps struct {
 	Manager              *session.Manager
 	Ownership            *ownership.Store
 	Dedupe               *dedupe.Store
+	Registry             *registry.Store
 	MediaStore           mapper.MediaStore
 	InstanceID           string
 	ShardLockTTL         time.Duration
@@ -41,6 +44,7 @@ type gateway struct {
 	manager              *session.Manager
 	ownership            *ownership.Store
 	dedupe               *dedupe.Store
+	registry             *registry.Store
 	mediaStore           mapper.MediaStore
 	instanceID           string
 	shardLockTTL         time.Duration
@@ -60,6 +64,7 @@ func Run(ctx context.Context, deps Deps) error {
 		manager:              deps.Manager,
 		ownership:            deps.Ownership,
 		dedupe:               deps.Dedupe,
+		registry:             deps.Registry,
 		mediaStore:           deps.MediaStore,
 		instanceID:           deps.InstanceID,
 		shardLockTTL:         deps.ShardLockTTL,
@@ -78,6 +83,8 @@ func (g *gateway) run(ctx context.Context) error {
 	}
 
 	g.manager.OnEvent(g.handleSessionEvent)
+
+	g.resumeOwnedSessions(ctx)
 
 	if err := g.consumer.StartPair(ctx, g.PairHandler); err != nil {
 		g.closeConsumerForFailedBoot()
@@ -104,6 +111,37 @@ func (g *gateway) run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (g *gateway) resumeOwnedSessions(ctx context.Context) {
+	shardCount := g.ownership.ShardCount()
+	ownedShards := make([]int, shardCount)
+	for i := range ownedShards {
+		ownedShards[i] = i
+	}
+
+	sessions, err := g.registry.ForShards(ctx, ownedShards, func(channelID string) int {
+		return ownership.Shard(channelID, shardCount)
+	})
+	if err != nil {
+		g.logger.Error("gateway: list sessions to resume", "error", err)
+		return
+	}
+
+	for _, cs := range sessions {
+		jid, err := types.ParseJID(cs.JID)
+		if err != nil {
+			g.logger.Error("gateway: parse stored jid for resume", "channel_id", cs.ChannelID, "error", err)
+			continue
+		}
+
+		g.setTenant(cs.ChannelID, cs.TenantID)
+
+		if err := g.manager.Resume(ctx, cs.ChannelID, jid); err != nil {
+			g.logger.Error("gateway: resume session", "channel_id", cs.ChannelID, "error", err)
+			continue
+		}
+	}
 }
 
 func (g *gateway) closeConsumerForFailedBoot() {
@@ -143,6 +181,9 @@ func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand) error {
 			g.publishChannelError(ctx, cmd.TenantID, cmd.UserID, cmd.ChannelID, update.Err)
 			return fmt.Errorf("gateway: pair channel %s: %w", cmd.ChannelID, update.Err)
 		case update.Connected:
+			if err := g.persistSession(ctx, cmd.ChannelID, cmd.TenantID); err != nil {
+				return fmt.Errorf("gateway: persist session %s: %w", cmd.ChannelID, err)
+			}
 			if err := g.publisher.PublishChannelStatus(ctx, amqp.ChannelStatusEvent{
 				TenantID:  cmd.TenantID,
 				UserID:    cmd.UserID,
@@ -163,6 +204,23 @@ func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand) error {
 		}
 	}
 
+	return nil
+}
+
+func (g *gateway) persistSession(ctx context.Context, channelID, tenantID string) error {
+	client, err := g.waClientFor(channelID)
+	if err != nil {
+		return fmt.Errorf("resolve client: %w", err)
+	}
+
+	jid := client.DeviceJID()
+	if jid == nil {
+		return nil
+	}
+
+	if err := g.registry.Save(ctx, channelID, jid.String(), tenantID); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -292,8 +350,8 @@ func (g *gateway) clearTenant(channelID string) {
 }
 
 func NewWAClientFactory(container *sqlstore.Container, waLogger waLog.Logger) session.ClientFactory {
-	return func(channelID string) (session.WAClient, error) {
-		device, err := store.DeviceFor(context.Background(), container, nil)
+	return func(channelID string, jid *types.JID) (session.WAClient, error) {
+		device, err := store.DeviceFor(context.Background(), container, jid)
 		if err != nil {
 			return nil, fmt.Errorf("gateway: resolve device for channel %s: %w", channelID, err)
 		}

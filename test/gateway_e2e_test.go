@@ -23,6 +23,7 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
 	"github.com/w3nder/whatsmeow-gateway/internal/media"
 	"github.com/w3nder/whatsmeow-gateway/internal/ownership"
+	"github.com/w3nder/whatsmeow-gateway/internal/registry"
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
 	"github.com/w3nder/whatsmeow-gateway/internal/store"
 )
@@ -112,7 +113,7 @@ func TestGatewayPartialBootFailureClosesConsumerAndReleasesShards(t *testing.T) 
 		{Event: "code", Code: "leaked-consumer-qr"},
 		whatsmeow.QRChannelSuccess,
 	}
-	mgr := session.NewManager(func(channelID string) (session.WAClient, error) {
+	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
 		return fake, nil
 	})
 
@@ -129,6 +130,13 @@ func TestGatewayPartialBootFailureClosesConsumerAndReleasesShards(t *testing.T) 
 
 	_, logger := logging.New()
 
+	dsn := startPostgresForGateway(t)
+	registryStore, err := registry.Open(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("registry.Open failed: %v", err)
+	}
+	t.Cleanup(registryStore.Close)
+
 	const instanceID = "gateway-partial-boot-instance"
 
 	runCtx, runCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -139,6 +147,7 @@ func TestGatewayPartialBootFailureClosesConsumerAndReleasesShards(t *testing.T) 
 		Publisher:            publisher,
 		Manager:              mgr,
 		Ownership:            ownershipStore,
+		Registry:             registryStore,
 		MediaStore:           mediaStore,
 		InstanceID:           instanceID,
 		ShardLockTTL:         30 * time.Second,
@@ -231,7 +240,7 @@ func TestGatewayEndToEnd(t *testing.T) {
 	sentTS := time.Now().Truncate(time.Second)
 	fake.sendResp = whatsmeow.SendResponse{ID: "wamid.sent-1", Timestamp: sentTS}
 
-	mgr := session.NewManager(func(channelID string) (session.WAClient, error) {
+	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
 		return fake, nil
 	})
 
@@ -254,7 +263,7 @@ func TestGatewayEndToEnd(t *testing.T) {
 		t.Fatalf("store.Open failed: %v", err)
 	}
 	factory := gateway.NewWAClientFactory(sessionContainer, waLogger)
-	if _, err := factory("structural-check-channel"); err != nil {
+	if _, err := factory("structural-check-channel", nil); err != nil {
 		t.Fatalf("gateway.NewWAClientFactory-produced factory failed: %v", err)
 	}
 
@@ -263,6 +272,12 @@ func TestGatewayEndToEnd(t *testing.T) {
 		t.Fatalf("dedupe.Open failed: %v", err)
 	}
 	t.Cleanup(dedupeStore.Close)
+
+	registryStore, err := registry.Open(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("registry.Open failed: %v", err)
+	}
+	t.Cleanup(registryStore.Close)
 
 	probeCh, err := conn.Channel()
 	if err != nil {
@@ -304,6 +319,7 @@ func TestGatewayEndToEnd(t *testing.T) {
 			Manager:              mgr,
 			Ownership:            ownershipStore,
 			Dedupe:               dedupeStore,
+			Registry:             registryStore,
 			MediaStore:           mediaStore,
 			InstanceID:           instanceID,
 			ShardLockTTL:         30 * time.Second,
