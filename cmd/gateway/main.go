@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/joho/godotenv"
 	rabbitmq "github.com/rabbitmq/amqp091-go"
 	goredis "github.com/redis/go-redis/v9"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -25,6 +26,8 @@ import (
 )
 
 func main() {
+	_ = godotenv.Load()
+
 	cfg, err := config.Load()
 	if err != nil {
 		_, _ = os.Stderr.WriteString(err.Error() + "\n")
