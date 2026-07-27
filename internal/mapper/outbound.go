@@ -55,12 +55,15 @@ func buildText(cmd amqp.GatewaySendCommand) *waE2E.Message {
 	return &waE2E.Message{
 		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
 			Text:        proto.String(cmd.Text),
-			ContextInfo: replyContextInfo(cmd.ReplyTo),
+			ContextInfo: contextInfoFor(cmd.ReplyTo),
 		},
 	}
 }
 
-func replyContextInfo(replyTo *amqp.ReplyToPayload) *waE2E.ContextInfo {
+func contextInfoFor(replyTo *amqp.ReplyToPayload) *waE2E.ContextInfo {
+	if replyTo == nil {
+		return nil
+	}
 	ctxInfo := &waE2E.ContextInfo{StanzaID: proto.String(replyTo.ProviderMessageID)}
 	if replyTo.ParticipantJID != "" {
 		ctxInfo.Participant = proto.String(replyTo.ParticipantJID)
@@ -83,6 +86,8 @@ func buildMedia(ctx context.Context, up Uploader, fetch MediaFetcher, cmd amqp.G
 		return nil, fmt.Errorf("mapper: upload media: %w", err)
 	}
 
+	ctxInfo := contextInfoFor(cmd.ReplyTo)
+
 	switch cmd.Type {
 	case "image":
 		return &waE2E.Message{
@@ -95,6 +100,7 @@ func buildMedia(ctx context.Context, up Uploader, fetch MediaFetcher, cmd amqp.G
 				FileSHA256:    resp.FileSHA256,
 				FileLength:    proto.Uint64(resp.FileLength),
 				Caption:       optionalString(cmd.Text),
+				ContextInfo:   ctxInfo,
 			},
 		}, nil
 	case "video":
@@ -108,6 +114,7 @@ func buildMedia(ctx context.Context, up Uploader, fetch MediaFetcher, cmd amqp.G
 				FileSHA256:    resp.FileSHA256,
 				FileLength:    proto.Uint64(resp.FileLength),
 				Caption:       optionalString(cmd.Text),
+				ContextInfo:   ctxInfo,
 			},
 		}, nil
 	case "audio":
@@ -120,6 +127,7 @@ func buildMedia(ctx context.Context, up Uploader, fetch MediaFetcher, cmd amqp.G
 				FileEncSHA256: resp.FileEncSHA256,
 				FileSHA256:    resp.FileSHA256,
 				FileLength:    proto.Uint64(resp.FileLength),
+				ContextInfo:   ctxInfo,
 			},
 		}, nil
 	default:
@@ -134,6 +142,7 @@ func buildMedia(ctx context.Context, up Uploader, fetch MediaFetcher, cmd amqp.G
 				FileLength:    proto.Uint64(resp.FileLength),
 				FileName:      optionalString(cmd.Media.Filename),
 				Caption:       optionalString(cmd.Text),
+				ContextInfo:   ctxInfo,
 			},
 		}, nil
 	}
@@ -149,6 +158,7 @@ func buildLocation(cmd amqp.GatewaySendCommand) (*waE2E.Message, error) {
 			DegreesLongitude: proto.Float64(cmd.Location.Lng),
 			Name:             optionalString(cmd.Location.Name),
 			Address:          optionalString(cmd.Location.Address),
+			ContextInfo:      contextInfoFor(cmd.ReplyTo),
 		},
 	}, nil
 }
@@ -159,7 +169,9 @@ func buildContacts(cmd amqp.GatewaySendCommand) (*waE2E.Message, error) {
 	}
 
 	if len(cmd.Contacts) == 1 {
-		return &waE2E.Message{ContactMessage: contactMessage(cmd.Contacts[0])}, nil
+		msg := contactMessage(cmd.Contacts[0])
+		msg.ContextInfo = contextInfoFor(cmd.ReplyTo)
+		return &waE2E.Message{ContactMessage: msg}, nil
 	}
 
 	contacts := make([]*waE2E.ContactMessage, len(cmd.Contacts))
@@ -167,7 +179,10 @@ func buildContacts(cmd amqp.GatewaySendCommand) (*waE2E.Message, error) {
 		contacts[i] = contactMessage(c)
 	}
 	return &waE2E.Message{
-		ContactsArrayMessage: &waE2E.ContactsArrayMessage{Contacts: contacts},
+		ContactsArrayMessage: &waE2E.ContactsArrayMessage{
+			Contacts:    contacts,
+			ContextInfo: contextInfoFor(cmd.ReplyTo),
+		},
 	}, nil
 }
 

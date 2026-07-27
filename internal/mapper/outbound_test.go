@@ -130,6 +130,36 @@ func TestBuildOutboundImage(t *testing.T) {
 	}
 }
 
+func TestBuildOutboundImageReply(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{
+		To:   "5511999999999",
+		Type: "image",
+		Media: &amqp.MediaPayload{
+			URL:  "https://s3.example/media.jpg",
+			Mime: "image/jpeg",
+		},
+		ReplyTo: &amqp.ReplyToPayload{
+			ProviderMessageID: "wamid.quoted-image",
+			ParticipantJID:    "5511888888888@s.whatsapp.net",
+		},
+	}
+
+	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{resp: stubUploadResponse}, cmd, stubFetch([]byte("bytes"), nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	img := msg.GetImageMessage()
+	if img == nil {
+		t.Fatalf("expected ImageMessage, got %+v", msg)
+	}
+	if img.GetContextInfo().GetStanzaID() != "wamid.quoted-image" {
+		t.Fatalf("expected ContextInfo.StanzaID=wamid.quoted-image, got %q", img.GetContextInfo().GetStanzaID())
+	}
+	if img.GetContextInfo().GetParticipant() != "5511888888888@s.whatsapp.net" {
+		t.Fatalf("expected ContextInfo.Participant, got %q", img.GetContextInfo().GetParticipant())
+	}
+}
+
 func TestBuildOutboundVideo(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{
 		To:   "5511999999999",
@@ -288,6 +318,30 @@ func TestBuildOutboundLocation(t *testing.T) {
 	}
 	if loc.GetName() != "Sender HQ" || loc.GetAddress() != "Av. Paulista, 1000" {
 		t.Fatalf("expected name/address, got %+v", loc)
+	}
+}
+
+func TestBuildOutboundLocationReply(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{
+		To:   "5511999999999",
+		Type: "location",
+		Location: &amqp.LocationPayload{
+			Lat: -23.55052,
+			Lng: -46.633308,
+		},
+		ReplyTo: &amqp.ReplyToPayload{ProviderMessageID: "wamid.quoted-location"},
+	}
+
+	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	loc := msg.GetLocationMessage()
+	if loc == nil {
+		t.Fatalf("expected LocationMessage, got %+v", msg)
+	}
+	if loc.GetContextInfo().GetStanzaID() != "wamid.quoted-location" {
+		t.Fatalf("expected ContextInfo.StanzaID=wamid.quoted-location, got %q", loc.GetContextInfo().GetStanzaID())
 	}
 }
 
