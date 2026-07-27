@@ -79,10 +79,17 @@ type InboundEvent struct {
 	Reaction          *InboundReaction `json:"reaction,omitempty"`
 }
 
+type StatusError struct {
+	Code   string `json:"code"`
+	Reason string `json:"reason,omitempty"`
+}
+
 type StatusEvent struct {
-	ProviderMessageID string `json:"providerMessageId"`
-	Status            string `json:"status"`
-	Timestamp         string `json:"timestamp"`
+	ProviderMessageID string       `json:"providerMessageId"`
+	OpaqueMessageID   string       `json:"opaqueMessageId,omitempty"`
+	Status            string       `json:"status"`
+	Timestamp         string       `json:"timestamp"`
+	Error             *StatusError `json:"error,omitempty"`
 }
 
 func BuildInbound(ctx context.Context, dl Downloader, s3 MediaStore, channelID, tenantID string, evt *events.Message) (InboundEvent, error) {
