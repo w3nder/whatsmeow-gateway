@@ -52,17 +52,23 @@ func shardOwnerKey(shard int) string {
 }
 
 func (s *Store) Claim(ctx context.Context, shard int, instanceID string, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		return false, fmt.Errorf("claim shard %d: ttl must be positive", shard)
+	}
 	res, err := s.client.Eval(ctx, claimScript, []string{shardOwnerKey(shard)}, instanceID, ttl.Milliseconds()).Result()
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("claim shard %d: %w", shard, err)
 	}
 	return res.(int64) == 1, nil
 }
 
 func (s *Store) Renew(ctx context.Context, shard int, instanceID string, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		return false, fmt.Errorf("renew shard %d: ttl must be positive", shard)
+	}
 	res, err := s.client.Eval(ctx, renewScript, []string{shardOwnerKey(shard)}, instanceID, ttl.Milliseconds()).Result()
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("renew shard %d: %w", shard, err)
 	}
 	return res.(int64) == 1, nil
 }
@@ -70,7 +76,7 @@ func (s *Store) Renew(ctx context.Context, shard int, instanceID string, ttl tim
 func (s *Store) Release(ctx context.Context, shard int, instanceID string) (bool, error) {
 	res, err := s.client.Eval(ctx, releaseScript, []string{shardOwnerKey(shard)}, instanceID).Result()
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("release shard %d: %w", shard, err)
 	}
 	return res.(int64) == 1, nil
 }

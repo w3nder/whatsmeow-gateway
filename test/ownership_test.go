@@ -78,6 +78,20 @@ func TestStoreClaimSucceedsOnce(t *testing.T) {
 	}
 }
 
+func TestStoreClaimWithNonPositiveTTLReturnsError(t *testing.T) {
+	client := startRedis(t)
+	store := ownership.NewStore(client, 1024)
+	ctx := context.Background()
+
+	ok, err := store.Claim(ctx, 5, "instance-a", 0)
+	if err == nil {
+		t.Fatal("expected Claim with ttl=0 to return an error")
+	}
+	if ok {
+		t.Fatal("expected Claim with ttl=0 to return false")
+	}
+}
+
 func TestStoreClaimByDifferentInstanceFailsWhileHeld(t *testing.T) {
 	client := startRedis(t)
 	store := ownership.NewStore(client, 1024)
