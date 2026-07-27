@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -46,10 +48,15 @@ func DeterministicProviderID(messageID string) string {
 }
 
 func (s *Store) Begin(ctx context.Context, messageID, providerID string) (bool, string, error) {
-	if _, err := s.pool.Exec(ctx,
-		`INSERT INTO gateway_sent_messages (message_id, provider_message_id, status) VALUES ($1, $2, $3) ON CONFLICT (message_id) DO NOTHING`,
+	var claimed string
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO gateway_sent_messages (message_id, provider_message_id, status) VALUES ($1, $2, $3) ON CONFLICT (message_id) DO NOTHING RETURNING message_id`,
 		messageID, providerID, statusPending,
-	); err != nil {
+	).Scan(&claimed)
+	if err == nil {
+		return false, providerID, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return false, "", fmt.Errorf("dedupe: begin %s: %w", messageID, err)
 	}
 

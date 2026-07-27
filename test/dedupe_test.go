@@ -31,6 +31,41 @@ func TestDedupeStoreBeginInsertsPendingRow(t *testing.T) {
 	}
 }
 
+func TestDedupeStoreBeginClaimsAtomicallyOnFirstCall(t *testing.T) {
+	dsn := startPostgresForGateway(t)
+	ctx := context.Background()
+
+	store, err := dedupe.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("dedupe.Open failed: %v", err)
+	}
+	t.Cleanup(store.Close)
+
+	providerID := dedupe.DeterministicProviderID("msg-atomic-1")
+
+	firstAlreadySent, firstProviderID, err := store.Begin(ctx, "msg-atomic-1", providerID)
+	if err != nil {
+		t.Fatalf("first Begin failed: %v", err)
+	}
+	if firstAlreadySent {
+		t.Fatal("expected the first Begin to atomically claim the row via INSERT ... RETURNING, got alreadySent=true")
+	}
+	if firstProviderID != providerID {
+		t.Fatalf("expected the claiming Begin to report providerID %q, got %q", providerID, firstProviderID)
+	}
+
+	secondAlreadySent, secondProviderID, err := store.Begin(ctx, "msg-atomic-1", providerID)
+	if err != nil {
+		t.Fatalf("second Begin failed: %v", err)
+	}
+	if secondAlreadySent {
+		t.Fatal("expected the second Begin (row still pending, no MarkSent yet) to fall back to the SELECT path and report alreadySent=false")
+	}
+	if secondProviderID != providerID {
+		t.Fatalf("expected the SELECT fallback to report providerID %q, got %q", providerID, secondProviderID)
+	}
+}
+
 func TestDedupeStoreBeginBeforeMarkSentIsNotAlreadySent(t *testing.T) {
 	dsn := startPostgresForGateway(t)
 	ctx := context.Background()
