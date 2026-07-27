@@ -3,7 +3,6 @@ package mapper
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -20,7 +19,13 @@ type Uploader interface {
 type MediaFetcher func(ctx context.Context, url string) ([]byte, error)
 
 func BuildOutbound(ctx context.Context, up Uploader, cmd amqp.GatewaySendCommand, fetch MediaFetcher) (types.JID, *waE2E.Message, error) {
-	to := types.NewJID(strings.TrimPrefix(cmd.To, "+"), types.DefaultUserServer)
+	to, err := types.ParseJID(cmd.To)
+	if err != nil {
+		return types.JID{}, nil, fmt.Errorf("mapper: parse recipient jid %q: %w", cmd.To, err)
+	}
+	if to.User == "" {
+		return types.JID{}, nil, fmt.Errorf("mapper: invalid recipient jid %q", cmd.To)
+	}
 
 	switch cmd.Type {
 	case "text":

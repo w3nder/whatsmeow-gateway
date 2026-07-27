@@ -36,14 +36,14 @@ func stubFetch(data []byte, err error) mapper.MediaFetcher {
 	}
 }
 
-func TestBuildOutboundText(t *testing.T) {
-	cmd := amqp.GatewaySendCommand{To: "5511999999999", Type: "text", Text: "hello"}
+func TestBuildOutboundTextAddressesByPhoneJID(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Type: "text", Text: "hello"}
 
 	to, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
-	if to != types.NewJID("5511999999999", types.DefaultUserServer) {
+	if to.Server != types.DefaultUserServer || to.User != "5511999" {
 		t.Fatalf("unexpected JID: %v", to)
 	}
 	if msg.GetConversation() != "hello" {
@@ -51,21 +51,33 @@ func TestBuildOutboundText(t *testing.T) {
 	}
 }
 
-func TestBuildOutboundTextStripsLeadingPlus(t *testing.T) {
-	cmd := amqp.GatewaySendCommand{To: "+5511999999999", Type: "text", Text: "hello"}
+func TestBuildOutboundTextAddressesByLIDJID(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{To: "173907587899617@lid", Type: "text", Text: "hello"}
 
-	to, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	to, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
-	if to != types.NewJID("5511999999999", types.DefaultUserServer) {
+	if to.Server != types.HiddenUserServer || to.User != "173907587899617" {
 		t.Fatalf("unexpected JID: %v", to)
+	}
+	if msg.GetConversation() != "hello" {
+		t.Fatalf("expected Conversation=hello, got %q", msg.GetConversation())
+	}
+}
+
+func TestBuildOutboundRejectsBareNumberRecipient(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{To: "5511999999999", Type: "text", Text: "hello"}
+
+	_, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	if err == nil {
+		t.Fatal("expected error for bare number recipient without JID server")
 	}
 }
 
 func TestBuildOutboundTextReply(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{
-		To:   "5511999999999",
+		To:   "5511999999999@s.whatsapp.net",
 		Type: "text",
 		Text: "hello again",
 		ReplyTo: &amqp.ReplyToPayload{
@@ -96,7 +108,7 @@ func TestBuildOutboundTextReply(t *testing.T) {
 
 func TestBuildOutboundImage(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{
-		To:   "5511999999999",
+		To:   "5511999999999@s.whatsapp.net",
 		Type: "image",
 		Text: "a caption",
 		Media: &amqp.MediaPayload{
@@ -132,7 +144,7 @@ func TestBuildOutboundImage(t *testing.T) {
 
 func TestBuildOutboundImageReply(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{
-		To:   "5511999999999",
+		To:   "5511999999999@s.whatsapp.net",
 		Type: "image",
 		Media: &amqp.MediaPayload{
 			URL:  "https://s3.example/media.jpg",
@@ -162,7 +174,7 @@ func TestBuildOutboundImageReply(t *testing.T) {
 
 func TestBuildOutboundVideo(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{
-		To:   "5511999999999",
+		To:   "5511999999999@s.whatsapp.net",
 		Type: "video",
 		Text: "a video caption",
 		Media: &amqp.MediaPayload{
@@ -195,7 +207,7 @@ func TestBuildOutboundVideo(t *testing.T) {
 
 func TestBuildOutboundAudio(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{
-		To:   "5511999999999",
+		To:   "5511999999999@s.whatsapp.net",
 		Type: "audio",
 		Media: &amqp.MediaPayload{
 			URL:  "https://s3.example/media.ogg",
@@ -224,7 +236,7 @@ func TestBuildOutboundAudio(t *testing.T) {
 
 func TestBuildOutboundDocument(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{
-		To:   "5511999999999",
+		To:   "5511999999999@s.whatsapp.net",
 		Type: "document",
 		Text: "doc caption",
 		Media: &amqp.MediaPayload{
@@ -258,7 +270,7 @@ func TestBuildOutboundDocument(t *testing.T) {
 
 func TestBuildOutboundMediaFetchError(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{
-		To:    "5511999999999",
+		To:    "5511999999999@s.whatsapp.net",
 		Type:  "image",
 		Media: &amqp.MediaPayload{URL: "https://s3.example/media.jpg", Mime: "image/jpeg"},
 	}
@@ -272,7 +284,7 @@ func TestBuildOutboundMediaFetchError(t *testing.T) {
 
 func TestBuildOutboundMediaUploadError(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{
-		To:    "5511999999999",
+		To:    "5511999999999@s.whatsapp.net",
 		Type:  "image",
 		Media: &amqp.MediaPayload{URL: "https://s3.example/media.jpg", Mime: "image/jpeg"},
 	}
@@ -285,7 +297,7 @@ func TestBuildOutboundMediaUploadError(t *testing.T) {
 }
 
 func TestBuildOutboundMediaMissingPayload(t *testing.T) {
-	cmd := amqp.GatewaySendCommand{To: "5511999999999", Type: "image"}
+	cmd := amqp.GatewaySendCommand{To: "5511999999999@s.whatsapp.net", Type: "image"}
 
 	_, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err == nil {
@@ -295,7 +307,7 @@ func TestBuildOutboundMediaMissingPayload(t *testing.T) {
 
 func TestBuildOutboundLocation(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{
-		To:   "5511999999999",
+		To:   "5511999999999@s.whatsapp.net",
 		Type: "location",
 		Location: &amqp.LocationPayload{
 			Lat:     -23.55052,
@@ -323,7 +335,7 @@ func TestBuildOutboundLocation(t *testing.T) {
 
 func TestBuildOutboundLocationReply(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{
-		To:   "5511999999999",
+		To:   "5511999999999@s.whatsapp.net",
 		Type: "location",
 		Location: &amqp.LocationPayload{
 			Lat: -23.55052,
@@ -346,7 +358,7 @@ func TestBuildOutboundLocationReply(t *testing.T) {
 }
 
 func TestBuildOutboundLocationMissingPayload(t *testing.T) {
-	cmd := amqp.GatewaySendCommand{To: "5511999999999", Type: "location"}
+	cmd := amqp.GatewaySendCommand{To: "5511999999999@s.whatsapp.net", Type: "location"}
 
 	_, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err == nil {
@@ -356,7 +368,7 @@ func TestBuildOutboundLocationMissingPayload(t *testing.T) {
 
 func TestBuildOutboundSingleContact(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{
-		To:   "5511999999999",
+		To:   "5511999999999@s.whatsapp.net",
 		Type: "contacts",
 		Contacts: []amqp.ContactPayload{
 			{Name: "Jane Doe", Vcard: "BEGIN:VCARD\nVERSION:3.0\nFN:Jane Doe\nEND:VCARD"},
@@ -381,7 +393,7 @@ func TestBuildOutboundSingleContact(t *testing.T) {
 
 func TestBuildOutboundMultipleContacts(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{
-		To:   "5511999999999",
+		To:   "5511999999999@s.whatsapp.net",
 		Type: "contacts",
 		Contacts: []amqp.ContactPayload{
 			{Name: "Jane Doe", Vcard: "BEGIN:VCARD\nFN:Jane Doe\nEND:VCARD"},
@@ -406,7 +418,7 @@ func TestBuildOutboundMultipleContacts(t *testing.T) {
 }
 
 func TestBuildOutboundContactsMissingPayload(t *testing.T) {
-	cmd := amqp.GatewaySendCommand{To: "5511999999999", Type: "contacts"}
+	cmd := amqp.GatewaySendCommand{To: "5511999999999@s.whatsapp.net", Type: "contacts"}
 
 	_, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err == nil {
@@ -415,7 +427,7 @@ func TestBuildOutboundContactsMissingPayload(t *testing.T) {
 }
 
 func TestBuildOutboundUnknownType(t *testing.T) {
-	cmd := amqp.GatewaySendCommand{To: "5511999999999", Type: "sticker"}
+	cmd := amqp.GatewaySendCommand{To: "5511999999999@s.whatsapp.net", Type: "sticker"}
 
 	_, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err == nil {
