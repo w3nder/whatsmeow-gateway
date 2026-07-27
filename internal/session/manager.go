@@ -113,12 +113,12 @@ func (m *Manager) EnsureConnected(channelID string) error {
 	return client.Connect()
 }
 
-func (m *Manager) Send(ctx context.Context, channelID string, to types.JID, msg *waE2E.Message) (string, time.Time, error) {
+func (m *Manager) Send(ctx context.Context, channelID string, to types.JID, msg *waE2E.Message, id string) (string, time.Time, error) {
 	client, err := m.client(channelID)
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	resp, err := client.SendMessage(ctx, to, msg)
+	resp, err := client.SendMessage(ctx, to, msg, id)
 	if err != nil {
 		return "", time.Time{}, err
 	}

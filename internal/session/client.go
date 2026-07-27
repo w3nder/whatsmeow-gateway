@@ -15,7 +15,7 @@ type WAClient interface {
 	Connect() error
 	IsLoggedIn() bool
 	DeviceJID() *types.JID
-	SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message) (whatsmeow.SendResponse, error)
+	SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID) (whatsmeow.SendResponse, error)
 	Upload(ctx context.Context, data []byte, mt whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
 	AddEventHandler(handler func(any)) uint32
@@ -48,8 +48,8 @@ func (w *waClient) DeviceJID() *types.JID {
 	return w.client.Store.ID
 }
 
-func (w *waClient) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message) (whatsmeow.SendResponse, error) {
-	return w.client.SendMessage(ctx, to, msg)
+func (w *waClient) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID) (whatsmeow.SendResponse, error) {
+	return w.client.SendMessage(ctx, to, msg, whatsmeow.SendRequestExtra{ID: id})
 }
 
 func (w *waClient) Upload(ctx context.Context, data []byte, mt whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {

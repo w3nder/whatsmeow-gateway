@@ -14,6 +14,7 @@ import (
 
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
 	"github.com/w3nder/whatsmeow-gateway/internal/config"
+	"github.com/w3nder/whatsmeow-gateway/internal/dedupe"
 	"github.com/w3nder/whatsmeow-gateway/internal/gateway"
 	"github.com/w3nder/whatsmeow-gateway/internal/logging"
 	"github.com/w3nder/whatsmeow-gateway/internal/media"
@@ -84,6 +85,12 @@ func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *
 		return fmt.Errorf("main: open session store: %w", err)
 	}
 
+	dedupeStore, err := dedupe.Open(ctx, cfg.SessionDSN)
+	if err != nil {
+		return fmt.Errorf("main: open dedupe store: %w", err)
+	}
+	defer dedupeStore.Close()
+
 	mediaStore, err := media.NewS3Store(ctx, media.S3Config{
 		Bucket:          cfg.S3Bucket,
 		Region:          cfg.S3Region,
@@ -102,6 +109,7 @@ func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *
 		Publisher:            publisher,
 		Manager:              manager,
 		Ownership:            ownershipStore,
+		Dedupe:               dedupeStore,
 		MediaStore:           mediaStore,
 		InstanceID:           cfg.InstanceID,
 		ShardLockTTL:         cfg.ShardLockTTL,

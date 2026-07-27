@@ -15,6 +15,7 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
+	"github.com/w3nder/whatsmeow-gateway/internal/dedupe"
 	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
 	"github.com/w3nder/whatsmeow-gateway/internal/ownership"
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
@@ -26,6 +27,7 @@ type Deps struct {
 	Publisher            *amqp.Publisher
 	Manager              *session.Manager
 	Ownership            *ownership.Store
+	Dedupe               *dedupe.Store
 	MediaStore           mapper.MediaStore
 	InstanceID           string
 	ShardLockTTL         time.Duration
@@ -38,6 +40,7 @@ type gateway struct {
 	publisher            *amqp.Publisher
 	manager              *session.Manager
 	ownership            *ownership.Store
+	dedupe               *dedupe.Store
 	mediaStore           mapper.MediaStore
 	instanceID           string
 	shardLockTTL         time.Duration
@@ -56,6 +59,7 @@ func Run(ctx context.Context, deps Deps) error {
 		publisher:            deps.Publisher,
 		manager:              deps.Manager,
 		ownership:            deps.Ownership,
+		dedupe:               deps.Dedupe,
 		mediaStore:           deps.MediaStore,
 		instanceID:           deps.InstanceID,
 		shardLockTTL:         deps.ShardLockTTL,
@@ -177,6 +181,23 @@ func (g *gateway) publishChannelError(ctx context.Context, tenantID, userID, cha
 func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) error {
 	g.setTenant(cmd.ChannelID, cmd.TenantID)
 
+	providerID := dedupe.DeterministicProviderID(cmd.MessageID)
+
+	alreadySent, existingProviderID, err := g.dedupe.Begin(ctx, cmd.MessageID, providerID)
+	if err != nil {
+		return fmt.Errorf("gateway: dedupe begin %s: %w", cmd.MessageID, err)
+	}
+	if alreadySent {
+		if err := g.publisher.PublishStatus(ctx, mapper.StatusEvent{
+			ProviderMessageID: existingProviderID,
+			Status:            "sent",
+			Timestamp:         strconv.FormatInt(time.Now().Unix(), 10),
+		}); err != nil {
+			return fmt.Errorf("gateway: publish sent status (dedup replay) %s: %w", cmd.MessageID, err)
+		}
+		return nil
+	}
+
 	if err := g.manager.EnsureConnected(cmd.ChannelID); err != nil {
 		return fmt.Errorf("gateway: ensure connected %s: %w", cmd.ChannelID, err)
 	}
@@ -191,9 +212,13 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 		return fmt.Errorf("gateway: build outbound %s: %w", cmd.MessageID, err)
 	}
 
-	id, ts, err := g.manager.Send(ctx, cmd.ChannelID, to, msg)
+	id, ts, err := g.manager.Send(ctx, cmd.ChannelID, to, msg, providerID)
 	if err != nil {
 		return fmt.Errorf("gateway: send %s: %w", cmd.MessageID, err)
+	}
+
+	if err := g.dedupe.MarkSent(ctx, cmd.MessageID); err != nil {
+		return fmt.Errorf("gateway: mark sent %s: %w", cmd.MessageID, err)
 	}
 
 	if err := g.publisher.PublishStatus(ctx, mapper.StatusEvent{

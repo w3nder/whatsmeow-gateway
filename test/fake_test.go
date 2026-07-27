@@ -27,6 +27,7 @@ type fakeWAClient struct {
 	sendCalls int
 	lastTo    types.JID
 	lastMsg   *waE2E.Message
+	lastID    types.MessageID
 
 	disconnectCalls int
 
@@ -72,12 +73,13 @@ func (f *fakeWAClient) DeviceJID() *types.JID {
 	return f.deviceJID
 }
 
-func (f *fakeWAClient) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message) (whatsmeow.SendResponse, error) {
+func (f *fakeWAClient) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID) (whatsmeow.SendResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sendCalls++
 	f.lastTo = to
 	f.lastMsg = msg
+	f.lastID = id
 	return f.sendResp, f.sendErr
 }
 

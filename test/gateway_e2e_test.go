@@ -17,6 +17,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	gatewayamqp "github.com/w3nder/whatsmeow-gateway/internal/amqp"
+	"github.com/w3nder/whatsmeow-gateway/internal/dedupe"
 	"github.com/w3nder/whatsmeow-gateway/internal/gateway"
 	"github.com/w3nder/whatsmeow-gateway/internal/logging"
 	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
@@ -257,6 +258,12 @@ func TestGatewayEndToEnd(t *testing.T) {
 		t.Fatalf("gateway.NewWAClientFactory-produced factory failed: %v", err)
 	}
 
+	dedupeStore, err := dedupe.Open(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("dedupe.Open failed: %v", err)
+	}
+	t.Cleanup(dedupeStore.Close)
+
 	probeCh, err := conn.Channel()
 	if err != nil {
 		t.Fatalf("failed to open probe channel: %v", err)
@@ -296,6 +303,7 @@ func TestGatewayEndToEnd(t *testing.T) {
 			Publisher:            publisher,
 			Manager:              mgr,
 			Ownership:            ownershipStore,
+			Dedupe:               dedupeStore,
 			MediaStore:           mediaStore,
 			InstanceID:           instanceID,
 			ShardLockTTL:         30 * time.Second,
@@ -376,6 +384,9 @@ func TestGatewayEndToEnd(t *testing.T) {
 	}
 	if fake.lastMsg.GetConversation() != "hello from e2e" {
 		t.Fatalf("expected fake to receive the outbound text message, got %+v", fake.lastMsg)
+	}
+	if wantID := dedupe.DeterministicProviderID(sendCmd.MessageID); fake.lastID != wantID {
+		t.Fatalf("expected SendMessage to be called with the deterministic id %q, got %q", wantID, fake.lastID)
 	}
 
 	inboundMsg := &events.Message{

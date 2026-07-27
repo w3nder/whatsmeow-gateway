@@ -120,7 +120,7 @@ func TestManagerSendReturnsIDAndTimestamp(t *testing.T) {
 	})
 
 	to := types.NewJID("15551234567", types.DefaultUserServer)
-	id, gotTS, err := mgr.Send(context.Background(), "channel-4", to, nil)
+	id, gotTS, err := mgr.Send(context.Background(), "channel-4", to, nil, "deterministic-id-1")
 	if err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}
@@ -129,6 +129,9 @@ func TestManagerSendReturnsIDAndTimestamp(t *testing.T) {
 	}
 	if !gotTS.Equal(ts) {
 		t.Fatalf("expected timestamp %v, got %v", ts, gotTS)
+	}
+	if fake.lastID != "deterministic-id-1" {
+		t.Fatalf("expected Send to pass the explicit id through to WAClient.SendMessage, got %q", fake.lastID)
 	}
 }
 
