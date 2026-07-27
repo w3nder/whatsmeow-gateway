@@ -30,8 +30,8 @@ type InboundMedia struct {
 }
 
 type InboundLocation struct {
-	Latitude  float64 `json:"latitude,omitempty"`
-	Longitude float64 `json:"longitude,omitempty"`
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
 	Name      string  `json:"name,omitempty"`
 	Address   string  `json:"address,omitempty"`
 }
@@ -163,17 +163,31 @@ func BuildInbound(ctx context.Context, dl Downloader, s3 MediaStore, channelID, 
 	case msg.GetContactMessage() != nil:
 		contact := msg.GetContactMessage()
 		out.Type = "contacts"
-		out.Contacts = []InboundContact{{
-			Name:  &InboundContactName{FormattedName: contact.GetDisplayName()},
-			Vcard: contact.GetVcard(),
-		}}
+		out.Contacts = []InboundContact{contactFrom(contact.GetDisplayName(), contact.GetVcard())}
 		out.ContextMessageID = contact.GetContextInfo().GetStanzaID()
+
+	case msg.GetContactsArrayMessage() != nil:
+		arr := msg.GetContactsArrayMessage()
+		out.Type = "contacts"
+		contacts := make([]InboundContact, 0, len(arr.GetContacts()))
+		for _, c := range arr.GetContacts() {
+			contacts = append(contacts, contactFrom(c.GetDisplayName(), c.GetVcard()))
+		}
+		out.Contacts = contacts
+		out.ContextMessageID = arr.GetContextInfo().GetStanzaID()
 
 	default:
 		return InboundEvent{}, fmt.Errorf("mapper: unsupported inbound message")
 	}
 
 	return out, nil
+}
+
+func contactFrom(displayName, vcard string) InboundContact {
+	return InboundContact{
+		Name:  &InboundContactName{FormattedName: displayName},
+		Vcard: vcard,
+	}
 }
 
 func downloadAndStore(ctx context.Context, dl Downloader, s3 MediaStore, tenantID, providerMessageID, mime string, msg whatsmeow.DownloadableMessage) (*InboundMedia, error) {
@@ -190,7 +204,7 @@ func downloadAndStore(ctx context.Context, dl Downloader, s3 MediaStore, tenantI
 	return &InboundMedia{Key: key, MimeType: mime}, nil
 }
 
-func BuildStatus(channelID, tenantID string, evt *events.Receipt) []StatusEvent {
+func BuildStatus(evt *events.Receipt) []StatusEvent {
 	status := statusFor(evt.Type)
 	if status == "" {
 		return nil

@@ -2,6 +2,7 @@ package mapper_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -301,6 +302,48 @@ func TestBuildInboundLocation(t *testing.T) {
 	}
 }
 
+func TestBuildInboundLocationZeroCoordinatesSurviveRoundTrip(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.location-2", "5511999999999"),
+		Message: &waE2E.Message{
+			LocationMessage: &waE2E.LocationMessage{
+				DegreesLatitude:  proto.Float64(0),
+				DegreesLongitude: proto.Float64(0),
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Location == nil {
+		t.Fatalf("expected Location, got nil")
+	}
+
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	location, ok := decoded["location"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected location object in JSON, got %v", decoded["location"])
+	}
+	if _, ok := location["latitude"]; !ok {
+		t.Fatalf("expected latitude field present in JSON even when 0, got %v", location)
+	}
+	if _, ok := location["longitude"]; !ok {
+		t.Fatalf("expected longitude field present in JSON even when 0, got %v", location)
+	}
+	if location["latitude"] != 0.0 || location["longitude"] != 0.0 {
+		t.Fatalf("expected latitude=0 longitude=0, got %v", location)
+	}
+}
+
 func TestBuildInboundContact(t *testing.T) {
 	evt := &events.Message{
 		Info: baseInfo("wamid.contact-1", "5511999999999"),
@@ -327,6 +370,44 @@ func TestBuildInboundContact(t *testing.T) {
 	}
 	if out.Contacts[0].Vcard == "" {
 		t.Fatalf("expected non-empty vcard")
+	}
+}
+
+func TestBuildInboundContactsArray(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.contacts-array-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ContactsArrayMessage: &waE2E.ContactsArrayMessage{
+				Contacts: []*waE2E.ContactMessage{
+					{DisplayName: proto.String("Jane Doe"), Vcard: proto.String("BEGIN:VCARD\nFN:Jane Doe\nEND:VCARD")},
+					{DisplayName: proto.String("John Roe"), Vcard: proto.String("BEGIN:VCARD\nFN:John Roe\nEND:VCARD")},
+				},
+				ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String("wamid.quoted-contacts")},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "contacts" {
+		t.Fatalf("expected Type=contacts, got %q", out.Type)
+	}
+	if len(out.Contacts) != 2 {
+		t.Fatalf("expected 2 contacts, got %d", len(out.Contacts))
+	}
+	if out.Contacts[0].Name == nil || out.Contacts[0].Name.FormattedName != "Jane Doe" {
+		t.Fatalf("expected first contact Jane Doe, got %+v", out.Contacts[0].Name)
+	}
+	if out.Contacts[1].Name == nil || out.Contacts[1].Name.FormattedName != "John Roe" {
+		t.Fatalf("expected second contact John Roe, got %+v", out.Contacts[1].Name)
+	}
+	if out.Contacts[0].Vcard == "" || out.Contacts[1].Vcard == "" {
+		t.Fatalf("expected non-empty vcards, got %+v", out.Contacts)
+	}
+	if out.ContextMessageID != "wamid.quoted-contacts" {
+		t.Fatalf("expected ContextMessageID=wamid.quoted-contacts, got %q", out.ContextMessageID)
 	}
 }
 
@@ -378,7 +459,7 @@ func TestBuildStatusDelivered(t *testing.T) {
 		Timestamp:  time.Unix(1700000100, 0),
 	}
 
-	out := mapper.BuildStatus("channel-1", "tenant-1", evt)
+	out := mapper.BuildStatus(evt)
 	if len(out) != 1 {
 		t.Fatalf("expected 1 status event, got %d", len(out))
 	}
@@ -400,7 +481,7 @@ func TestBuildStatusRead(t *testing.T) {
 		Timestamp:  time.Unix(1700000200, 0),
 	}
 
-	out := mapper.BuildStatus("channel-1", "tenant-1", evt)
+	out := mapper.BuildStatus(evt)
 	if len(out) != 1 || out[0].Status != "read" {
 		t.Fatalf("expected 1 read status event, got %+v", out)
 	}
@@ -413,7 +494,7 @@ func TestBuildStatusMultipleMessageIDs(t *testing.T) {
 		Timestamp:  time.Unix(1700000300, 0),
 	}
 
-	out := mapper.BuildStatus("channel-1", "tenant-1", evt)
+	out := mapper.BuildStatus(evt)
 	if len(out) != 3 {
 		t.Fatalf("expected 3 status events, got %d", len(out))
 	}
@@ -431,7 +512,7 @@ func TestBuildStatusUnmappedTypeReturnsEmpty(t *testing.T) {
 		Timestamp:  time.Unix(1700000400, 0),
 	}
 
-	out := mapper.BuildStatus("channel-1", "tenant-1", evt)
+	out := mapper.BuildStatus(evt)
 	if len(out) != 0 {
 		t.Fatalf("expected no status events for unmapped receipt type, got %+v", out)
 	}
