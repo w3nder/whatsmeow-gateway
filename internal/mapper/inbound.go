@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -126,7 +127,6 @@ type InboundRichContent struct {
 	Flow    string              `json:"flow,omitempty"`
 	Body    string              `json:"body,omitempty"`
 	Footer  string              `json:"footer,omitempty"`
-	Header  string              `json:"header,omitempty"`
 	Buttons []InboundRichButton `json:"buttons,omitempty"`
 	List    *InboundRichList    `json:"list,omitempty"`
 	Product *InboundRichProduct `json:"product,omitempty"`
@@ -731,10 +731,10 @@ func buildEventRich(em *waE2E.EventMessage) *InboundRichContent {
 		Canceled:    em.GetIsCanceled(),
 	}
 	if st := em.GetStartTime(); st != 0 {
-		event.StartTime = strconv.FormatInt(st, 10)
+		event.StartTime = time.Unix(st, 0).UTC().Format(time.RFC3339)
 	}
 	if et := em.GetEndTime(); et != 0 {
-		event.EndTime = strconv.FormatInt(et, 10)
+		event.EndTime = time.Unix(et, 0).UTC().Format(time.RFC3339)
 	}
 
 	return &InboundRichContent{Kind: "event", Event: event}

@@ -1668,7 +1668,7 @@ func TestBuildInboundEventMessage(t *testing.T) {
 	if event.Description != "Venha conhecer as novidades" {
 		t.Fatalf("unexpected description: %q", event.Description)
 	}
-	if event.StartTime != "1700000000" || event.EndTime != "1700003600" {
+	if event.StartTime != "2023-11-14T22:13:20Z" || event.EndTime != "2023-11-14T23:13:20Z" {
 		t.Fatalf("unexpected start/end time: %+v", event)
 	}
 	if event.Location != "Sede vectax" {
