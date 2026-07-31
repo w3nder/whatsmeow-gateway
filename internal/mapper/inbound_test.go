@@ -570,20 +570,28 @@ func TestBuildInboundReaction(t *testing.T) {
 
 func TestBuildInboundUnsupportedMessage(t *testing.T) {
 	evt := &events.Message{
-		Info:    baseInfo("wamid.unsupported-1", "5511999999999"),
-		Message: &waE2E.Message{},
+		Info: baseInfo("wamid.unsupported-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ProductMessage: &waE2E.ProductMessage{},
+		},
 	}
 
-	_, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
-	if err == nil {
-		t.Fatal("expected error for unsupported message")
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
 	}
-	if !errors.Is(err, mapper.ErrSkip) {
-		t.Fatalf("expected mapper.ErrSkip for an empty message, got %v", err)
+	if out.Type != "unsupported" {
+		t.Fatalf("expected Type=unsupported, got %q", out.Type)
+	}
+	if out.Unsupported == nil || out.Unsupported.Type == "" {
+		t.Fatalf("expected non-empty Unsupported.Type, got %+v", out.Unsupported)
+	}
+	if out.Unsupported.Type != "productMessage" {
+		t.Fatalf("expected Unsupported.Type=productMessage, got %q", out.Unsupported.Type)
 	}
 }
 
-func TestBuildInboundProtocolMessageIsSkipped(t *testing.T) {
+func TestBuildInboundProtocolMessageBecomesUnsupported(t *testing.T) {
 	evt := &events.Message{
 		Info: baseInfo("wamid.protocol-1", "5511999999999"),
 		Message: &waE2E.Message{
@@ -594,11 +602,14 @@ func TestBuildInboundProtocolMessageIsSkipped(t *testing.T) {
 	}
 
 	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
-	if !errors.Is(err, mapper.ErrSkip) {
-		t.Fatalf("expected mapper.ErrSkip for a protocolMessage, got %v", err)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
 	}
-	if out.Type != "" || out.Text != nil || out.Media != nil {
-		t.Fatalf("expected zero-value InboundEvent for a skipped message, got %+v", out)
+	if out.Type != "unsupported" {
+		t.Fatalf("expected Type=unsupported, got %q", out.Type)
+	}
+	if out.Unsupported == nil || out.Unsupported.Type != "protocolMessage" {
+		t.Fatalf("expected Unsupported.Type=protocolMessage, got %+v", out.Unsupported)
 	}
 }
 
@@ -805,21 +816,345 @@ func TestBuildInboundNestedEphemeralWrappingDocumentWithCaptionIsUnwrapped(t *te
 	}
 }
 
-func TestBuildInboundUnknownAfterUnwrapIsSkipped(t *testing.T) {
+func TestBuildInboundUnknownAfterUnwrapBecomesUnsupported(t *testing.T) {
 	evt := &events.Message{
 		Info: baseInfo("wamid.unknown-after-unwrap-1", "5511999999999"),
 		Message: &waE2E.Message{
 			EphemeralMessage: &waE2E.FutureProofMessage{
 				Message: &waE2E.Message{
-					StickerMessage: &waE2E.StickerMessage{Mimetype: proto.String("image/webp")},
+					ProductMessage: &waE2E.ProductMessage{},
 				},
 			},
 		},
 	}
 
-	_, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
-	if !errors.Is(err, mapper.ErrSkip) {
-		t.Fatalf("expected mapper.ErrSkip for an unknown message after unwrap, got %v", err)
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "unsupported" {
+		t.Fatalf("expected Type=unsupported, got %q", out.Type)
+	}
+	if out.Unsupported == nil || out.Unsupported.Type != "productMessage" {
+		t.Fatalf("expected Unsupported.Type=productMessage, got %+v", out.Unsupported)
+	}
+}
+
+func TestBuildInboundSticker(t *testing.T) {
+	dl := fakeDownloader{data: []byte("sticker bytes")}
+	store := &fakeMediaStore{}
+	evt := &events.Message{
+		Info: baseInfo("wamid.sticker-1", "5511999999999"),
+		Message: &waE2E.Message{
+			StickerMessage: &waE2E.StickerMessage{
+				Mimetype:    proto.String("image/webp"),
+				ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String("wamid.quoted-sticker")},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), dl, nil, store, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "sticker" {
+		t.Fatalf("expected Type=sticker, got %q", out.Type)
+	}
+	if out.Media == nil || out.Media.MimeType != "image/webp" {
+		t.Fatalf("unexpected media: %+v", out.Media)
+	}
+	if out.ContextMessageID != "wamid.quoted-sticker" {
+		t.Fatalf("expected ContextMessageID=wamid.quoted-sticker, got %q", out.ContextMessageID)
+	}
+	if len(store.puts) != 1 || string(store.puts[0].data) != "sticker bytes" {
+		t.Fatalf("expected sticker bytes stored, got %+v", store.puts)
+	}
+}
+
+func TestBuildInboundPtvMappedToVideo(t *testing.T) {
+	dl := fakeDownloader{data: []byte("ptv bytes")}
+	store := &fakeMediaStore{}
+	evt := &events.Message{
+		Info: baseInfo("wamid.ptv-1", "5511999999999"),
+		Message: &waE2E.Message{
+			PtvMessage: &waE2E.VideoMessage{
+				Mimetype: proto.String("video/mp4"),
+				Caption:  proto.String("a ptv"),
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), dl, nil, store, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "video" {
+		t.Fatalf("expected Type=video, got %q", out.Type)
+	}
+	if out.Media == nil || out.Media.MimeType != "video/mp4" || out.Media.Caption != "a ptv" {
+		t.Fatalf("unexpected media: %+v", out.Media)
+	}
+}
+
+func TestBuildInboundAudioPTTMappedToVoice(t *testing.T) {
+	dl := fakeDownloader{data: []byte("voice bytes")}
+	store := &fakeMediaStore{}
+	evt := &events.Message{
+		Info: baseInfo("wamid.voice-1", "5511999999999"),
+		Message: &waE2E.Message{
+			AudioMessage: &waE2E.AudioMessage{
+				Mimetype: proto.String("audio/ogg"),
+				PTT:      proto.Bool(true),
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), dl, nil, store, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "voice" {
+		t.Fatalf("expected Type=voice, got %q", out.Type)
+	}
+	if out.Media == nil || out.Media.MimeType != "audio/ogg" {
+		t.Fatalf("unexpected media: %+v", out.Media)
+	}
+}
+
+func TestBuildInboundAudioNonPTTMappedToAudio(t *testing.T) {
+	dl := fakeDownloader{data: []byte("audio bytes")}
+	store := &fakeMediaStore{}
+	evt := &events.Message{
+		Info: baseInfo("wamid.audio-2", "5511999999999"),
+		Message: &waE2E.Message{
+			AudioMessage: &waE2E.AudioMessage{
+				Mimetype: proto.String("audio/ogg"),
+				PTT:      proto.Bool(false),
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), dl, nil, store, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "audio" {
+		t.Fatalf("expected Type=audio, got %q", out.Type)
+	}
+}
+
+func TestBuildInboundLiveLocation(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.live-location-1", "5511999999999"),
+		Message: &waE2E.Message{
+			LiveLocationMessage: &waE2E.LiveLocationMessage{
+				DegreesLatitude:  proto.Float64(-23.55052),
+				DegreesLongitude: proto.Float64(-46.633308),
+				Caption:          proto.String("on the move"),
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "location" {
+		t.Fatalf("expected Type=location, got %q", out.Type)
+	}
+	if out.Location == nil || !out.Location.Live {
+		t.Fatalf("expected Location.Live=true, got %+v", out.Location)
+	}
+	if out.Location.Latitude != -23.55052 || out.Location.Longitude != -46.633308 {
+		t.Fatalf("unexpected lat/lng: %+v", out.Location)
+	}
+}
+
+func TestBuildInboundButtonsResponse(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.buttons-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ButtonsResponseMessage: &waE2E.ButtonsResponseMessage{
+				SelectedButtonID: proto.String("btn-1"),
+				Response: &waE2E.ButtonsResponseMessage_SelectedDisplayText{
+					SelectedDisplayText: "Yes please",
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "text" {
+		t.Fatalf("expected Type=text, got %q", out.Type)
+	}
+	if out.Text == nil || out.Text.Body != "Yes please" {
+		t.Fatalf("expected Text.Body='Yes please', got %+v", out.Text)
+	}
+}
+
+func TestBuildInboundButtonsResponseFallsBackToSelectedButtonID(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.buttons-2", "5511999999999"),
+		Message: &waE2E.Message{
+			ButtonsResponseMessage: &waE2E.ButtonsResponseMessage{
+				SelectedButtonID: proto.String("btn-1"),
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Text == nil || out.Text.Body != "btn-1" {
+		t.Fatalf("expected Text.Body='btn-1', got %+v", out.Text)
+	}
+}
+
+func TestBuildInboundListResponse(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.list-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ListResponseMessage: &waE2E.ListResponseMessage{
+				Title: proto.String("Option A"),
+				SingleSelectReply: &waE2E.ListResponseMessage_SingleSelectReply{
+					SelectedRowID: proto.String("row-a"),
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "text" {
+		t.Fatalf("expected Type=text, got %q", out.Type)
+	}
+	if out.Text == nil || out.Text.Body != "Option A" {
+		t.Fatalf("expected Text.Body='Option A', got %+v", out.Text)
+	}
+}
+
+func TestBuildInboundListResponseFallsBackToSelectedRowID(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.list-2", "5511999999999"),
+		Message: &waE2E.Message{
+			ListResponseMessage: &waE2E.ListResponseMessage{
+				SingleSelectReply: &waE2E.ListResponseMessage_SingleSelectReply{
+					SelectedRowID: proto.String("row-a"),
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Text == nil || out.Text.Body != "row-a" {
+		t.Fatalf("expected Text.Body='row-a', got %+v", out.Text)
+	}
+}
+
+func TestBuildInboundTemplateButtonReply(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.template-1", "5511999999999"),
+		Message: &waE2E.Message{
+			TemplateButtonReplyMessage: &waE2E.TemplateButtonReplyMessage{
+				SelectedID:          proto.String("tmpl-1"),
+				SelectedDisplayText: proto.String("Confirm"),
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "text" {
+		t.Fatalf("expected Type=text, got %q", out.Type)
+	}
+	if out.Text == nil || out.Text.Body != "Confirm" {
+		t.Fatalf("expected Text.Body='Confirm', got %+v", out.Text)
+	}
+}
+
+func TestBuildInboundInteractiveResponse(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.interactive-1", "5511999999999"),
+		Message: &waE2E.Message{
+			InteractiveResponseMessage: &waE2E.InteractiveResponseMessage{
+				InteractiveResponseMessage: &waE2E.InteractiveResponseMessage_NativeFlowResponseMessage_{
+					NativeFlowResponseMessage: &waE2E.InteractiveResponseMessage_NativeFlowResponseMessage{
+						Name:       proto.String("quick_reply"),
+						ParamsJSON: proto.String(`{"id":"opt-1"}`),
+					},
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "text" {
+		t.Fatalf("expected Type=text, got %q", out.Type)
+	}
+	if out.Text == nil || out.Text.Body != `{"id":"opt-1"}` {
+		t.Fatalf("expected Text.Body='{\"id\":\"opt-1\"}', got %+v", out.Text)
+	}
+}
+
+func TestBuildInboundPollCreation(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.poll-1", "5511999999999"),
+		Message: &waE2E.Message{
+			PollCreationMessage: &waE2E.PollCreationMessage{
+				Name: proto.String("Best pizza topping?"),
+				Options: []*waE2E.PollCreationMessage_Option{
+					{OptionName: proto.String("Cheese")},
+					{OptionName: proto.String("Pepperoni")},
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "text" {
+		t.Fatalf("expected Type=text, got %q", out.Type)
+	}
+	want := "📊 Best pizza topping? — Cheese, Pepperoni"
+	if out.Text == nil || out.Text.Body != want {
+		t.Fatalf("expected Text.Body=%q, got %+v", want, out.Text)
+	}
+}
+
+func TestBuildInboundPollCreationV2(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.poll-2", "5511999999999"),
+		Message: &waE2E.Message{
+			PollCreationMessageV2: &waE2E.PollCreationMessage{
+				Name:    proto.String("Meeting time?"),
+				Options: []*waE2E.PollCreationMessage_Option{{OptionName: proto.String("10am")}},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	want := "📊 Meeting time? — 10am"
+	if out.Text == nil || out.Text.Body != want {
+		t.Fatalf("expected Text.Body=%q, got %+v", want, out.Text)
 	}
 }
 

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
+	"strings"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -44,6 +46,7 @@ type InboundLocation struct {
 	Longitude float64 `json:"longitude"`
 	Name      string  `json:"name,omitempty"`
 	Address   string  `json:"address,omitempty"`
+	Live      bool    `json:"live,omitempty"`
 }
 
 type InboundContactName struct {
@@ -68,21 +71,26 @@ type InboundReaction struct {
 	Emoji     string `json:"emoji,omitempty"`
 }
 
+type InboundUnsupported struct {
+	Type string `json:"type,omitempty"`
+}
+
 type InboundEvent struct {
-	PhoneNumberID     string           `json:"phoneNumberId"`
-	From              string           `json:"from"`
-	SenderLid         string           `json:"senderLid,omitempty"`
-	SenderPn          string           `json:"senderPn,omitempty"`
-	ProfileName       string           `json:"profileName,omitempty"`
-	ProviderMessageID string           `json:"providerMessageId"`
-	Timestamp         string           `json:"timestamp"`
-	Type              string           `json:"type"`
-	Text              *InboundText     `json:"text,omitempty"`
-	Media             *InboundMedia    `json:"media,omitempty"`
-	Location          *InboundLocation `json:"location,omitempty"`
-	Contacts          []InboundContact `json:"contacts,omitempty"`
-	ContextMessageID  string           `json:"contextMessageId,omitempty"`
-	Reaction          *InboundReaction `json:"reaction,omitempty"`
+	PhoneNumberID     string              `json:"phoneNumberId"`
+	From              string              `json:"from"`
+	SenderLid         string              `json:"senderLid,omitempty"`
+	SenderPn          string              `json:"senderPn,omitempty"`
+	ProfileName       string              `json:"profileName,omitempty"`
+	ProviderMessageID string              `json:"providerMessageId"`
+	Timestamp         string              `json:"timestamp"`
+	Type              string              `json:"type"`
+	Text              *InboundText        `json:"text,omitempty"`
+	Media             *InboundMedia       `json:"media,omitempty"`
+	Location          *InboundLocation    `json:"location,omitempty"`
+	Contacts          []InboundContact    `json:"contacts,omitempty"`
+	ContextMessageID  string              `json:"contextMessageId,omitempty"`
+	Reaction          *InboundReaction    `json:"reaction,omitempty"`
+	Unsupported       *InboundUnsupported `json:"unsupported,omitempty"`
 }
 
 type StatusError struct {
@@ -160,7 +168,11 @@ func BuildInbound(ctx context.Context, dl Downloader, resolver PNResolver, s3 Me
 		if err != nil {
 			return InboundEvent{}, err
 		}
-		out.Type = "audio"
+		if audio.GetPTT() {
+			out.Type = "voice"
+		} else {
+			out.Type = "audio"
+		}
 		out.Media = media
 		out.ContextMessageID = audio.GetContextInfo().GetStanzaID()
 
@@ -203,8 +215,100 @@ func BuildInbound(ctx context.Context, dl Downloader, resolver PNResolver, s3 Me
 		out.Contacts = contacts
 		out.ContextMessageID = arr.GetContextInfo().GetStanzaID()
 
+	case msg.GetStickerMessage() != nil:
+		sticker := msg.GetStickerMessage()
+		media, err := downloadAndStore(ctx, dl, s3, tenantID, evt.Info.ID, sticker.GetMimetype(), sticker)
+		if err != nil {
+			return InboundEvent{}, err
+		}
+		out.Type = "sticker"
+		out.Media = media
+		out.ContextMessageID = sticker.GetContextInfo().GetStanzaID()
+
+	case msg.GetPtvMessage() != nil:
+		ptv := msg.GetPtvMessage()
+		media, err := downloadAndStore(ctx, dl, s3, tenantID, evt.Info.ID, ptv.GetMimetype(), ptv)
+		if err != nil {
+			return InboundEvent{}, err
+		}
+		media.Caption = ptv.GetCaption()
+		out.Type = "video"
+		out.Media = media
+		out.ContextMessageID = ptv.GetContextInfo().GetStanzaID()
+
+	case msg.GetLiveLocationMessage() != nil:
+		live := msg.GetLiveLocationMessage()
+		out.Type = "location"
+		out.Location = &InboundLocation{
+			Latitude:  live.GetDegreesLatitude(),
+			Longitude: live.GetDegreesLongitude(),
+			Name:      live.GetCaption(),
+			Live:      true,
+		}
+		out.ContextMessageID = live.GetContextInfo().GetStanzaID()
+
+	case msg.GetButtonsResponseMessage() != nil:
+		resp := msg.GetButtonsResponseMessage()
+		body := resp.GetSelectedDisplayText()
+		if body == "" {
+			body = resp.GetSelectedButtonID()
+		}
+		out.Type = "text"
+		out.Text = &InboundText{Body: body}
+		out.ContextMessageID = resp.GetContextInfo().GetStanzaID()
+
+	case msg.GetListResponseMessage() != nil:
+		resp := msg.GetListResponseMessage()
+		body := resp.GetTitle()
+		if body == "" {
+			body = resp.GetSingleSelectReply().GetSelectedRowID()
+		}
+		out.Type = "text"
+		out.Text = &InboundText{Body: body}
+		out.ContextMessageID = resp.GetContextInfo().GetStanzaID()
+
+	case msg.GetTemplateButtonReplyMessage() != nil:
+		resp := msg.GetTemplateButtonReplyMessage()
+		body := resp.GetSelectedDisplayText()
+		if body == "" {
+			body = resp.GetSelectedID()
+		}
+		out.Type = "text"
+		out.Text = &InboundText{Body: body}
+		out.ContextMessageID = resp.GetContextInfo().GetStanzaID()
+
+	case msg.GetInteractiveResponseMessage() != nil:
+		resp := msg.GetInteractiveResponseMessage()
+		body := resp.GetBody().GetText()
+		if body == "" {
+			body = resp.GetNativeFlowResponseMessage().GetParamsJSON()
+		}
+		if body == "" {
+			body = resp.GetNativeFlowResponseMessage().GetName()
+		}
+		out.Type = "text"
+		out.Text = &InboundText{Body: body}
+		out.ContextMessageID = resp.GetContextInfo().GetStanzaID()
+
+	case msg.GetPollCreationMessage() != nil, msg.GetPollCreationMessageV2() != nil, msg.GetPollCreationMessageV3() != nil:
+		poll := msg.GetPollCreationMessage()
+		if poll == nil {
+			poll = msg.GetPollCreationMessageV2()
+		}
+		if poll == nil {
+			poll = msg.GetPollCreationMessageV3()
+		}
+		out.Type = "text"
+		out.Text = &InboundText{Body: pollSummary(poll)}
+		out.ContextMessageID = poll.GetContextInfo().GetStanzaID()
+
 	default:
-		return InboundEvent{}, ErrSkip
+		content, found := detectContentField(msg)
+		if !found {
+			return InboundEvent{}, ErrSkip
+		}
+		out.Type = "unsupported"
+		out.Unsupported = &InboundUnsupported{Type: content}
 	}
 
 	return out, nil
@@ -250,6 +354,53 @@ func resolveSenderIdentifiers(ctx context.Context, resolver PNResolver, sender, 
 		senderPn = sender.User
 	}
 	return senderLid, senderPn
+}
+
+func pollSummary(poll *waE2E.PollCreationMessage) string {
+	options := make([]string, 0, len(poll.GetOptions()))
+	for _, opt := range poll.GetOptions() {
+		options = append(options, opt.GetOptionName())
+	}
+	return "📊 " + poll.GetName() + " — " + strings.Join(options, ", ")
+}
+
+var contentFieldIgnore = map[string]bool{
+	"SenderKeyDistributionMessage":               true,
+	"FastRatchetKeySenderKeyDistributionMessage": true,
+	"MessageContextInfo":                         true,
+}
+
+func detectContentField(msg *waE2E.Message) (string, bool) {
+	if msg == nil {
+		return "", false
+	}
+
+	v := reflect.ValueOf(msg).Elem()
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if !field.IsExported() || contentFieldIgnore[field.Name] {
+			continue
+		}
+		fv := v.Field(i)
+		if fv.Kind() != reflect.Ptr || fv.IsNil() {
+			continue
+		}
+		return jsonFieldName(field), true
+	}
+	return "", false
+}
+
+func jsonFieldName(field reflect.StructField) string {
+	tag := field.Tag.Get("json")
+	if tag == "" {
+		return field.Name
+	}
+	name := strings.Split(tag, ",")[0]
+	if name == "" {
+		return field.Name
+	}
+	return name
 }
 
 func contactFrom(displayName, vcard string) InboundContact {
