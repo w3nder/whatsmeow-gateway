@@ -28,6 +28,12 @@ func NewS3Store(ctx context.Context, cfg S3Config) (*S3Store, error) {
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
 		awsconfig.WithRegion(cfg.Region),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, "")),
+		// The SDK default (WhenSupported) sends PutObject bodies with
+		// `Content-Encoding: aws-chunked` and a trailing CRC32 checksum, which
+		// S3-compatible providers (e.g. Magalu Cloud) reject with
+		// `501 NotImplemented: AWS chunked encoding not supported`.
+		awsconfig.WithRequestChecksumCalculation(aws.RequestChecksumCalculationWhenRequired),
+		awsconfig.WithResponseChecksumValidation(aws.ResponseChecksumValidationWhenRequired),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("media: load aws config: %w", err)
