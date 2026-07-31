@@ -1902,6 +1902,181 @@ func TestBuildInboundEventMessageWithoutNameFallsBackToUnsupported(t *testing.T)
 	}
 }
 
+func TestBuildInboundRequestPaymentMessage(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.request-payment-1", "5511999999999"),
+		Message: &waE2E.Message{
+			RequestPaymentMessage: &waE2E.RequestPaymentMessage{
+				RequestFrom:         proto.String("5511988887777@s.whatsapp.net"),
+				CurrencyCodeIso4217: proto.String("BRL"),
+				Amount: &waE2E.Money{
+					Value:        proto.Int64(5000),
+					Offset:       proto.Uint32(2),
+					CurrencyCode: proto.String("BRL"),
+				},
+				NoteMessage: &waE2E.Message{Conversation: proto.String("Pagamento do pedido #42")},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "interactive" {
+		t.Fatalf("expected Type=interactive, got %q", out.Type)
+	}
+	if out.RichContent == nil || out.RichContent.Flow != "payment" {
+		t.Fatalf("expected RichContent.Flow=payment, got %+v", out.RichContent)
+	}
+	payment := out.RichContent.Payment
+	if payment == nil {
+		t.Fatalf("expected RichContent.Payment, got nil")
+	}
+	if payment.Note != "5511988887777@s.whatsapp.net" {
+		t.Fatalf("expected Payment.Note=requestFrom, got %q", payment.Note)
+	}
+	if payment.Amount != "R$ 50,00" {
+		t.Fatalf("expected Payment.Amount='R$ 50,00', got %q", payment.Amount)
+	}
+}
+
+func TestBuildInboundRequestPaymentMessageFallsBackToNoteMessageAndAmount1000(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.request-payment-2", "5511999999999"),
+		Message: &waE2E.Message{
+			RequestPaymentMessage: &waE2E.RequestPaymentMessage{
+				CurrencyCodeIso4217: proto.String("BRL"),
+				Amount1000:          proto.Uint64(129900),
+				NoteMessage:         &waE2E.Message{Conversation: proto.String("Pedido #123")},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.RichContent == nil || out.RichContent.Payment == nil {
+		t.Fatalf("expected RichContent.Payment, got %+v", out.RichContent)
+	}
+	payment := out.RichContent.Payment
+	if payment.Note != "Pedido #123" {
+		t.Fatalf("expected Payment.Note='Pedido #123' (noteMessage fallback), got %q", payment.Note)
+	}
+	if payment.Amount != "R$ 129,90" {
+		t.Fatalf("expected Payment.Amount='R$ 129,90' (amount1000 fallback), got %q", payment.Amount)
+	}
+}
+
+func TestBuildInboundRequestPaymentMessageEmptyFallsBackToUnsupported(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.request-payment-empty-1", "5511999999999"),
+		Message: &waE2E.Message{
+			RequestPaymentMessage: &waE2E.RequestPaymentMessage{},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "unsupported" {
+		t.Fatalf("expected Type=unsupported, got %q", out.Type)
+	}
+	if out.Unsupported == nil || out.Unsupported.Type != "requestPaymentMessage" {
+		t.Fatalf("expected Unsupported.Type=requestPaymentMessage, got %+v", out.Unsupported)
+	}
+}
+
+func TestBuildInboundSendPaymentMessage(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.send-payment-1", "5511999999999"),
+		Message: &waE2E.Message{
+			SendPaymentMessage: &waE2E.SendPaymentMessage{
+				NoteMessage: &waE2E.Message{Conversation: proto.String("Pagamento enviado")},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "interactive" {
+		t.Fatalf("expected Type=interactive, got %q", out.Type)
+	}
+	if out.RichContent == nil || out.RichContent.Flow != "payment" {
+		t.Fatalf("expected RichContent.Flow=payment, got %+v", out.RichContent)
+	}
+	if out.RichContent.Payment == nil || out.RichContent.Payment.Note != "Pagamento enviado" {
+		t.Fatalf("expected Payment.Note='Pagamento enviado', got %+v", out.RichContent.Payment)
+	}
+}
+
+func TestBuildInboundSendPaymentMessageEmptyFallsBackToUnsupported(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.send-payment-empty-1", "5511999999999"),
+		Message: &waE2E.Message{
+			SendPaymentMessage: &waE2E.SendPaymentMessage{},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "unsupported" {
+		t.Fatalf("expected Type=unsupported, got %q", out.Type)
+	}
+	if out.Unsupported == nil || out.Unsupported.Type != "sendPaymentMessage" {
+		t.Fatalf("expected Unsupported.Type=sendPaymentMessage, got %+v", out.Unsupported)
+	}
+}
+
+func TestBuildInboundPaymentInviteMessage(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.payment-invite-1", "5511999999999"),
+		Message: &waE2E.Message{
+			PaymentInviteMessage: &waE2E.PaymentInviteMessage{
+				ServiceType: waE2E.PaymentInviteMessage_UPI.Enum(),
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "interactive" {
+		t.Fatalf("expected Type=interactive, got %q", out.Type)
+	}
+	if out.RichContent == nil || out.RichContent.Flow != "payment" {
+		t.Fatalf("expected RichContent.Flow=payment, got %+v", out.RichContent)
+	}
+	if out.RichContent.Payment == nil {
+		t.Fatalf("expected RichContent.Payment (minimal card), got nil")
+	}
+}
+
+func TestBuildInboundDebugRawDumpDisabledLeavesTextMessageUnchanged(t *testing.T) {
+	evt := &events.Message{
+		Info:    baseInfo("wamid.debug-off-1", "5511999999999"),
+		Message: &waE2E.Message{Conversation: proto.String("hello with debug off")},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "text" {
+		t.Fatalf("expected Type=text, got %q", out.Type)
+	}
+	if out.Text == nil || out.Text.Body != "hello with debug off" {
+		t.Fatalf("expected Text.Body='hello with debug off', got %+v", out.Text)
+	}
+}
+
 func TestBuildStatusDelivered(t *testing.T) {
 	evt := &events.Receipt{
 		MessageIDs: []types.MessageID{"wamid.1"},

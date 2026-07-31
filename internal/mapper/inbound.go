@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -14,9 +16,12 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 var ErrSkip = errors.New("mapper: inbound message has no mappable user content")
+
+var debugRawEnabled = os.Getenv("GATEWAY_DEBUG_RAW") == "1"
 
 const maxUnwrapDepth = 8
 
@@ -212,6 +217,10 @@ func BuildInbound(ctx context.Context, dl Downloader, resolver PNResolver, s3 Me
 	}
 
 	msg := unwrapMessage(evt.Message)
+
+	if debugRawEnabled {
+		logRawMessage(evt.Info.ID, msg)
+	}
 
 	if pm := msg.GetProtocolMessage(); pm != nil {
 		targetID := pm.GetKey().GetID()
@@ -453,6 +462,21 @@ func BuildInbound(ctx context.Context, dl Downloader, resolver PNResolver, s3 Me
 			return InboundEvent{}, err
 		}
 		out.ContextMessageID = event.GetContextInfo().GetStanzaID()
+
+	case msg.GetRequestPaymentMessage() != nil:
+		if err := applyRichOrFallback(&out, msg, buildRequestPaymentRich(msg.GetRequestPaymentMessage())); err != nil {
+			return InboundEvent{}, err
+		}
+
+	case msg.GetSendPaymentMessage() != nil:
+		if err := applyRichOrFallback(&out, msg, buildSendPaymentRich(msg.GetSendPaymentMessage())); err != nil {
+			return InboundEvent{}, err
+		}
+
+	case msg.GetPaymentInviteMessage() != nil:
+		if err := applyRichOrFallback(&out, msg, buildPaymentInviteRich(msg.GetPaymentInviteMessage())); err != nil {
+			return InboundEvent{}, err
+		}
 
 	default:
 		content, found := detectContentField(msg)
@@ -906,6 +930,94 @@ func buildEventRich(em *waE2E.EventMessage) *InboundRichContent {
 	return &InboundRichContent{Kind: "event", Event: event}
 }
 
+func buildRequestPaymentRich(rq *waE2E.RequestPaymentMessage) *InboundRichContent {
+	note := rq.GetRequestFrom()
+	if note == "" {
+		note = extractText(unwrapMessage(rq.GetNoteMessage()))
+	}
+
+	amount := formatMoney(rq.GetAmount())
+	if amount == "" {
+		if amount1000 := rq.GetAmount1000(); amount1000 != 0 {
+			amount = formatProductPriceText(int64(amount1000), rq.GetCurrencyCodeIso4217())
+		}
+	}
+
+	if note == "" && amount == "" {
+		return nil
+	}
+
+	return &InboundRichContent{
+		Kind: "interactive",
+		Flow: "payment",
+		Payment: &InboundRichPayment{
+			Note:   note,
+			Amount: amount,
+		},
+	}
+}
+
+func buildSendPaymentRich(sp *waE2E.SendPaymentMessage) *InboundRichContent {
+	note := extractText(unwrapMessage(sp.GetNoteMessage()))
+	if note == "" {
+		return nil
+	}
+
+	return &InboundRichContent{
+		Kind: "interactive",
+		Flow: "payment",
+		Payment: &InboundRichPayment{
+			Note: note,
+		},
+	}
+}
+
+func buildPaymentInviteRich(pi *waE2E.PaymentInviteMessage) *InboundRichContent {
+	note := ""
+	if st := pi.GetServiceType(); st != waE2E.PaymentInviteMessage_UNKNOWN {
+		note = st.String()
+	}
+
+	return &InboundRichContent{
+		Kind: "interactive",
+		Flow: "payment",
+		Payment: &InboundRichPayment{
+			Note: note,
+		},
+	}
+}
+
+func formatMoney(m *waE2E.Money) string {
+	if m == nil {
+		return ""
+	}
+	cents := moneyCents(m.GetValue(), m.GetOffset())
+	return formatProductPriceText(cents*10, m.GetCurrencyCode())
+}
+
+func moneyCents(value int64, offset uint32) int64 {
+	switch {
+	case offset == 2:
+		return value
+	case offset > 2:
+		div := pow10(offset - 2)
+		if div == 0 {
+			return value
+		}
+		return value / div
+	default:
+		return value * pow10(2-offset)
+	}
+}
+
+func pow10(n uint32) int64 {
+	result := int64(1)
+	for i := uint32(0); i < n; i++ {
+		result *= 10
+	}
+	return result
+}
+
 var contentFieldIgnore = map[string]bool{
 	"SenderKeyDistributionMessage":               true,
 	"FastRatchetKeySenderKeyDistributionMessage": true,
@@ -931,6 +1043,21 @@ func detectContentField(msg *waE2E.Message) (string, bool) {
 		return jsonFieldName(field), true
 	}
 	return "", false
+}
+
+func logRawMessage(providerMessageID string, msg *waE2E.Message) {
+	fieldName, found := detectContentField(msg)
+	if !found {
+		fieldName = "unknown"
+	}
+
+	raw, err := protojson.Marshal(msg)
+	if err != nil {
+		slog.Default().Warn("mapper: raw message dump failed", "providerMessageId", providerMessageID, "error", err)
+		return
+	}
+
+	slog.Default().Info("mapper: raw message dump", "type", fieldName, "providerMessageId", providerMessageID, "raw", string(raw))
 }
 
 func jsonFieldName(field reflect.StructField) string {
