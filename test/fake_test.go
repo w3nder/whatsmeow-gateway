@@ -3,6 +3,7 @@ package test
 import (
 	"context"
 	"sync"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -16,12 +17,19 @@ type fakeWAClient struct {
 
 	deviceJID *types.JID
 	loggedIn  bool
+	connected bool
+
+	// staysDown keeps the fake disconnected after Connect, standing in for a socket
+	// that whatsmeow is still retrying in the background.
+	staysDown bool
 
 	qrItems    []whatsmeow.QRChannelItem
 	connectErr error
 
-	connectCalls   int
-	qrChannelCalls int
+	connectCalls      int
+	qrChannelCalls    int
+	waitCalls         int
+	handlersAtConnect int
 
 	sendResp  whatsmeow.SendResponse
 	sendErr   error
@@ -67,7 +75,12 @@ func (f *fakeWAClient) QRChannel(ctx context.Context) (<-chan whatsmeow.QRChanne
 func (f *fakeWAClient) Connect() error {
 	f.mu.Lock()
 	f.connectCalls++
+	f.handlersAtConnect = len(f.handlers)
 	err := f.connectErr
+	if err == nil && !f.staysDown {
+		f.connected = true
+		f.loggedIn = true
+	}
 	f.mu.Unlock()
 	return err
 }
@@ -76,6 +89,19 @@ func (f *fakeWAClient) IsLoggedIn() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.loggedIn
+}
+
+func (f *fakeWAClient) IsConnected() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.connected
+}
+
+func (f *fakeWAClient) WaitForConnection(time.Duration) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.waitCalls++
+	return f.connected && f.loggedIn
 }
 
 func (f *fakeWAClient) DeviceJID() *types.JID {
@@ -116,7 +142,24 @@ func (f *fakeWAClient) AddEventHandler(handler func(any)) uint32 {
 func (f *fakeWAClient) Disconnect() {
 	f.mu.Lock()
 	f.disconnectCalls++
+	f.connected = false
 	f.mu.Unlock()
+}
+
+// dropSocket simulates the network dying under the client: the socket is gone but
+// whatsmeow still reports the device as logged in, because it only clears that flag
+// on a stream error.
+func (f *fakeWAClient) dropSocket() {
+	f.mu.Lock()
+	f.connected = false
+	f.loggedIn = true
+	f.mu.Unlock()
+}
+
+func (f *fakeWAClient) handlerCountAtConnect() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.handlersAtConnect
 }
 
 func (f *fakeWAClient) disconnectCount() int {

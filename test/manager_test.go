@@ -2,6 +2,7 @@ package test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -62,8 +63,9 @@ func TestManagerDispatchesMessageEventWithChannelID(t *testing.T) {
 		recv <- received{channelID: channelID, evt: evt}
 	})
 
-	if err := mgr.EnsureConnected("channel-2"); err != nil {
-		t.Fatalf("EnsureConnected failed: %v", err)
+	jid := types.NewJID("15551234567", types.DefaultUserServer)
+	if err := mgr.Resume(context.Background(), "channel-2", jid); err != nil {
+		t.Fatalf("Resume failed: %v", err)
 	}
 
 	msgEvt := &events.Message{Info: types.MessageInfo{}}
@@ -93,8 +95,9 @@ func TestManagerDropsSessionOnLoggedOut(t *testing.T) {
 		return newFakeWAClient(), nil
 	})
 
-	if err := mgr.EnsureConnected("channel-3"); err != nil {
-		t.Fatalf("EnsureConnected failed: %v", err)
+	jid := types.NewJID("15551234567", types.DefaultUserServer)
+	if err := mgr.Resume(context.Background(), "channel-3", jid); err != nil {
+		t.Fatalf("Resume failed: %v", err)
 	}
 	if callCount != 1 {
 		t.Fatalf("expected factory called once, got %d", callCount)
@@ -102,11 +105,107 @@ func TestManagerDropsSessionOnLoggedOut(t *testing.T) {
 
 	first.emit(&events.LoggedOut{})
 
-	if err := mgr.EnsureConnected("channel-3"); err != nil {
-		t.Fatalf("EnsureConnected after logout failed: %v", err)
+	deadline := time.After(2 * time.Second)
+	for {
+		err := mgr.EnsureConnected("channel-3")
+		if errors.Is(err, session.ErrNoSession) {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("expected the logged-out session to be dropped so it is re-paired instead of silently reconnected, got %v", err)
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
-	if callCount != 2 {
-		t.Fatalf("expected factory called again after logout, got %d", callCount)
+	if callCount != 1 {
+		t.Fatalf("expected no new device to be built after logout, factory called %d times", callCount)
+	}
+	if first.disconnectCount() == 0 {
+		t.Fatal("expected the dropped session's socket to be closed on logout")
+	}
+}
+
+func TestManagerEnsureConnectedReconnectsAfterSocketDrop(t *testing.T) {
+	fake := newFakeWAClient()
+	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
+		return fake, nil
+	})
+
+	jid := types.NewJID("15551234567", types.DefaultUserServer)
+	if err := mgr.Resume(context.Background(), "channel-drop-1", jid); err != nil {
+		t.Fatalf("Resume failed: %v", err)
+	}
+	if fake.connectCallCount() != 1 {
+		t.Fatalf("expected Connect once during Resume, got %d", fake.connectCallCount())
+	}
+
+	// Network dies: the socket is gone but whatsmeow still reports IsLoggedIn, since
+	// it only clears that flag on a stream error.
+	fake.dropSocket()
+
+	if err := mgr.EnsureConnected("channel-drop-1"); err != nil {
+		t.Fatalf("EnsureConnected after socket drop failed: %v", err)
+	}
+	if fake.connectCallCount() != 2 {
+		t.Fatalf("expected EnsureConnected to reconnect the dead socket, Connect called %d times", fake.connectCallCount())
+	}
+	if fake.qrChannelCallCount() != 0 {
+		t.Fatalf("expected the reconnect to reuse the paired device with no QR flow, got %d QRChannel calls", fake.qrChannelCallCount())
+	}
+}
+
+func TestManagerEnsureConnectedToleratesConcurrentAutoReconnect(t *testing.T) {
+	fake := newFakeWAClient()
+	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
+		return fake, nil
+	})
+
+	jid := types.NewJID("15551234567", types.DefaultUserServer)
+	if err := mgr.Resume(context.Background(), "channel-race-1", jid); err != nil {
+		t.Fatalf("Resume failed: %v", err)
+	}
+
+	// whatsmeow's own auto-reconnect got there first: our Connect loses the race and
+	// reports ErrAlreadyConnected, which means the socket is up, not that we failed.
+	fake.dropSocket()
+	fake.connectErr = whatsmeow.ErrAlreadyConnected
+	fake.connected = true
+
+	if err := mgr.EnsureConnected("channel-race-1"); err != nil {
+		t.Fatalf("expected ErrAlreadyConnected to be treated as connected, got %v", err)
+	}
+}
+
+func TestManagerEnsureConnectedNeverBuildsUnpairedDevice(t *testing.T) {
+	factoryCalls := 0
+	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
+		factoryCalls++
+		return newFakeWAClient(), nil
+	})
+
+	err := mgr.EnsureConnected("channel-never-paired")
+
+	if !errors.Is(err, session.ErrNoSession) {
+		t.Fatalf("expected ErrNoSession for a channel with no live session, got %v", err)
+	}
+	if factoryCalls != 0 {
+		t.Fatalf("expected no device to be built for an unknown channel (a fresh device would require re-pairing), factory called %d times", factoryCalls)
+	}
+}
+
+func TestManagerResumeRegistersEventHandlerBeforeConnecting(t *testing.T) {
+	fake := newFakeWAClient()
+	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
+		return fake, nil
+	})
+
+	jid := types.NewJID("15551234567", types.DefaultUserServer)
+	if err := mgr.Resume(context.Background(), "channel-handler-1", jid); err != nil {
+		t.Fatalf("Resume failed: %v", err)
+	}
+
+	if fake.handlerCountAtConnect() == 0 {
+		t.Fatal("expected the event handler to be registered before Connect, otherwise connection events emitted during the handshake are lost")
 	}
 }
 
@@ -118,6 +217,10 @@ func TestManagerSendReturnsIDAndTimestamp(t *testing.T) {
 	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
 		return fake, nil
 	})
+
+	if err := mgr.Resume(context.Background(), "channel-4", types.NewJID("15550001111", types.DefaultUserServer)); err != nil {
+		t.Fatalf("Resume failed: %v", err)
+	}
 
 	to := types.NewJID("15551234567", types.DefaultUserServer)
 	id, gotTS, err := mgr.Send(context.Background(), "channel-4", to, nil, "deterministic-id-1")

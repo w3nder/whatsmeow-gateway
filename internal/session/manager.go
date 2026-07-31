@@ -2,14 +2,26 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
+
+// ErrNoSession means the channel has no live session on this instance. Callers must
+// resume it from its stored JID: building a device from scratch would produce an
+// unpaired one and force the user through the QR flow again.
+var ErrNoSession = errors.New("session: channel has no live session")
+
+// connectWait bounds how long a caller blocks waiting for a socket to come back up.
+// whatsmeow keeps auto-reconnecting past this deadline, so exceeding it fails only the
+// message in flight, never the channel.
+const connectWait = 10 * time.Second
 
 type PairUpdate struct {
 	QR        string
@@ -49,7 +61,7 @@ func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate
 	}
 
 	if client.DeviceJID() != nil {
-		if err := client.Connect(); err != nil {
+		if err := ensureUp(client); err != nil {
 			return nil, err
 		}
 		updates := make(chan PairUpdate, 1)
@@ -103,18 +115,35 @@ func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate
 }
 
 func (m *Manager) EnsureConnected(channelID string) error {
-	client, err := m.client(channelID)
+	client, err := m.session(channelID)
 	if err != nil {
 		return err
 	}
-	if client.IsLoggedIn() {
+	return ensureUp(client)
+}
+
+// ensureUp brings a session's socket back up.
+//
+// IsLoggedIn is not enough to decide: whatsmeow only clears that flag on a stream
+// error, so a socket killed by the network still reports the device as logged in.
+// IsConnected is the one that reflects the socket. Racing whatsmeow's own
+// auto-reconnect is expected and surfaces as ErrAlreadyConnected, which means the
+// socket is up, not that the call failed.
+func ensureUp(client WAClient) error {
+	if client.IsConnected() && client.IsLoggedIn() {
 		return nil
 	}
-	return client.Connect()
+	if err := client.Connect(); err != nil && !errors.Is(err, whatsmeow.ErrAlreadyConnected) {
+		return err
+	}
+	if client.WaitForConnection(connectWait) {
+		return nil
+	}
+	return fmt.Errorf("session: socket still down after %s, auto-reconnect still running", connectWait)
 }
 
 func (m *Manager) Send(ctx context.Context, channelID string, to types.JID, msg *waE2E.Message, id string) (string, time.Time, error) {
-	client, err := m.client(channelID)
+	client, err := m.session(channelID)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -126,7 +155,7 @@ func (m *Manager) Send(ctx context.Context, channelID string, to types.JID, msg 
 }
 
 func (m *Manager) Client(channelID string) (WAClient, error) {
-	return m.client(channelID)
+	return m.session(channelID)
 }
 
 func (m *Manager) DisconnectAll() {
@@ -143,6 +172,21 @@ func (m *Manager) DisconnectAll() {
 	}
 }
 
+// session returns the live session for a channel. It never builds a device: only
+// pairing and resuming know which device a channel belongs to.
+func (m *Manager) session(channelID string) (WAClient, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	c, ok := m.sessions[channelID]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrNoSession, channelID)
+	}
+	return c, nil
+}
+
+// client returns the live session for a channel, building a fresh (unpaired) device
+// when there is none. Only the pairing flow may use it.
 func (m *Manager) client(channelID string) (WAClient, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -156,47 +200,58 @@ func (m *Manager) client(channelID string) (WAClient, error) {
 		return nil, err
 	}
 
-	c.AddEventHandler(func(evt any) {
-		if _, ok := evt.(*events.LoggedOut); ok {
-			m.mu.Lock()
-			delete(m.sessions, channelID)
-			m.mu.Unlock()
-		}
-		m.dispatch(channelID, evt)
-	})
-
-	m.sessions[channelID] = c
+	m.register(channelID, c)
 	return c, nil
 }
 
 func (m *Manager) Resume(ctx context.Context, channelID string, jid types.JID) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if _, ok := m.sessions[channelID]; ok {
+		m.mu.Unlock()
 		return nil
 	}
 
 	c, err := m.factory(channelID, &jid)
 	if err != nil {
+		m.mu.Unlock()
 		return fmt.Errorf("session: resume device for channel %s: %w", channelID, err)
 	}
 
+	// Register before connecting so connection events emitted during the handshake
+	// reach the gateway, and connect outside the lock because the handler takes it.
+	m.register(channelID, c)
+	m.mu.Unlock()
+
 	if err := c.Connect(); err != nil {
+		m.drop(channelID, c)
 		return fmt.Errorf("session: connect resumed channel %s: %w", channelID, err)
 	}
 
+	return nil
+}
+
+// register wires a client's events to the manager and stores it. m.mu must be held.
+func (m *Manager) register(channelID string, c WAClient) {
 	c.AddEventHandler(func(evt any) {
 		if _, ok := evt.(*events.LoggedOut); ok {
-			m.mu.Lock()
-			delete(m.sessions, channelID)
-			m.mu.Unlock()
+			// LoggedOut is the one disconnect that must not be retried: the device is
+			// gone from the phone and the channel has to be paired again.
+			go m.drop(channelID, c)
 		}
 		m.dispatch(channelID, evt)
 	})
 
 	m.sessions[channelID] = c
-	return nil
+}
+
+func (m *Manager) drop(channelID string, c WAClient) {
+	m.mu.Lock()
+	if m.sessions[channelID] == c {
+		delete(m.sessions, channelID)
+	}
+	m.mu.Unlock()
+
+	c.Disconnect()
 }
 
 func (m *Manager) dispatch(channelID string, evt any) {

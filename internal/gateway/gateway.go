@@ -111,8 +111,18 @@ func (g *gateway) run(ctx context.Context) error {
 	}
 
 	g.logger.Info("gateway started", "instance_id", g.instanceID)
-	<-ctx.Done()
-	g.logger.Info("gateway stopping")
+
+	// A dead broker leaves the consumers stopped and the publisher failing every event.
+	// Rather than idle on forever in that state, shut down and report it: main exits
+	// non-zero and the orchestrator restarts us onto a fresh connection.
+	var fatal error
+	select {
+	case <-ctx.Done():
+		g.logger.Info("gateway stopping")
+	case consumerErr := <-g.consumer.Failed():
+		fatal = fmt.Errorf("gateway: amqp consumer died: %w", consumerErr)
+		g.logger.Error("gateway: amqp consumer died, shutting down for restart", "error", consumerErr)
+	}
 
 	g.closeConsumerWithDrainDeadline()
 
@@ -123,7 +133,7 @@ func (g *gateway) run(ctx context.Context) error {
 		return fmt.Errorf("gateway: release shards: %w", err)
 	}
 
-	return nil
+	return fatal
 }
 
 func (g *gateway) resumeOwnedSessions(ctx context.Context) {
@@ -281,7 +291,7 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 	sendCtx, cancel := context.WithTimeout(ctx, g.sendTimeout)
 	defer cancel()
 
-	if err := g.manager.EnsureConnected(cmd.ChannelID); err != nil {
+	if err := g.ensureChannelConnected(ctx, cmd.ChannelID); err != nil {
 		return g.publishSendFailure(ctx, cmd, providerID, fmt.Errorf("gateway: ensure connected %s: %w", cmd.ChannelID, err))
 	}
 
@@ -340,6 +350,38 @@ func (g *gateway) waClientFor(channelID string) (session.WAClient, error) {
 	return g.manager.Client(channelID)
 }
 
+// ensureChannelConnected gets a channel's socket up before a send. When the channel has
+// no live session on this instance -- boot resume failed while the network was down, or
+// the channel moved between instances -- it is resumed from its stored JID. Falling back
+// to a brand-new device would leave the channel unpaired and waiting for a QR scan.
+func (g *gateway) ensureChannelConnected(ctx context.Context, channelID string) error {
+	err := g.manager.EnsureConnected(channelID)
+	if !errors.Is(err, session.ErrNoSession) {
+		return err
+	}
+
+	cs, found, lookupErr := g.registry.Get(ctx, channelID)
+	if lookupErr != nil {
+		return fmt.Errorf("gateway: lookup stored session %s: %w", channelID, lookupErr)
+	}
+	if !found {
+		return fmt.Errorf("gateway: channel %s is not paired: %w", channelID, err)
+	}
+
+	jid, parseErr := types.ParseJID(cs.JID)
+	if parseErr != nil {
+		return fmt.Errorf("gateway: parse stored jid for %s: %w", channelID, parseErr)
+	}
+
+	g.logger.Info("gateway: resuming channel on demand", "channel_id", channelID, "jid", cs.JID)
+	g.setTenant(channelID, cs.TenantID)
+
+	if resumeErr := g.manager.Resume(ctx, channelID, jid); resumeErr != nil {
+		return resumeErr
+	}
+	return g.manager.EnsureConnected(channelID)
+}
+
 func (g *gateway) handleSessionEvent(channelID string, evt any) {
 	switch e := evt.(type) {
 	case *events.Message:
@@ -351,6 +393,56 @@ func (g *gateway) handleSessionEvent(channelID string, evt any) {
 		if err := g.registry.Delete(g.workCtx, channelID); err != nil {
 			g.logger.Error("gateway: delete session on logout", "channel_id", channelID, "error", err)
 		}
+	default:
+		g.handleConnectionEvent(channelID, evt)
+	}
+}
+
+// handleConnectionEvent reports socket health. Everything here that is recoverable is
+// already being retried by whatsmeow's auto-reconnect, so the gateway only observes and
+// publishes status; the cases whatsmeow deliberately gives up on are published as errors
+// because they need action outside the gateway (re-pair, unban, upgrade).
+func (g *gateway) handleConnectionEvent(channelID string, evt any) {
+	switch e := evt.(type) {
+	case *events.Connected:
+		g.logger.Info("gateway: channel socket connected", "channel_id", channelID)
+		g.publishChannelStatus(channelID, "connected", "")
+	case *events.Disconnected:
+		g.logger.Warn("gateway: channel socket disconnected, auto-reconnect running", "channel_id", channelID)
+		g.publishChannelStatus(channelID, "disconnected", "socket disconnected")
+	case *events.KeepAliveTimeout:
+		g.logger.Warn("gateway: channel keepalive timed out",
+			"channel_id", channelID,
+			"error_count", e.ErrorCount,
+			"last_success", e.LastSuccess)
+	case *events.KeepAliveRestored:
+		g.logger.Info("gateway: channel keepalive restored", "channel_id", channelID)
+	case *events.StreamReplaced:
+		g.logger.Error("gateway: channel session replaced by another connection", "channel_id", channelID)
+		g.publishChannelStatus(channelID, "error", "session replaced by another connection")
+	case *events.TemporaryBan:
+		g.logger.Error("gateway: channel temporarily banned", "channel_id", channelID, "code", e.Code.String(), "expire", e.Expire)
+		g.publishChannelStatus(channelID, "error", fmt.Sprintf("temporarily banned (%s), expires in %s", e.Code.String(), e.Expire))
+	case *events.ClientOutdated:
+		g.logger.Error("gateway: whatsmeow client outdated, whatsapp refused the connection", "channel_id", channelID)
+		g.publishChannelStatus(channelID, "error", "whatsapp client version outdated")
+	case *events.ConnectFailure:
+		g.logger.Error("gateway: channel connect failure", "channel_id", channelID, "reason", e.Reason.String(), "message", e.Message)
+		g.publishChannelStatus(channelID, "error", fmt.Sprintf("connect failure: %s %s", e.Reason.String(), e.Message))
+	case *events.StreamError:
+		g.logger.Error("gateway: channel stream error", "channel_id", channelID, "code", e.Code)
+		g.publishChannelStatus(channelID, "error", fmt.Sprintf("stream error %s", e.Code))
+	}
+}
+
+func (g *gateway) publishChannelStatus(channelID, status, reason string) {
+	if err := g.publisher.PublishChannelStatus(g.workCtx, amqp.ChannelStatusEvent{
+		TenantID:  g.tenantFor(channelID),
+		ChannelID: channelID,
+		Status:    status,
+		Reason:    reason,
+	}); err != nil {
+		g.logger.Error("gateway: publish channel.status", "channel_id", channelID, "status", status, "error", err)
 	}
 }
 

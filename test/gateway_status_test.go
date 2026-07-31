@@ -22,7 +22,7 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
 )
 
-func setupStatusRoundtripGateway(t *testing.T, fake *fakeWAClient) (probeCh *rabbitmq.Channel, deliveries <-chan rabbitmq.Delivery, dedupeStore *dedupe.Store, cancel context.CancelFunc, runErrCh chan error) {
+func setupStatusRoundtripGateway(t *testing.T, fake *fakeWAClient, channelID string) (probeCh *rabbitmq.Channel, deliveries <-chan rabbitmq.Delivery, dedupeStore *dedupe.Store, cancel context.CancelFunc, runErrCh chan error) {
 	t.Helper()
 
 	conn := startRabbitMQ(t)
@@ -75,6 +75,12 @@ func setupStatusRoundtripGateway(t *testing.T, fake *fakeWAClient) (probeCh *rab
 		t.Fatalf("registry.Open failed: %v", err)
 	}
 	t.Cleanup(registryStore.Close)
+
+	// A send only reaches a paired channel: the gateway resumes it from the stored JID.
+	storedJID := types.NewJID("15550009999", types.DefaultUserServer)
+	if err := registryStore.Save(context.Background(), channelID, storedJID.String(), "tenant-status-roundtrip"); err != nil {
+		t.Fatalf("registry.Save failed: %v", err)
+	}
 
 	probeCh, err = conn.Channel()
 	if err != nil {
@@ -141,13 +147,13 @@ func TestGatewaySendHandlerPublishesOpaqueMessageIdOnSent(t *testing.T) {
 	fake := newFakeWAClient()
 	fake.sendResp = whatsmeow.SendResponse{ID: expectedProviderID, Timestamp: time.Now().Truncate(time.Second)}
 
-	probeCh, deliveries, _, cancel, runErrCh := setupStatusRoundtripGateway(t, fake)
+	probeCh, deliveries, _, cancel, runErrCh := setupStatusRoundtripGateway(t, fake, "channel-status-roundtrip-1")
 
 	sendCmd := gatewayamqp.GatewaySendCommand{
 		TenantID:  "tenant-status-roundtrip-1",
 		ChannelID: "channel-status-roundtrip-1",
 		MessageID: messageID,
-		To:        "+15551234567",
+		To:        "15551234567@s.whatsapp.net",
 		Type:      "text",
 		Text:      "hello from status roundtrip",
 	}
@@ -193,7 +199,7 @@ func TestGatewaySendHandlerPublishesFailedStatusAndAcksOnSendError(t *testing.T)
 	fake := newFakeWAClient()
 	fake.sendErr = errors.New("boom: whatsapp rejected the message")
 
-	probeCh, deliveries, dedupeStore, cancel, runErrCh := setupStatusRoundtripGateway(t, fake)
+	probeCh, deliveries, dedupeStore, cancel, runErrCh := setupStatusRoundtripGateway(t, fake, "channel-status-roundtrip-2")
 
 	dlqCh, err := probeCh.Consume(gatewayamqp.GatewaySendDLQ, "", true, false, false, false, nil)
 	if err != nil {
@@ -204,7 +210,7 @@ func TestGatewaySendHandlerPublishesFailedStatusAndAcksOnSendError(t *testing.T)
 		TenantID:  "tenant-status-roundtrip-2",
 		ChannelID: "channel-status-roundtrip-2",
 		MessageID: messageID,
-		To:        "+15557654321",
+		To:        "15557654321@s.whatsapp.net",
 		Type:      "text",
 		Text:      "this send will fail",
 	}

@@ -79,6 +79,12 @@ func TestGatewaySendHandlerDedupesRedeliveredCommand(t *testing.T) {
 	}
 	t.Cleanup(registryStore.Close)
 
+	// A send only reaches a paired channel: the gateway resumes it from the stored JID.
+	storedJID := types.NewJID("15550008888", types.DefaultUserServer)
+	if err := registryStore.Save(context.Background(), "channel-dedupe-1", storedJID.String(), "tenant-dedupe-1"); err != nil {
+		t.Fatalf("registry.Save failed: %v", err)
+	}
+
 	probeCh, err := conn.Channel()
 	if err != nil {
 		t.Fatalf("failed to open probe channel: %v", err)
@@ -125,7 +131,7 @@ func TestGatewaySendHandlerDedupesRedeliveredCommand(t *testing.T) {
 		TenantID:  "tenant-dedupe-1",
 		ChannelID: "channel-dedupe-1",
 		MessageID: messageID,
-		To:        "+15551234567",
+		To:        "15551234567@s.whatsapp.net",
 		Type:      "text",
 		Text:      "hello from dedupe test",
 	}

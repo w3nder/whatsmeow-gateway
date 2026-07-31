@@ -2,8 +2,10 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -47,6 +49,21 @@ func (s *Store) Save(ctx context.Context, channelID, jid, tenantID string) error
 		return fmt.Errorf("registry: save %s: %w", channelID, err)
 	}
 	return nil
+}
+
+func (s *Store) Get(ctx context.Context, channelID string) (ChannelSession, bool, error) {
+	var cs ChannelSession
+	err := s.pool.QueryRow(ctx,
+		`SELECT channel_id, jid, tenant_id FROM gateway_channel_sessions WHERE channel_id = $1`,
+		channelID,
+	).Scan(&cs.ChannelID, &cs.JID, &cs.TenantID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ChannelSession{}, false, nil
+	}
+	if err != nil {
+		return ChannelSession{}, false, fmt.Errorf("registry: get %s: %w", channelID, err)
+	}
+	return cs, true, nil
 }
 
 func (s *Store) Delete(ctx context.Context, channelID string) error {

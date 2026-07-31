@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	rabbitmq "github.com/rabbitmq/amqp091-go"
 )
@@ -25,7 +26,29 @@ type Consumer struct {
 	sendStarted bool
 	pairStarted bool
 
+	closing atomic.Bool
+	failed  chan error
+
 	wg sync.WaitGroup
+}
+
+// Failed reports a consumer that stopped on its own. A broker restart or a channel-level
+// error closes the delivery channel, which ends the range loop below; without this the
+// gateway would keep running while consuming nothing, acking nothing, and logging
+// nothing. Buffered so the reporting goroutine never blocks, and only the first failure
+// is kept -- the connection dying takes both consumers down at once.
+func (c *Consumer) Failed() <-chan error {
+	return c.failed
+}
+
+func (c *Consumer) reportFailure(err error) {
+	if c.closing.Load() {
+		return
+	}
+	select {
+	case c.failed <- err:
+	default:
+	}
 }
 
 func NewConsumer(conn *rabbitmq.Connection, cfg ConsumerConfig) (*Consumer, error) {
@@ -58,7 +81,7 @@ func NewConsumer(conn *rabbitmq.Connection, cfg ConsumerConfig) (*Consumer, erro
 		return nil, fmt.Errorf("amqp: set qos on gateway.pair channel: %w", err)
 	}
 
-	return &Consumer{sendCh: sendCh, pairCh: pairCh}, nil
+	return &Consumer{sendCh: sendCh, pairCh: pairCh, failed: make(chan error, 1)}, nil
 }
 
 func (c *Consumer) StartSend(ctx context.Context, handler SendHandler) error {
@@ -78,6 +101,7 @@ func (c *Consumer) StartSend(ctx context.Context, handler SendHandler) error {
 			}
 			settle(d, handlerErr)
 		}
+		c.reportFailure(fmt.Errorf("amqp: %s consumer stopped: broker closed the delivery channel", GatewaySendQueue))
 	}()
 	return nil
 }
@@ -99,6 +123,7 @@ func (c *Consumer) StartPair(ctx context.Context, handler PairHandler) error {
 			}
 			settle(d, handlerErr)
 		}
+		c.reportFailure(fmt.Errorf("amqp: %s consumer stopped: broker closed the delivery channel", GatewayPairQueue))
 	}()
 	return nil
 }
@@ -112,6 +137,10 @@ func settle(d rabbitmq.Delivery, err error) {
 }
 
 func (c *Consumer) Close() error {
+	// Set before cancelling: cancelling closes the delivery channels too, and that must
+	// not be mistaken for the broker dying.
+	c.closing.Store(true)
+
 	var errs []error
 	if c.sendStarted {
 		if err := c.sendCh.Cancel(GatewaySendConsumer, false); err != nil {
