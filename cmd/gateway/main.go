@@ -35,6 +35,7 @@ func main() {
 	}
 
 	waLogger, logger := logging.New()
+	slog.SetDefault(logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

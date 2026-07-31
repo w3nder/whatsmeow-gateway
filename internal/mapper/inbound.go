@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -21,7 +22,20 @@ import (
 
 var ErrSkip = errors.New("mapper: inbound message has no mappable user content")
 
-var debugRawEnabled = os.Getenv("GATEWAY_DEBUG_RAW") == "1"
+var (
+	debugRawOnce    sync.Once
+	debugRawEnabled bool
+)
+
+// rawDebugEnabled reads GATEWAY_DEBUG_RAW lazily so it sees values loaded from
+// .env by godotenv in main() (package-init would run before that load).
+func rawDebugEnabled() bool {
+	debugRawOnce.Do(func() {
+		v := strings.ToLower(strings.TrimSpace(os.Getenv("GATEWAY_DEBUG_RAW")))
+		debugRawEnabled = v == "1" || v == "true"
+	})
+	return debugRawEnabled
+}
 
 const maxUnwrapDepth = 8
 
@@ -118,11 +132,24 @@ type InboundRichProduct struct {
 	URL         string `json:"url,omitempty"`
 }
 
+type InboundRichPaymentItem struct {
+	Name       string `json:"name,omitempty"`
+	Quantity   int    `json:"quantity,omitempty"`
+	Amount     string `json:"amount,omitempty"`
+	RetailerID string `json:"retailerId,omitempty"`
+}
+
 type InboundRichPayment struct {
-	Note      string `json:"note,omitempty"`
-	CopyCode  string `json:"copyCode,omitempty"`
-	CopyLabel string `json:"copyLabel,omitempty"`
-	Amount    string `json:"amount,omitempty"`
+	Kind          string                   `json:"kind,omitempty"`
+	ReferenceID   string                   `json:"referenceId,omitempty"`
+	Amount        string                   `json:"amount,omitempty"`
+	PixKey        string                   `json:"pixKey,omitempty"`
+	PixKeyType    string                   `json:"pixKeyType,omitempty"`
+	PixKeyDisplay string                   `json:"pixKeyDisplay,omitempty"`
+	MerchantName  string                   `json:"merchantName,omitempty"`
+	Status        string                   `json:"status,omitempty"`
+	CopyLabel     string                   `json:"copyLabel,omitempty"`
+	Items         []InboundRichPaymentItem `json:"items,omitempty"`
 }
 
 type InboundRichEvent struct {
@@ -218,7 +245,7 @@ func BuildInbound(ctx context.Context, dl Downloader, resolver PNResolver, s3 Me
 
 	msg := unwrapMessage(evt.Message)
 
-	if debugRawEnabled {
+	if rawDebugEnabled() {
 		logRawMessage(evt.Info.ID, msg)
 	}
 
@@ -463,21 +490,6 @@ func BuildInbound(ctx context.Context, dl Downloader, resolver PNResolver, s3 Me
 		}
 		out.ContextMessageID = event.GetContextInfo().GetStanzaID()
 
-	case msg.GetRequestPaymentMessage() != nil:
-		if err := applyRichOrFallback(&out, msg, buildRequestPaymentRich(msg.GetRequestPaymentMessage())); err != nil {
-			return InboundEvent{}, err
-		}
-
-	case msg.GetSendPaymentMessage() != nil:
-		if err := applyRichOrFallback(&out, msg, buildSendPaymentRich(msg.GetSendPaymentMessage())); err != nil {
-			return InboundEvent{}, err
-		}
-
-	case msg.GetPaymentInviteMessage() != nil:
-		if err := applyRichOrFallback(&out, msg, buildPaymentInviteRich(msg.GetPaymentInviteMessage())); err != nil {
-			return InboundEvent{}, err
-		}
-
 	default:
 		content, found := detectContentField(msg)
 		if !found {
@@ -720,6 +732,13 @@ func buildInteractiveRich(im *waE2E.InteractiveMessage) *InboundRichContent {
 		flow := classifyNativeFlowName(name)
 		flows = append(flows, flow)
 
+		if flow == "payment" {
+			if payment == nil {
+				payment = parsePaymentDetails(b.GetButtonParamsJSON(), name)
+			}
+			continue
+		}
+
 		params := parseNativeFlowButtonParams(b.GetButtonParamsJSON())
 		if len(params.Sections) > 0 {
 			list = nativeFlowListFrom(params.Sections, params.Title)
@@ -739,10 +758,6 @@ func buildInteractiveRich(im *waE2E.InteractiveMessage) *InboundRichContent {
 			Name: name,
 			URL:  params.URL,
 		})
-
-		if flow == "payment" && payment == nil {
-			payment = parsePaymentDetails(b.GetButtonParamsJSON(), name)
-		}
 	}
 
 	dominantFlow := dominantNativeFlow(flows)
@@ -750,7 +765,7 @@ func buildInteractiveRich(im *waE2E.InteractiveMessage) *InboundRichContent {
 		payment = nil
 	}
 
-	if body == "" && footer == "" && len(buttons) == 0 && list == nil {
+	if body == "" && footer == "" && len(buttons) == 0 && list == nil && payment == nil {
 		return nil
 	}
 
@@ -765,76 +780,147 @@ func buildInteractiveRich(im *waE2E.InteractiveMessage) *InboundRichContent {
 	}
 }
 
+type paymentMoney struct {
+	Value  int64 `json:"value"`
+	Offset int64 `json:"offset"`
+}
+
+type pixStaticCode struct {
+	MerchantName string `json:"merchant_name"`
+	Key          string `json:"key"`
+	KeyType      string `json:"key_type"`
+}
+
+type paymentSetting struct {
+	Type          string         `json:"type"`
+	PixStaticCode *pixStaticCode `json:"pix_static_code"`
+}
+
+type paymentOrderItem struct {
+	RetailerID string       `json:"retailer_id"`
+	Name       string       `json:"name"`
+	Amount     paymentMoney `json:"amount"`
+	Quantity   int          `json:"quantity"`
+}
+
+type paymentOrder struct {
+	Status string             `json:"status"`
+	Items  []paymentOrderItem `json:"items"`
+}
+
+type paymentParams struct {
+	ReferenceID     string           `json:"reference_id"`
+	Currency        string           `json:"currency"`
+	TotalAmount     paymentMoney     `json:"total_amount"`
+	PaymentSettings []paymentSetting `json:"payment_settings"`
+	Order           paymentOrder     `json:"order"`
+}
+
+// classifyPaymentKind maps the native-flow button name to the WhatsApp payment
+// card variant: payment_info shares a Pix key, review_and_pay is a charge,
+// review_order is an order receipt.
+func classifyPaymentKind(buttonName string) string {
+	switch strings.ToLower(buttonName) {
+	case "payment_info":
+		return "key"
+	case "review_order":
+		return "order"
+	default:
+		return "charge"
+	}
+}
+
 func parsePaymentDetails(raw, buttonName string) *InboundRichPayment {
-	data := parseJSONObject(raw)
-	if data == nil {
+	if raw == "" {
+		return nil
+	}
+	var p paymentParams
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
 		return nil
 	}
 
 	payment := &InboundRichPayment{
-		CopyCode: firstStringField(data, "copy_code", "code", "pix_code", "key", "pix_key"),
-		Note:     firstStringField(data, "note", "reference", "merchant", "merchant_name"),
-		Amount:   extractPaymentAmount(data),
+		Kind:        classifyPaymentKind(buttonName),
+		ReferenceID: p.ReferenceID,
+		Amount:      formatPaymentMoney(p.TotalAmount, p.Currency),
+		Status:      p.Order.Status,
 	}
-	payment.CopyLabel = firstStringField(data, "display_text")
-	if payment.CopyLabel == "" {
-		payment.CopyLabel = buttonName
+
+	if pix := firstPixStaticCode(p.PaymentSettings); pix != nil {
+		payment.PixKey = pix.Key
+		payment.PixKeyType = pix.KeyType
+		payment.PixKeyDisplay = formatPixKeyDisplay(pix.Key, pix.KeyType)
+		payment.MerchantName = pix.MerchantName
+	}
+
+	for _, it := range p.Order.Items {
+		if it.Name == "" && it.Quantity == 0 {
+			continue
+		}
+		payment.Items = append(payment.Items, InboundRichPaymentItem{
+			Name:       it.Name,
+			Quantity:   it.Quantity,
+			Amount:     formatPaymentMoney(it.Amount, p.Currency),
+			RetailerID: it.RetailerID,
+		})
+	}
+
+	if payment.PixKey != "" {
+		if payment.Kind == "key" {
+			payment.CopyLabel = "Copiar chave Pix"
+		} else {
+			payment.CopyLabel = "Copiar código Pix"
+		}
+	}
+
+	if payment.Amount == "" && payment.PixKey == "" && len(payment.Items) == 0 && payment.Status == "" {
+		return nil
 	}
 	return payment
 }
 
-func parseJSONObject(raw string) map[string]any {
-	if raw == "" {
-		return nil
-	}
-	var data map[string]any
-	if err := json.Unmarshal([]byte(raw), &data); err != nil {
-		return nil
-	}
-	return data
-}
-
-func firstStringField(data map[string]any, keys ...string) string {
-	for _, key := range keys {
-		if v, ok := data[key]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				return s
-			}
+func firstPixStaticCode(settings []paymentSetting) *pixStaticCode {
+	for _, s := range settings {
+		if s.PixStaticCode != nil && s.PixStaticCode.Key != "" {
+			return s.PixStaticCode
 		}
 	}
-	return ""
+	return nil
 }
 
-func extractPaymentAmount(data map[string]any) string {
-	if v, ok := data["total_amount_1000"]; ok {
-		return formatPaymentAmountValue(v, true)
-	}
-	if v, ok := data["amount_1000"]; ok {
-		return formatPaymentAmountValue(v, true)
-	}
-	if v, ok := data["amount"]; ok {
-		return formatPaymentAmountValue(v, false)
-	}
-	return ""
-}
-
-func formatPaymentAmountValue(v any, times1000 bool) string {
-	switch val := v.(type) {
-	case float64:
-		if times1000 {
-			return formatProductPriceText(int64(val), "")
-		}
-		return strconv.FormatFloat(val, 'f', -1, 64)
-	case string:
-		if times1000 {
-			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
-				return formatProductPriceText(n, "")
-			}
-			return val
-		}
-		return val
-	default:
+// formatPaymentMoney renders a Meta money object (value scaled by offset) as
+// pt-BR currency text; a zero value or offset yields no text.
+func formatPaymentMoney(m paymentMoney, currency string) string {
+	if m.Value == 0 || m.Offset == 0 {
 		return ""
+	}
+	return formatProductPriceText(m.Value*1000/m.Offset, currency)
+}
+
+// formatPixKeyDisplay formats a phone Pix key as a Brazilian number for display;
+// other key types are shown as-is (the raw key is kept for copy).
+func formatPixKeyDisplay(key, keyType string) string {
+	if strings.EqualFold(keyType, "PHONE") {
+		return formatBrazilPhone(key)
+	}
+	return key
+}
+
+func formatBrazilPhone(raw string) string {
+	digits := make([]byte, 0, len(raw))
+	for i := 0; i < len(raw); i++ {
+		if raw[i] >= '0' && raw[i] <= '9' {
+			digits = append(digits, raw[i])
+		}
+	}
+	s := strings.TrimPrefix(string(digits), "55")
+	switch len(s) {
+	case 11:
+		return fmt.Sprintf("%s %s-%s", s[:2], s[2:7], s[7:])
+	case 10:
+		return fmt.Sprintf("%s %s-%s", s[:2], s[2:6], s[6:])
+	default:
+		return raw
 	}
 }
 
@@ -928,94 +1014,6 @@ func buildEventRich(em *waE2E.EventMessage) *InboundRichContent {
 	}
 
 	return &InboundRichContent{Kind: "event", Event: event}
-}
-
-func buildRequestPaymentRich(rq *waE2E.RequestPaymentMessage) *InboundRichContent {
-	note := rq.GetRequestFrom()
-	if note == "" {
-		note = extractText(unwrapMessage(rq.GetNoteMessage()))
-	}
-
-	amount := formatMoney(rq.GetAmount())
-	if amount == "" {
-		if amount1000 := rq.GetAmount1000(); amount1000 != 0 {
-			amount = formatProductPriceText(int64(amount1000), rq.GetCurrencyCodeIso4217())
-		}
-	}
-
-	if note == "" && amount == "" {
-		return nil
-	}
-
-	return &InboundRichContent{
-		Kind: "interactive",
-		Flow: "payment",
-		Payment: &InboundRichPayment{
-			Note:   note,
-			Amount: amount,
-		},
-	}
-}
-
-func buildSendPaymentRich(sp *waE2E.SendPaymentMessage) *InboundRichContent {
-	note := extractText(unwrapMessage(sp.GetNoteMessage()))
-	if note == "" {
-		return nil
-	}
-
-	return &InboundRichContent{
-		Kind: "interactive",
-		Flow: "payment",
-		Payment: &InboundRichPayment{
-			Note: note,
-		},
-	}
-}
-
-func buildPaymentInviteRich(pi *waE2E.PaymentInviteMessage) *InboundRichContent {
-	note := ""
-	if st := pi.GetServiceType(); st != waE2E.PaymentInviteMessage_UNKNOWN {
-		note = st.String()
-	}
-
-	return &InboundRichContent{
-		Kind: "interactive",
-		Flow: "payment",
-		Payment: &InboundRichPayment{
-			Note: note,
-		},
-	}
-}
-
-func formatMoney(m *waE2E.Money) string {
-	if m == nil {
-		return ""
-	}
-	cents := moneyCents(m.GetValue(), m.GetOffset())
-	return formatProductPriceText(cents*10, m.GetCurrencyCode())
-}
-
-func moneyCents(value int64, offset uint32) int64 {
-	switch {
-	case offset == 2:
-		return value
-	case offset > 2:
-		div := pow10(offset - 2)
-		if div == 0 {
-			return value
-		}
-		return value / div
-	default:
-		return value * pow10(2-offset)
-	}
-}
-
-func pow10(n uint32) int64 {
-	result := int64(1)
-	for i := uint32(0); i < n; i++ {
-		result *= 10
-	}
-	return result
 }
 
 var contentFieldIgnore = map[string]bool{

@@ -1482,8 +1482,8 @@ func TestBuildInboundInteractiveMessageNativeFlow(t *testing.T) {
 			paramsJSON: `{"display_text":"Pagar agora"}`,
 			wantFlow:   "payment",
 			check: func(t *testing.T, rich *mapper.InboundRichContent) {
-				if len(rich.Buttons) != 1 || rich.Buttons[0].Text != "Pagar agora" {
-					t.Fatalf("unexpected buttons: %+v", rich.Buttons)
+				if len(rich.Buttons) != 0 {
+					t.Fatalf("payment flow must not emit button chips, got %+v", rich.Buttons)
 				}
 			},
 		},
@@ -1493,8 +1493,8 @@ func TestBuildInboundInteractiveMessageNativeFlow(t *testing.T) {
 			paramsJSON: `{"display_text":"Ver cobrança"}`,
 			wantFlow:   "payment",
 			check: func(t *testing.T, rich *mapper.InboundRichContent) {
-				if len(rich.Buttons) != 1 || rich.Buttons[0].Text != "Ver cobrança" {
-					t.Fatalf("unexpected buttons: %+v", rich.Buttons)
+				if len(rich.Buttons) != 0 {
+					t.Fatalf("payment flow must not emit button chips, got %+v", rich.Buttons)
 				}
 			},
 		},
@@ -1543,52 +1543,101 @@ func TestBuildInboundInteractiveMessageNativeFlow(t *testing.T) {
 	}
 }
 
-func TestBuildInboundInteractiveMessagePaymentFlowParsesPixDetails(t *testing.T) {
-	evt := &events.Message{
-		Info: baseInfo("wamid.interactive-payment-1", "5511999999999"),
+func paymentInteractiveEvt(id, buttonName, paramsJSON string) *events.Message {
+	return &events.Message{
+		Info: baseInfo(id, "5511999999999"),
 		Message: &waE2E.Message{
 			InteractiveMessage: &waE2E.InteractiveMessage{
-				Body: &waE2E.InteractiveMessage_Body{Text: proto.String("Pagamento via Pix")},
 				InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
 					NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
 						Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
-							{
-								Name: proto.String("review_and_pay"),
-								ButtonParamsJSON: proto.String(
-									`{"display_text":"Copiar chave Pix","copy_code":"00020126580014BR.GOV.BCB.PIX","amount_1000":11111000,"note":"Pedido #123"}`,
-								),
-							},
+							{Name: proto.String(buttonName), ButtonParamsJSON: proto.String(paramsJSON)},
 						},
 					},
 				},
 			},
 		},
 	}
+}
 
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+func TestBuildInboundPaymentInfoSharesPixKey(t *testing.T) {
+	params := `{"reference_id":"4VSZ0VLQ5GV","payment_settings":[{"type":"pix_static_code","pix_static_code":{"merchant_name":"Eu","key":"+5564984338175","key_type":"PHONE"}}],"currency":"BRL","total_amount":{"value":0,"offset":1000},"order":{"status":"payment_requested","items":[{"quantity":0,"retailer_id":"4VSZ0VLPZ3T","amount":{"offset":1000,"value":0},"name":""}]}}`
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", paymentInteractiveEvt("wamid.pix-key", "payment_info", params))
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
-	if out.RichContent == nil {
-		t.Fatalf("expected RichContent, got nil")
+	p := out.RichContent.Payment
+	if p == nil {
+		t.Fatalf("expected Payment, got nil")
 	}
-	if out.RichContent.Flow != "payment" {
-		t.Fatalf("expected Flow=payment, got %q", out.RichContent.Flow)
+	if p.Kind != "key" {
+		t.Fatalf("expected Kind=key, got %q", p.Kind)
 	}
-	if out.RichContent.Payment == nil {
-		t.Fatalf("expected RichContent.Payment, got nil")
+	if p.PixKey != "+5564984338175" || p.PixKeyType != "PHONE" {
+		t.Fatalf("unexpected pix key: %+v", p)
 	}
-	if out.RichContent.Payment.CopyCode != "00020126580014BR.GOV.BCB.PIX" {
-		t.Fatalf("expected CopyCode set, got %q", out.RichContent.Payment.CopyCode)
+	if p.PixKeyDisplay != "64 98433-8175" {
+		t.Fatalf("expected display '64 98433-8175', got %q", p.PixKeyDisplay)
 	}
-	if out.RichContent.Payment.CopyLabel != "Copiar chave Pix" {
-		t.Fatalf("expected CopyLabel='Copiar chave Pix', got %q", out.RichContent.Payment.CopyLabel)
+	if p.MerchantName != "Eu" || p.CopyLabel != "Copiar chave Pix" {
+		t.Fatalf("unexpected merchant/label: %+v", p)
 	}
-	if out.RichContent.Payment.Amount != "11.111,00" {
-		t.Fatalf("expected Amount='11.111,00', got %q", out.RichContent.Payment.Amount)
+	if p.Amount != "" {
+		t.Fatalf("expected empty amount for key share, got %q", p.Amount)
 	}
-	if out.RichContent.Payment.Note != "Pedido #123" {
-		t.Fatalf("expected Note='Pedido #123', got %q", out.RichContent.Payment.Note)
+	if len(p.Items) != 0 {
+		t.Fatalf("expected no items for key share, got %+v", p.Items)
+	}
+}
+
+func TestBuildInboundReviewAndPayIsCharge(t *testing.T) {
+	params := `{"reference_id":"4VSZ10LYBWD","currency":"BRL","total_amount":{"value":11000,"offset":1000},"order":{"status":"payment_requested","items":[{"retailer_id":"7493707287308237","name":"teste 3","amount":{"value":11000,"offset":1000},"quantity":1}]},"payment_settings":[{"type":"pix_static_code","pix_static_code":{"merchant_name":"Eu","key":"+5564984338175","key_type":"PHONE"}},{"type":"cards","cards":{"enabled":false}}]}`
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", paymentInteractiveEvt("wamid.pix-charge", "review_and_pay", params))
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	p := out.RichContent.Payment
+	if p == nil {
+		t.Fatalf("expected Payment, got nil")
+	}
+	if p.Kind != "charge" || p.ReferenceID != "4VSZ10LYBWD" {
+		t.Fatalf("unexpected kind/reference: %+v", p)
+	}
+	if p.Amount != "R$ 11,00" {
+		t.Fatalf("expected Amount='R$ 11,00', got %q", p.Amount)
+	}
+	if p.PixKey != "+5564984338175" || p.CopyLabel != "Copiar código Pix" {
+		t.Fatalf("unexpected pix/label: %+v", p)
+	}
+	if len(p.Items) != 1 || p.Items[0].Name != "teste 3" || p.Items[0].Quantity != 1 || p.Items[0].Amount != "R$ 11,00" {
+		t.Fatalf("unexpected items: %+v", p.Items)
+	}
+}
+
+func TestBuildInboundReviewOrderIsOrderReceipt(t *testing.T) {
+	params := `{"reference_id":"4VSZ10LYBWD","payment_status":"pending","currency":"BRL","total_amount":{"value":11000,"offset":1000},"order":{"status":"delivered","items":[{"retailer_id":"7493707287308237","name":"teste 3","amount":{"value":11000,"offset":1000},"quantity":1}]}}`
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", paymentInteractiveEvt("wamid.pix-order", "review_order", params))
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	p := out.RichContent.Payment
+	if p == nil {
+		t.Fatalf("expected Payment, got nil")
+	}
+	if p.Kind != "order" || p.Status != "delivered" {
+		t.Fatalf("unexpected kind/status: %+v", p)
+	}
+	if p.Amount != "R$ 11,00" {
+		t.Fatalf("expected Amount='R$ 11,00', got %q", p.Amount)
+	}
+	if p.PixKey != "" || p.CopyLabel != "" {
+		t.Fatalf("order receipt must not carry a pix key/copy button: %+v", p)
+	}
+	if len(p.Items) != 1 || p.Items[0].Name != "teste 3" {
+		t.Fatalf("unexpected items: %+v", p.Items)
 	}
 }
 
@@ -1899,163 +1948,6 @@ func TestBuildInboundEventMessageWithoutNameFallsBackToUnsupported(t *testing.T)
 	}
 	if out.Unsupported == nil || out.Unsupported.Type != "eventMessage" {
 		t.Fatalf("expected Unsupported.Type=eventMessage, got %+v", out.Unsupported)
-	}
-}
-
-func TestBuildInboundRequestPaymentMessage(t *testing.T) {
-	evt := &events.Message{
-		Info: baseInfo("wamid.request-payment-1", "5511999999999"),
-		Message: &waE2E.Message{
-			RequestPaymentMessage: &waE2E.RequestPaymentMessage{
-				RequestFrom:         proto.String("5511988887777@s.whatsapp.net"),
-				CurrencyCodeIso4217: proto.String("BRL"),
-				Amount: &waE2E.Money{
-					Value:        proto.Int64(5000),
-					Offset:       proto.Uint32(2),
-					CurrencyCode: proto.String("BRL"),
-				},
-				NoteMessage: &waE2E.Message{Conversation: proto.String("Pagamento do pedido #42")},
-			},
-		},
-	}
-
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
-	if err != nil {
-		t.Fatalf("BuildInbound: %v", err)
-	}
-	if out.Type != "interactive" {
-		t.Fatalf("expected Type=interactive, got %q", out.Type)
-	}
-	if out.RichContent == nil || out.RichContent.Flow != "payment" {
-		t.Fatalf("expected RichContent.Flow=payment, got %+v", out.RichContent)
-	}
-	payment := out.RichContent.Payment
-	if payment == nil {
-		t.Fatalf("expected RichContent.Payment, got nil")
-	}
-	if payment.Note != "5511988887777@s.whatsapp.net" {
-		t.Fatalf("expected Payment.Note=requestFrom, got %q", payment.Note)
-	}
-	if payment.Amount != "R$ 50,00" {
-		t.Fatalf("expected Payment.Amount='R$ 50,00', got %q", payment.Amount)
-	}
-}
-
-func TestBuildInboundRequestPaymentMessageFallsBackToNoteMessageAndAmount1000(t *testing.T) {
-	evt := &events.Message{
-		Info: baseInfo("wamid.request-payment-2", "5511999999999"),
-		Message: &waE2E.Message{
-			RequestPaymentMessage: &waE2E.RequestPaymentMessage{
-				CurrencyCodeIso4217: proto.String("BRL"),
-				Amount1000:          proto.Uint64(129900),
-				NoteMessage:         &waE2E.Message{Conversation: proto.String("Pedido #123")},
-			},
-		},
-	}
-
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
-	if err != nil {
-		t.Fatalf("BuildInbound: %v", err)
-	}
-	if out.RichContent == nil || out.RichContent.Payment == nil {
-		t.Fatalf("expected RichContent.Payment, got %+v", out.RichContent)
-	}
-	payment := out.RichContent.Payment
-	if payment.Note != "Pedido #123" {
-		t.Fatalf("expected Payment.Note='Pedido #123' (noteMessage fallback), got %q", payment.Note)
-	}
-	if payment.Amount != "R$ 129,90" {
-		t.Fatalf("expected Payment.Amount='R$ 129,90' (amount1000 fallback), got %q", payment.Amount)
-	}
-}
-
-func TestBuildInboundRequestPaymentMessageEmptyFallsBackToUnsupported(t *testing.T) {
-	evt := &events.Message{
-		Info: baseInfo("wamid.request-payment-empty-1", "5511999999999"),
-		Message: &waE2E.Message{
-			RequestPaymentMessage: &waE2E.RequestPaymentMessage{},
-		},
-	}
-
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
-	if err != nil {
-		t.Fatalf("BuildInbound: %v", err)
-	}
-	if out.Type != "unsupported" {
-		t.Fatalf("expected Type=unsupported, got %q", out.Type)
-	}
-	if out.Unsupported == nil || out.Unsupported.Type != "requestPaymentMessage" {
-		t.Fatalf("expected Unsupported.Type=requestPaymentMessage, got %+v", out.Unsupported)
-	}
-}
-
-func TestBuildInboundSendPaymentMessage(t *testing.T) {
-	evt := &events.Message{
-		Info: baseInfo("wamid.send-payment-1", "5511999999999"),
-		Message: &waE2E.Message{
-			SendPaymentMessage: &waE2E.SendPaymentMessage{
-				NoteMessage: &waE2E.Message{Conversation: proto.String("Pagamento enviado")},
-			},
-		},
-	}
-
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
-	if err != nil {
-		t.Fatalf("BuildInbound: %v", err)
-	}
-	if out.Type != "interactive" {
-		t.Fatalf("expected Type=interactive, got %q", out.Type)
-	}
-	if out.RichContent == nil || out.RichContent.Flow != "payment" {
-		t.Fatalf("expected RichContent.Flow=payment, got %+v", out.RichContent)
-	}
-	if out.RichContent.Payment == nil || out.RichContent.Payment.Note != "Pagamento enviado" {
-		t.Fatalf("expected Payment.Note='Pagamento enviado', got %+v", out.RichContent.Payment)
-	}
-}
-
-func TestBuildInboundSendPaymentMessageEmptyFallsBackToUnsupported(t *testing.T) {
-	evt := &events.Message{
-		Info: baseInfo("wamid.send-payment-empty-1", "5511999999999"),
-		Message: &waE2E.Message{
-			SendPaymentMessage: &waE2E.SendPaymentMessage{},
-		},
-	}
-
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
-	if err != nil {
-		t.Fatalf("BuildInbound: %v", err)
-	}
-	if out.Type != "unsupported" {
-		t.Fatalf("expected Type=unsupported, got %q", out.Type)
-	}
-	if out.Unsupported == nil || out.Unsupported.Type != "sendPaymentMessage" {
-		t.Fatalf("expected Unsupported.Type=sendPaymentMessage, got %+v", out.Unsupported)
-	}
-}
-
-func TestBuildInboundPaymentInviteMessage(t *testing.T) {
-	evt := &events.Message{
-		Info: baseInfo("wamid.payment-invite-1", "5511999999999"),
-		Message: &waE2E.Message{
-			PaymentInviteMessage: &waE2E.PaymentInviteMessage{
-				ServiceType: waE2E.PaymentInviteMessage_UPI.Enum(),
-			},
-		},
-	}
-
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
-	if err != nil {
-		t.Fatalf("BuildInbound: %v", err)
-	}
-	if out.Type != "interactive" {
-		t.Fatalf("expected Type=interactive, got %q", out.Type)
-	}
-	if out.RichContent == nil || out.RichContent.Flow != "payment" {
-		t.Fatalf("expected RichContent.Flow=payment, got %+v", out.RichContent)
-	}
-	if out.RichContent.Payment == nil {
-		t.Fatalf("expected RichContent.Payment (minimal card), got nil")
 	}
 }
 
