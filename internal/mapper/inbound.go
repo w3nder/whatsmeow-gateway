@@ -137,14 +137,15 @@ func BuildInbound(ctx context.Context, dl Downloader, resolver PNResolver, s3 Me
 	msg := unwrapMessage(evt.Message)
 
 	if pm := msg.GetProtocolMessage(); pm != nil {
-		switch pm.GetType() {
-		case waE2E.ProtocolMessage_REVOKE:
+		targetID := pm.GetKey().GetID()
+		switch {
+		case pm.GetType() == waE2E.ProtocolMessage_REVOKE && targetID != "":
 			out.Type = "revoke"
-			out.Target = &InboundTarget{ProviderMessageID: pm.GetKey().GetID()}
+			out.Target = &InboundTarget{ProviderMessageID: targetID}
 			return out, nil
-		case waE2E.ProtocolMessage_MESSAGE_EDIT:
+		case pm.GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT && targetID != "":
 			out.Type = "edit"
-			out.Target = &InboundTarget{ProviderMessageID: pm.GetKey().GetID()}
+			out.Target = &InboundTarget{ProviderMessageID: targetID}
 			out.Text = &InboundText{Body: extractText(unwrapMessage(pm.GetEditedMessage()))}
 			return out, nil
 		default:

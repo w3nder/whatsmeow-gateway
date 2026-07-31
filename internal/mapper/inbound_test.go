@@ -699,6 +699,20 @@ func TestBuildInboundProtocolMessageEdit(t *testing.T) {
 	}
 }
 
+func TestBuildInboundProtocolMessageEditWithoutTargetIsSkipped(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.edit-empty", "5511999999999"),
+		Message: &waE2E.Message{
+			ProtocolMessage: &waE2E.ProtocolMessage{Type: waE2E.ProtocolMessage_MESSAGE_EDIT.Enum()},
+		},
+	}
+
+	_, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if !errors.Is(err, mapper.ErrSkip) {
+		t.Fatalf("expected mapper.ErrSkip for an edit protocol message with no target key, got %v", err)
+	}
+}
+
 func TestBuildInboundSenderKeyDistributionMessageIsSkipped(t *testing.T) {
 	evt := &events.Message{
 		Info: baseInfo("wamid.skd-1", "5511999999999"),

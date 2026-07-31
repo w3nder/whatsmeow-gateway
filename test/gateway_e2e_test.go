@@ -372,7 +372,7 @@ func TestGatewayEndToEnd(t *testing.T) {
 		TenantID:  tenantID,
 		ChannelID: channelID,
 		MessageID: "msg-e2e-1",
-		To:        "+15551234567",
+		To:        "15551234567@s.whatsapp.net",
 		Type:      "text",
 		Text:      "hello from e2e",
 	}
