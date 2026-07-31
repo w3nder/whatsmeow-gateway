@@ -126,8 +126,10 @@ type InboundRichEvent struct {
 	StartTime   string `json:"startTime,omitempty"`
 	EndTime     string `json:"endTime,omitempty"`
 	Location    string `json:"location,omitempty"`
+	Address     string `json:"address,omitempty"`
 	JoinLink    string `json:"joinLink,omitempty"`
 	Canceled    bool   `json:"canceled,omitempty"`
+	IsCall      bool   `json:"isCall,omitempty"`
 }
 
 type InboundRichPollOption struct {
@@ -889,8 +891,10 @@ func buildEventRich(em *waE2E.EventMessage) *InboundRichContent {
 		Name:        name,
 		Description: em.GetDescription(),
 		Location:    em.GetLocation().GetName(),
+		Address:     em.GetLocation().GetAddress(),
 		JoinLink:    em.GetJoinLink(),
 		Canceled:    em.GetIsCanceled(),
+		IsCall:      em.GetIsScheduleCall(),
 	}
 	if st := em.GetStartTime(); st != 0 {
 		event.StartTime = time.Unix(st, 0).UTC().Format(time.RFC3339)
