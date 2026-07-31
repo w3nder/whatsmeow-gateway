@@ -110,6 +110,14 @@ type InboundRichProduct struct {
 	PriceText   string `json:"priceText,omitempty"`
 	Currency    string `json:"currency,omitempty"`
 	RetailerID  string `json:"retailerId,omitempty"`
+	URL         string `json:"url,omitempty"`
+}
+
+type InboundRichPayment struct {
+	Note      string `json:"note,omitempty"`
+	CopyCode  string `json:"copyCode,omitempty"`
+	CopyLabel string `json:"copyLabel,omitempty"`
+	Amount    string `json:"amount,omitempty"`
 }
 
 type InboundRichEvent struct {
@@ -131,6 +139,7 @@ type InboundRichContent struct {
 	List    *InboundRichList    `json:"list,omitempty"`
 	Product *InboundRichProduct `json:"product,omitempty"`
 	Event   *InboundRichEvent   `json:"event,omitempty"`
+	Payment *InboundRichPayment `json:"payment,omitempty"`
 }
 
 type InboundEvent struct {
@@ -413,6 +422,13 @@ func BuildInbound(ctx context.Context, dl Downloader, resolver PNResolver, s3 Me
 			return InboundEvent{}, err
 		}
 		out.ContextMessageID = product.GetContextInfo().GetStanzaID()
+		if out.RichContent != nil {
+			if productImage := product.GetProduct().GetProductImage(); productImage != nil {
+				if media, err := downloadAndStore(ctx, dl, s3, tenantID, evt.Info.ID, productImage.GetMimetype(), productImage); err == nil {
+					out.Media = media
+				}
+			}
+		}
 
 	case msg.GetEventMessage() != nil:
 		event := msg.GetEventMessage()
@@ -643,10 +659,12 @@ func buildInteractiveRich(im *waE2E.InteractiveMessage) *InboundRichContent {
 	buttons := make([]InboundRichButton, 0, len(nativeButtons))
 	flows := make([]string, 0, len(nativeButtons))
 	var list *InboundRichList
+	var payment *InboundRichPayment
 
 	for _, b := range nativeButtons {
 		name := b.GetName()
-		flows = append(flows, classifyNativeFlowName(name))
+		flow := classifyNativeFlowName(name)
+		flows = append(flows, flow)
 
 		params := parseNativeFlowButtonParams(b.GetButtonParamsJSON())
 		if len(params.Sections) > 0 {
@@ -667,6 +685,15 @@ func buildInteractiveRich(im *waE2E.InteractiveMessage) *InboundRichContent {
 			Name: name,
 			URL:  params.URL,
 		})
+
+		if flow == "payment" && payment == nil {
+			payment = parsePaymentDetails(b.GetButtonParamsJSON(), name)
+		}
+	}
+
+	dominantFlow := dominantNativeFlow(flows)
+	if dominantFlow != "payment" {
+		payment = nil
 	}
 
 	if body == "" && footer == "" && len(buttons) == 0 && list == nil {
@@ -675,27 +702,133 @@ func buildInteractiveRich(im *waE2E.InteractiveMessage) *InboundRichContent {
 
 	return &InboundRichContent{
 		Kind:    "interactive",
-		Flow:    dominantNativeFlow(flows),
+		Flow:    dominantFlow,
 		Body:    body,
 		Footer:  footer,
 		Buttons: buttons,
 		List:    list,
+		Payment: payment,
 	}
 }
 
-func formatProductPriceText(amount1000 int64, currency string) string {
-	if amount1000 == 0 && currency == "" {
+func parsePaymentDetails(raw, buttonName string) *InboundRichPayment {
+	data := parseJSONObject(raw)
+	if data == nil {
+		return nil
+	}
+
+	payment := &InboundRichPayment{
+		CopyCode: firstStringField(data, "copy_code", "code", "pix_code", "key", "pix_key"),
+		Note:     firstStringField(data, "note", "reference", "merchant", "merchant_name"),
+		Amount:   extractPaymentAmount(data),
+	}
+	payment.CopyLabel = firstStringField(data, "display_text")
+	if payment.CopyLabel == "" {
+		payment.CopyLabel = buttonName
+	}
+	return payment
+}
+
+func parseJSONObject(raw string) map[string]any {
+	if raw == "" {
+		return nil
+	}
+	var data map[string]any
+	if err := json.Unmarshal([]byte(raw), &data); err != nil {
+		return nil
+	}
+	return data
+}
+
+func firstStringField(data map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := data[key]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func extractPaymentAmount(data map[string]any) string {
+	if v, ok := data["total_amount_1000"]; ok {
+		return formatPaymentAmountValue(v, true)
+	}
+	if v, ok := data["amount_1000"]; ok {
+		return formatPaymentAmountValue(v, true)
+	}
+	if v, ok := data["amount"]; ok {
+		return formatPaymentAmountValue(v, false)
+	}
+	return ""
+}
+
+func formatPaymentAmountValue(v any, times1000 bool) string {
+	switch val := v.(type) {
+	case float64:
+		if times1000 {
+			return formatProductPriceText(int64(val), "")
+		}
+		return strconv.FormatFloat(val, 'f', -1, 64)
+	case string:
+		if times1000 {
+			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+				return formatProductPriceText(n, "")
+			}
+			return val
+		}
+		return val
+	default:
 		return ""
 	}
-	value := float64(amount1000) / 1000.0
+}
+
+func formatProductPriceText(priceAmount1000 int64, currency string) string {
+	if priceAmount1000 == 0 {
+		return ""
+	}
+
+	negative := priceAmount1000 < 0
+	cents := priceAmount1000 / 10
+	if negative {
+		cents = -cents
+	}
+	integerPart := cents / 100
+	decimalPart := cents % 100
+
+	amountText := fmt.Sprintf("%s,%02d", groupThousands(strconv.FormatInt(integerPart, 10)), decimalPart)
+	if negative {
+		amountText = "-" + amountText
+	}
+
 	symbol := currency
 	if currency == "BRL" {
 		symbol = "R$"
 	}
 	if symbol == "" {
-		return fmt.Sprintf("%.2f", value)
+		return amountText
 	}
-	return fmt.Sprintf("%s %.2f", symbol, value)
+	return symbol + " " + amountText
+}
+
+func groupThousands(digits string) string {
+	n := len(digits)
+	if n <= 3 {
+		return digits
+	}
+
+	var b strings.Builder
+	lead := n % 3
+	if lead == 0 {
+		lead = 3
+	}
+	b.WriteString(digits[:lead])
+	for i := lead; i < n; i += 3 {
+		b.WriteByte('.')
+		b.WriteString(digits[i : i+3])
+	}
+	return b.String()
 }
 
 func buildProductRich(pm *waE2E.ProductMessage) *InboundRichContent {
@@ -713,6 +846,7 @@ func buildProductRich(pm *waE2E.ProductMessage) *InboundRichContent {
 			PriceText:   formatProductPriceText(snap.GetPriceAmount1000(), snap.GetCurrencyCode()),
 			Currency:    snap.GetCurrencyCode(),
 			RetailerID:  snap.GetRetailerID(),
+			URL:         snap.GetURL(),
 		},
 	}
 }

@@ -1538,6 +1538,84 @@ func TestBuildInboundInteractiveMessageNativeFlow(t *testing.T) {
 	}
 }
 
+func TestBuildInboundInteractiveMessagePaymentFlowParsesPixDetails(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.interactive-payment-1", "5511999999999"),
+		Message: &waE2E.Message{
+			InteractiveMessage: &waE2E.InteractiveMessage{
+				Body: &waE2E.InteractiveMessage_Body{Text: proto.String("Pagamento via Pix")},
+				InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
+					NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
+						Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+							{
+								Name: proto.String("review_and_pay"),
+								ButtonParamsJSON: proto.String(
+									`{"display_text":"Copiar chave Pix","copy_code":"00020126580014BR.GOV.BCB.PIX","amount_1000":11111000,"note":"Pedido #123"}`,
+								),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.RichContent == nil {
+		t.Fatalf("expected RichContent, got nil")
+	}
+	if out.RichContent.Flow != "payment" {
+		t.Fatalf("expected Flow=payment, got %q", out.RichContent.Flow)
+	}
+	if out.RichContent.Payment == nil {
+		t.Fatalf("expected RichContent.Payment, got nil")
+	}
+	if out.RichContent.Payment.CopyCode != "00020126580014BR.GOV.BCB.PIX" {
+		t.Fatalf("expected CopyCode set, got %q", out.RichContent.Payment.CopyCode)
+	}
+	if out.RichContent.Payment.CopyLabel != "Copiar chave Pix" {
+		t.Fatalf("expected CopyLabel='Copiar chave Pix', got %q", out.RichContent.Payment.CopyLabel)
+	}
+	if out.RichContent.Payment.Amount != "11.111,00" {
+		t.Fatalf("expected Amount='11.111,00', got %q", out.RichContent.Payment.Amount)
+	}
+	if out.RichContent.Payment.Note != "Pedido #123" {
+		t.Fatalf("expected Note='Pedido #123', got %q", out.RichContent.Payment.Note)
+	}
+}
+
+func TestBuildInboundInteractiveMessagePaymentFlowMissingParamsOmitsPayment(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.interactive-payment-2", "5511999999999"),
+		Message: &waE2E.Message{
+			InteractiveMessage: &waE2E.InteractiveMessage{
+				Body: &waE2E.InteractiveMessage_Body{Text: proto.String("Pagamento via Pix")},
+				InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
+					NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
+						Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+							{Name: proto.String("review_and_pay")},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.RichContent == nil || out.RichContent.Flow != "payment" {
+		t.Fatalf("expected Flow=payment, got %+v", out.RichContent)
+	}
+	if out.RichContent.Payment != nil {
+		t.Fatalf("expected no Payment when ButtonParamsJSON is absent, got %+v", out.RichContent.Payment)
+	}
+}
+
 func TestBuildInboundInteractiveMessageEmptyFallsBackToUnsupported(t *testing.T) {
 	evt := &events.Message{
 		Info: baseInfo("wamid.interactive-empty-1", "5511999999999"),
@@ -1601,8 +1679,99 @@ func TestBuildInboundProductMessage(t *testing.T) {
 	if product.Currency != "BRL" || product.RetailerID != "sku-42" {
 		t.Fatalf("unexpected currency/retailerId: %+v", product)
 	}
-	if product.PriceText != "R$ 129.90" {
-		t.Fatalf("expected PriceText='R$ 129.90', got %q", product.PriceText)
+	if product.PriceText != "R$ 129,90" {
+		t.Fatalf("expected PriceText='R$ 129,90', got %q", product.PriceText)
+	}
+	if product.URL != "" {
+		t.Fatalf("expected empty URL when not set, got %q", product.URL)
+	}
+}
+
+func TestBuildInboundProductMessageWithImageDownloadsAndFormatsPriceAndURL(t *testing.T) {
+	dl := fakeDownloader{data: []byte("product image bytes")}
+	store := &fakeMediaStore{}
+	evt := &events.Message{
+		Info: baseInfo("wamid.product-image-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ProductMessage: &waE2E.ProductMessage{
+				Product: &waE2E.ProductMessage_ProductSnapshot{
+					Title:           proto.String("Cadeira gamer"),
+					CurrencyCode:    proto.String("BRL"),
+					PriceAmount1000: proto.Int64(11111000),
+					RetailerID:      proto.String("sku-99"),
+					URL:             proto.String("https://example.com/product/cadeira-gamer"),
+					ProductImage: &waE2E.ImageMessage{
+						Mimetype: proto.String("image/jpeg"),
+					},
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), dl, nil, store, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "product" {
+		t.Fatalf("expected Type=product, got %q", out.Type)
+	}
+	if out.Media == nil {
+		t.Fatalf("expected Media for product with image, got nil")
+	}
+	if out.Media.Key == "" {
+		t.Fatalf("expected non-empty media key")
+	}
+	if out.Media.MimeType != "image/jpeg" {
+		t.Fatalf("expected MimeType=image/jpeg, got %q", out.Media.MimeType)
+	}
+	if len(store.puts) != 1 || string(store.puts[0].data) != "product image bytes" {
+		t.Fatalf("expected product image bytes stored, got %+v", store.puts)
+	}
+	if out.RichContent == nil || out.RichContent.Product == nil {
+		t.Fatalf("expected RichContent.Product, got %+v", out.RichContent)
+	}
+	if out.RichContent.Product.PriceText != "R$ 11.111,00" {
+		t.Fatalf("expected PriceText='R$ 11.111,00', got %q", out.RichContent.Product.PriceText)
+	}
+	if out.RichContent.Product.URL != "https://example.com/product/cadeira-gamer" {
+		t.Fatalf("expected Product.URL set, got %q", out.RichContent.Product.URL)
+	}
+}
+
+func TestBuildInboundProductMessageImageDownloadFailureStillEmitsRichContent(t *testing.T) {
+	dl := fakeDownloader{err: errors.New("download failed")}
+	store := &fakeMediaStore{}
+	evt := &events.Message{
+		Info: baseInfo("wamid.product-image-err-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ProductMessage: &waE2E.ProductMessage{
+				Product: &waE2E.ProductMessage_ProductSnapshot{
+					Title:           proto.String("Cadeira gamer"),
+					CurrencyCode:    proto.String("BRL"),
+					PriceAmount1000: proto.Int64(129900),
+					ProductImage: &waE2E.ImageMessage{
+						Mimetype: proto.String("image/jpeg"),
+					},
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), dl, nil, store, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "product" {
+		t.Fatalf("expected Type=product, got %q", out.Type)
+	}
+	if out.Media != nil {
+		t.Fatalf("expected no Media when image download fails, got %+v", out.Media)
+	}
+	if out.RichContent == nil || out.RichContent.Product == nil || out.RichContent.Product.Title != "Cadeira gamer" {
+		t.Fatalf("expected RichContent.Product still emitted, got %+v", out.RichContent)
+	}
+	if len(store.puts) != 0 {
+		t.Fatalf("expected no store.Put calls after download failure, got %d", len(store.puts))
 	}
 }
 
