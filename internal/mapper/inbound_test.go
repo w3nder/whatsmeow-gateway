@@ -1258,6 +1258,476 @@ func TestBuildInboundPollCreationV2(t *testing.T) {
 	}
 }
 
+func TestBuildInboundButtonsMessage(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.buttons-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ButtonsMessage: &waE2E.ButtonsMessage{
+				ContentText: proto.String("Pick one"),
+				FooterText:  proto.String("powered by vectax"),
+				ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String("wamid.quoted-buttons")},
+				Buttons: []*waE2E.ButtonsMessage_Button{
+					{
+						ButtonID:   proto.String("btn-1"),
+						ButtonText: &waE2E.ButtonsMessage_Button_ButtonText{DisplayText: proto.String("Yes")},
+					},
+					{
+						ButtonID:   proto.String("btn-2"),
+						ButtonText: &waE2E.ButtonsMessage_Button_ButtonText{DisplayText: proto.String("No")},
+					},
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "buttons" {
+		t.Fatalf("expected Type=buttons, got %q", out.Type)
+	}
+	if out.ContextMessageID != "wamid.quoted-buttons" {
+		t.Fatalf("expected ContextMessageID=wamid.quoted-buttons, got %q", out.ContextMessageID)
+	}
+	if out.RichContent == nil || out.RichContent.Kind != "buttons" {
+		t.Fatalf("expected RichContent.Kind=buttons, got %+v", out.RichContent)
+	}
+	if out.RichContent.Body != "Pick one" {
+		t.Fatalf("expected RichContent.Body='Pick one', got %q", out.RichContent.Body)
+	}
+	if out.RichContent.Footer != "powered by vectax" {
+		t.Fatalf("expected RichContent.Footer='powered by vectax', got %q", out.RichContent.Footer)
+	}
+	if len(out.RichContent.Buttons) != 2 {
+		t.Fatalf("expected 2 buttons, got %+v", out.RichContent.Buttons)
+	}
+	if out.RichContent.Buttons[0].ID != "btn-1" || out.RichContent.Buttons[0].Text != "Yes" {
+		t.Fatalf("unexpected first button: %+v", out.RichContent.Buttons[0])
+	}
+	if out.RichContent.Buttons[1].ID != "btn-2" || out.RichContent.Buttons[1].Text != "No" {
+		t.Fatalf("unexpected second button: %+v", out.RichContent.Buttons[1])
+	}
+}
+
+func TestBuildInboundButtonsMessageEmptyFallsBackToUnsupported(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.buttons-empty-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ButtonsMessage: &waE2E.ButtonsMessage{},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "unsupported" {
+		t.Fatalf("expected Type=unsupported, got %q", out.Type)
+	}
+	if out.RichContent != nil {
+		t.Fatalf("expected no RichContent for an empty ButtonsMessage, got %+v", out.RichContent)
+	}
+	if out.Unsupported == nil || out.Unsupported.Type != "buttonsMessage" {
+		t.Fatalf("expected Unsupported.Type=buttonsMessage, got %+v", out.Unsupported)
+	}
+}
+
+func TestBuildInboundListMessage(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.list-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ListMessage: &waE2E.ListMessage{
+				Description: proto.String("Choose your plan"),
+				FooterText:  proto.String("valid today"),
+				ButtonText:  proto.String("View plans"),
+				ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String("wamid.quoted-list")},
+				Sections: []*waE2E.ListMessage_Section{
+					{
+						Title: proto.String("Plans"),
+						Rows: []*waE2E.ListMessage_Row{
+							{RowID: proto.String("row-1"), Title: proto.String("Basic"), Description: proto.String("R$ 10/mo")},
+							{RowID: proto.String("row-2"), Title: proto.String("Pro"), Description: proto.String("R$ 20/mo")},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "list" {
+		t.Fatalf("expected Type=list, got %q", out.Type)
+	}
+	if out.ContextMessageID != "wamid.quoted-list" {
+		t.Fatalf("expected ContextMessageID=wamid.quoted-list, got %q", out.ContextMessageID)
+	}
+	if out.RichContent == nil || out.RichContent.Kind != "list" {
+		t.Fatalf("expected RichContent.Kind=list, got %+v", out.RichContent)
+	}
+	if out.RichContent.Body != "Choose your plan" || out.RichContent.Footer != "valid today" {
+		t.Fatalf("unexpected body/footer: %+v", out.RichContent)
+	}
+	if out.RichContent.List == nil || out.RichContent.List.ButtonText != "View plans" {
+		t.Fatalf("expected List.ButtonText='View plans', got %+v", out.RichContent.List)
+	}
+	if len(out.RichContent.List.Sections) != 1 || out.RichContent.List.Sections[0].Title != "Plans" {
+		t.Fatalf("unexpected sections: %+v", out.RichContent.List.Sections)
+	}
+	rows := out.RichContent.List.Sections[0].Rows
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %+v", rows)
+	}
+	if rows[0].ID != "row-1" || rows[0].Title != "Basic" || rows[0].Description != "R$ 10/mo" {
+		t.Fatalf("unexpected first row: %+v", rows[0])
+	}
+	if rows[1].ID != "row-2" || rows[1].Title != "Pro" || rows[1].Description != "R$ 20/mo" {
+		t.Fatalf("unexpected second row: %+v", rows[1])
+	}
+}
+
+func TestBuildInboundListMessageEmptyFallsBackToUnsupported(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.list-empty-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ListMessage: &waE2E.ListMessage{},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "unsupported" {
+		t.Fatalf("expected Type=unsupported, got %q", out.Type)
+	}
+	if out.RichContent != nil {
+		t.Fatalf("expected no RichContent for an empty ListMessage, got %+v", out.RichContent)
+	}
+	if out.Unsupported == nil || out.Unsupported.Type != "listMessage" {
+		t.Fatalf("expected Unsupported.Type=listMessage, got %+v", out.Unsupported)
+	}
+}
+
+func TestBuildInboundInteractiveMessageNativeFlow(t *testing.T) {
+	tests := []struct {
+		name       string
+		buttonName string
+		paramsJSON string
+		wantFlow   string
+		check      func(t *testing.T, rich *mapper.InboundRichContent)
+	}{
+		{
+			name:       "quick_reply maps to buttons flow",
+			buttonName: "quick_reply",
+			paramsJSON: `{"display_text":"Confirmar","id":"opt-1"}`,
+			wantFlow:   "buttons",
+			check: func(t *testing.T, rich *mapper.InboundRichContent) {
+				if len(rich.Buttons) != 1 {
+					t.Fatalf("expected 1 button, got %+v", rich.Buttons)
+				}
+				b := rich.Buttons[0]
+				if b.Text != "Confirmar" || b.ID != "opt-1" || b.Name != "quick_reply" {
+					t.Fatalf("unexpected button: %+v", b)
+				}
+			},
+		},
+		{
+			name:       "single_select maps to list flow",
+			buttonName: "single_select",
+			paramsJSON: `{"title":"Escolha uma opção","sections":[{"title":"Seção 1","rows":[{"id":"r1","title":"Linha 1","description":"desc"}]}]}`,
+			wantFlow:   "list",
+			check: func(t *testing.T, rich *mapper.InboundRichContent) {
+				if len(rich.Buttons) != 0 {
+					t.Fatalf("expected no plain buttons for single_select, got %+v", rich.Buttons)
+				}
+				if rich.List == nil || rich.List.ButtonText != "Escolha uma opção" {
+					t.Fatalf("expected List.ButtonText='Escolha uma opção', got %+v", rich.List)
+				}
+				if len(rich.List.Sections) != 1 || rich.List.Sections[0].Title != "Seção 1" {
+					t.Fatalf("unexpected sections: %+v", rich.List.Sections)
+				}
+				rows := rich.List.Sections[0].Rows
+				if len(rows) != 1 || rows[0].ID != "r1" || rows[0].Title != "Linha 1" || rows[0].Description != "desc" {
+					t.Fatalf("unexpected rows: %+v", rows)
+				}
+			},
+		},
+		{
+			name:       "cta_url maps to cta flow with button url",
+			buttonName: "cta_url",
+			paramsJSON: `{"display_text":"Visitar site","url":"https://example.com"}`,
+			wantFlow:   "cta",
+			check: func(t *testing.T, rich *mapper.InboundRichContent) {
+				if len(rich.Buttons) != 1 {
+					t.Fatalf("expected 1 button, got %+v", rich.Buttons)
+				}
+				b := rich.Buttons[0]
+				if b.Text != "Visitar site" || b.URL != "https://example.com" {
+					t.Fatalf("unexpected button: %+v", b)
+				}
+			},
+		},
+		{
+			name:       "review_and_pay maps to payment flow",
+			buttonName: "review_and_pay",
+			paramsJSON: `{"display_text":"Pagar agora"}`,
+			wantFlow:   "payment",
+			check: func(t *testing.T, rich *mapper.InboundRichContent) {
+				if len(rich.Buttons) != 1 || rich.Buttons[0].Text != "Pagar agora" {
+					t.Fatalf("unexpected buttons: %+v", rich.Buttons)
+				}
+			},
+		},
+		{
+			name:       "payment_info maps to payment flow",
+			buttonName: "payment_info",
+			paramsJSON: `{"display_text":"Ver cobrança"}`,
+			wantFlow:   "payment",
+			check: func(t *testing.T, rich *mapper.InboundRichContent) {
+				if len(rich.Buttons) != 1 || rich.Buttons[0].Text != "Ver cobrança" {
+					t.Fatalf("unexpected buttons: %+v", rich.Buttons)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			evt := &events.Message{
+				Info: baseInfo("wamid.interactive-native-"+tt.name, "5511999999999"),
+				Message: &waE2E.Message{
+					InteractiveMessage: &waE2E.InteractiveMessage{
+						Body:   &waE2E.InteractiveMessage_Body{Text: proto.String("Interactive body")},
+						Footer: &waE2E.InteractiveMessage_Footer{Text: proto.String("Interactive footer")},
+						InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
+							NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
+								Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+									{
+										Name:             proto.String(tt.buttonName),
+										ButtonParamsJSON: proto.String(tt.paramsJSON),
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+
+			out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+			if err != nil {
+				t.Fatalf("BuildInbound: %v", err)
+			}
+			if out.Type != "interactive" {
+				t.Fatalf("expected Type=interactive, got %q", out.Type)
+			}
+			if out.RichContent == nil {
+				t.Fatalf("expected RichContent, got nil")
+			}
+			if out.RichContent.Flow != tt.wantFlow {
+				t.Fatalf("expected Flow=%q, got %q", tt.wantFlow, out.RichContent.Flow)
+			}
+			if out.RichContent.Body != "Interactive body" || out.RichContent.Footer != "Interactive footer" {
+				t.Fatalf("unexpected body/footer: %+v", out.RichContent)
+			}
+			tt.check(t, out.RichContent)
+		})
+	}
+}
+
+func TestBuildInboundInteractiveMessageEmptyFallsBackToUnsupported(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.interactive-empty-1", "5511999999999"),
+		Message: &waE2E.Message{
+			InteractiveMessage: &waE2E.InteractiveMessage{},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "unsupported" {
+		t.Fatalf("expected Type=unsupported, got %q", out.Type)
+	}
+	if out.RichContent != nil {
+		t.Fatalf("expected no RichContent for an empty InteractiveMessage, got %+v", out.RichContent)
+	}
+	if out.Unsupported == nil || out.Unsupported.Type != "interactiveMessage" {
+		t.Fatalf("expected Unsupported.Type=interactiveMessage, got %+v", out.Unsupported)
+	}
+}
+
+func TestBuildInboundProductMessage(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.product-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ProductMessage: &waE2E.ProductMessage{
+				ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String("wamid.quoted-product")},
+				Product: &waE2E.ProductMessage_ProductSnapshot{
+					Title:           proto.String("Tênis de corrida"),
+					Description:     proto.String("Leve e confortável"),
+					CurrencyCode:    proto.String("BRL"),
+					PriceAmount1000: proto.Int64(129900),
+					RetailerID:      proto.String("sku-42"),
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "product" {
+		t.Fatalf("expected Type=product, got %q", out.Type)
+	}
+	if out.ContextMessageID != "wamid.quoted-product" {
+		t.Fatalf("expected ContextMessageID=wamid.quoted-product, got %q", out.ContextMessageID)
+	}
+	if out.RichContent == nil || out.RichContent.Kind != "product" {
+		t.Fatalf("expected RichContent.Kind=product, got %+v", out.RichContent)
+	}
+	product := out.RichContent.Product
+	if product == nil || product.Title != "Tênis de corrida" {
+		t.Fatalf("expected Product.Title='Tênis de corrida', got %+v", product)
+	}
+	if product.Description != "Leve e confortável" {
+		t.Fatalf("unexpected description: %q", product.Description)
+	}
+	if product.Currency != "BRL" || product.RetailerID != "sku-42" {
+		t.Fatalf("unexpected currency/retailerId: %+v", product)
+	}
+	if product.PriceText != "R$ 129.90" {
+		t.Fatalf("expected PriceText='R$ 129.90', got %q", product.PriceText)
+	}
+}
+
+func TestBuildInboundProductMessageWithoutTitleFallsBackToUnsupported(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.product-empty-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ProductMessage: &waE2E.ProductMessage{
+				Product: &waE2E.ProductMessage_ProductSnapshot{},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "unsupported" {
+		t.Fatalf("expected Type=unsupported, got %q", out.Type)
+	}
+	if out.RichContent != nil {
+		t.Fatalf("expected no RichContent for a titleless ProductMessage, got %+v", out.RichContent)
+	}
+	if out.Unsupported == nil || out.Unsupported.Type != "productMessage" {
+		t.Fatalf("expected Unsupported.Type=productMessage, got %+v", out.Unsupported)
+	}
+}
+
+func TestBuildInboundEventMessage(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.event-1", "5511999999999"),
+		Message: &waE2E.Message{
+			EventMessage: &waE2E.EventMessage{
+				ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String("wamid.quoted-event")},
+				Name:        proto.String("Lançamento de produto"),
+				Description: proto.String("Venha conhecer as novidades"),
+				StartTime:   proto.Int64(1700000000),
+				EndTime:     proto.Int64(1700003600),
+				JoinLink:    proto.String("https://example.com/join"),
+				IsCanceled:  proto.Bool(false),
+				Location:    &waE2E.LocationMessage{Name: proto.String("Sede vectax")},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "event" {
+		t.Fatalf("expected Type=event, got %q", out.Type)
+	}
+	if out.ContextMessageID != "wamid.quoted-event" {
+		t.Fatalf("expected ContextMessageID=wamid.quoted-event, got %q", out.ContextMessageID)
+	}
+	if out.RichContent == nil || out.RichContent.Kind != "event" {
+		t.Fatalf("expected RichContent.Kind=event, got %+v", out.RichContent)
+	}
+	event := out.RichContent.Event
+	if event == nil || event.Name != "Lançamento de produto" {
+		t.Fatalf("expected Event.Name='Lançamento de produto', got %+v", event)
+	}
+	if event.Description != "Venha conhecer as novidades" {
+		t.Fatalf("unexpected description: %q", event.Description)
+	}
+	if event.StartTime != "1700000000" || event.EndTime != "1700003600" {
+		t.Fatalf("unexpected start/end time: %+v", event)
+	}
+	if event.Location != "Sede vectax" {
+		t.Fatalf("unexpected location: %q", event.Location)
+	}
+	if event.JoinLink != "https://example.com/join" {
+		t.Fatalf("unexpected join link: %q", event.JoinLink)
+	}
+	if event.Canceled {
+		t.Fatalf("expected Canceled=false, got true")
+	}
+}
+
+func TestBuildInboundEventMessageCanceled(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.event-2", "5511999999999"),
+		Message: &waE2E.Message{
+			EventMessage: &waE2E.EventMessage{
+				Name:       proto.String("Reunião cancelada"),
+				IsCanceled: proto.Bool(true),
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.RichContent == nil || out.RichContent.Event == nil {
+		t.Fatalf("expected RichContent.Event, got %+v", out.RichContent)
+	}
+	if !out.RichContent.Event.Canceled {
+		t.Fatalf("expected Canceled=true, got false")
+	}
+}
+
+func TestBuildInboundEventMessageWithoutNameFallsBackToUnsupported(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.event-empty-1", "5511999999999"),
+		Message: &waE2E.Message{
+			EventMessage: &waE2E.EventMessage{},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "unsupported" {
+		t.Fatalf("expected Type=unsupported, got %q", out.Type)
+	}
+	if out.RichContent != nil {
+		t.Fatalf("expected no RichContent for a nameless EventMessage, got %+v", out.RichContent)
+	}
+	if out.Unsupported == nil || out.Unsupported.Type != "eventMessage" {
+		t.Fatalf("expected Unsupported.Type=eventMessage, got %+v", out.Unsupported)
+	}
+}
+
 func TestBuildStatusDelivered(t *testing.T) {
 	evt := &events.Receipt{
 		MessageIDs: []types.MessageID{"wamid.1"},

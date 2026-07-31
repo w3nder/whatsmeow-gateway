@@ -2,6 +2,7 @@ package mapper
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -79,6 +80,59 @@ type InboundTarget struct {
 	ProviderMessageID string `json:"providerMessageId"`
 }
 
+type InboundRichButton struct {
+	ID   string `json:"id,omitempty"`
+	Text string `json:"text"`
+	Name string `json:"name,omitempty"`
+	URL  string `json:"url,omitempty"`
+}
+
+type InboundRichListRow struct {
+	ID          string `json:"id,omitempty"`
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+}
+
+type InboundRichListSection struct {
+	Title string               `json:"title,omitempty"`
+	Rows  []InboundRichListRow `json:"rows"`
+}
+
+type InboundRichList struct {
+	ButtonText string                   `json:"buttonText,omitempty"`
+	Sections   []InboundRichListSection `json:"sections"`
+}
+
+type InboundRichProduct struct {
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+	PriceText   string `json:"priceText,omitempty"`
+	Currency    string `json:"currency,omitempty"`
+	RetailerID  string `json:"retailerId,omitempty"`
+}
+
+type InboundRichEvent struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	StartTime   string `json:"startTime,omitempty"`
+	EndTime     string `json:"endTime,omitempty"`
+	Location    string `json:"location,omitempty"`
+	JoinLink    string `json:"joinLink,omitempty"`
+	Canceled    bool   `json:"canceled,omitempty"`
+}
+
+type InboundRichContent struct {
+	Kind    string              `json:"kind"`
+	Flow    string              `json:"flow,omitempty"`
+	Body    string              `json:"body,omitempty"`
+	Footer  string              `json:"footer,omitempty"`
+	Header  string              `json:"header,omitempty"`
+	Buttons []InboundRichButton `json:"buttons,omitempty"`
+	List    *InboundRichList    `json:"list,omitempty"`
+	Product *InboundRichProduct `json:"product,omitempty"`
+	Event   *InboundRichEvent   `json:"event,omitempty"`
+}
+
 type InboundEvent struct {
 	PhoneNumberID     string              `json:"phoneNumberId"`
 	From              string              `json:"from"`
@@ -97,6 +151,7 @@ type InboundEvent struct {
 	Reaction          *InboundReaction    `json:"reaction,omitempty"`
 	Unsupported       *InboundUnsupported `json:"unsupported,omitempty"`
 	Target            *InboundTarget      `json:"target,omitempty"`
+	RichContent       *InboundRichContent `json:"richContent,omitempty"`
 }
 
 type StatusError struct {
@@ -331,6 +386,41 @@ func BuildInbound(ctx context.Context, dl Downloader, resolver PNResolver, s3 Me
 		out.Text = &InboundText{Body: pollSummary(poll)}
 		out.ContextMessageID = poll.GetContextInfo().GetStanzaID()
 
+	case msg.GetButtonsMessage() != nil:
+		btn := msg.GetButtonsMessage()
+		if err := applyRichOrFallback(&out, msg, buildButtonsRich(btn)); err != nil {
+			return InboundEvent{}, err
+		}
+		out.ContextMessageID = btn.GetContextInfo().GetStanzaID()
+
+	case msg.GetListMessage() != nil:
+		list := msg.GetListMessage()
+		if err := applyRichOrFallback(&out, msg, buildListRich(list)); err != nil {
+			return InboundEvent{}, err
+		}
+		out.ContextMessageID = list.GetContextInfo().GetStanzaID()
+
+	case msg.GetInteractiveMessage() != nil:
+		interactive := msg.GetInteractiveMessage()
+		if err := applyRichOrFallback(&out, msg, buildInteractiveRich(interactive)); err != nil {
+			return InboundEvent{}, err
+		}
+		out.ContextMessageID = interactive.GetContextInfo().GetStanzaID()
+
+	case msg.GetProductMessage() != nil:
+		product := msg.GetProductMessage()
+		if err := applyRichOrFallback(&out, msg, buildProductRich(product)); err != nil {
+			return InboundEvent{}, err
+		}
+		out.ContextMessageID = product.GetContextInfo().GetStanzaID()
+
+	case msg.GetEventMessage() != nil:
+		event := msg.GetEventMessage()
+		if err := applyRichOrFallback(&out, msg, buildEventRich(event)); err != nil {
+			return InboundEvent{}, err
+		}
+		out.ContextMessageID = event.GetContextInfo().GetStanzaID()
+
 	default:
 		content, found := detectContentField(msg)
 		if !found {
@@ -398,6 +488,256 @@ func pollSummary(poll *waE2E.PollCreationMessage) string {
 		options = append(options, opt.GetOptionName())
 	}
 	return "📊 " + poll.GetName() + " — " + strings.Join(options, ", ")
+}
+
+func applyRichOrFallback(out *InboundEvent, msg *waE2E.Message, rich *InboundRichContent) error {
+	if rich != nil {
+		out.Type = rich.Kind
+		out.RichContent = rich
+		return nil
+	}
+	content, found := detectContentField(msg)
+	if !found {
+		return ErrSkip
+	}
+	out.Type = "unsupported"
+	out.Unsupported = &InboundUnsupported{Type: content}
+	return nil
+}
+
+func buildButtonsRich(btn *waE2E.ButtonsMessage) *InboundRichContent {
+	body := btn.GetContentText()
+	if body == "" {
+		body = btn.GetText()
+	}
+	footer := btn.GetFooterText()
+
+	buttons := make([]InboundRichButton, 0, len(btn.GetButtons()))
+	for _, b := range btn.GetButtons() {
+		buttons = append(buttons, InboundRichButton{
+			ID:   b.GetButtonID(),
+			Text: b.GetButtonText().GetDisplayText(),
+		})
+	}
+
+	if body == "" && footer == "" && len(buttons) == 0 {
+		return nil
+	}
+
+	return &InboundRichContent{
+		Kind:    "buttons",
+		Body:    body,
+		Footer:  footer,
+		Buttons: buttons,
+	}
+}
+
+func buildListRich(list *waE2E.ListMessage) *InboundRichContent {
+	body := list.GetDescription()
+	footer := list.GetFooterText()
+	buttonText := list.GetButtonText()
+
+	sections := make([]InboundRichListSection, 0, len(list.GetSections()))
+	for _, s := range list.GetSections() {
+		rows := make([]InboundRichListRow, 0, len(s.GetRows()))
+		for _, r := range s.GetRows() {
+			rows = append(rows, InboundRichListRow{
+				ID:          r.GetRowID(),
+				Title:       r.GetTitle(),
+				Description: r.GetDescription(),
+			})
+		}
+		sections = append(sections, InboundRichListSection{Title: s.GetTitle(), Rows: rows})
+	}
+
+	if body == "" && footer == "" && buttonText == "" && len(sections) == 0 {
+		return nil
+	}
+
+	return &InboundRichContent{
+		Kind:   "list",
+		Body:   body,
+		Footer: footer,
+		List:   &InboundRichList{ButtonText: buttonText, Sections: sections},
+	}
+}
+
+type nativeFlowButtonParams struct {
+	DisplayText string                    `json:"display_text"`
+	Title       string                    `json:"title"`
+	ID          string                    `json:"id"`
+	URL         string                    `json:"url"`
+	Sections    []nativeFlowButtonSection `json:"sections"`
+}
+
+type nativeFlowButtonSection struct {
+	Title string                `json:"title"`
+	Rows  []nativeFlowButtonRow `json:"rows"`
+}
+
+type nativeFlowButtonRow struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+}
+
+func parseNativeFlowButtonParams(raw string) nativeFlowButtonParams {
+	var params nativeFlowButtonParams
+	if raw == "" {
+		return params
+	}
+	_ = json.Unmarshal([]byte(raw), &params)
+	return params
+}
+
+func nativeFlowListFrom(sections []nativeFlowButtonSection, buttonText string) *InboundRichList {
+	out := make([]InboundRichListSection, 0, len(sections))
+	for _, s := range sections {
+		rows := make([]InboundRichListRow, 0, len(s.Rows))
+		for _, r := range s.Rows {
+			rows = append(rows, InboundRichListRow{ID: r.ID, Title: r.Title, Description: r.Description})
+		}
+		out = append(out, InboundRichListSection{Title: s.Title, Rows: rows})
+	}
+	return &InboundRichList{ButtonText: buttonText, Sections: out}
+}
+
+func classifyNativeFlowName(name string) string {
+	lower := strings.ToLower(name)
+	switch {
+	case strings.Contains(lower, "pay"), strings.Contains(lower, "payment"), strings.Contains(lower, "pix"), strings.Contains(lower, "order"):
+		return "payment"
+	case strings.Contains(lower, "cta_url"), strings.Contains(lower, "open_url"):
+		return "cta"
+	case strings.Contains(lower, "single_select"):
+		return "list"
+	case strings.Contains(lower, "quick_reply"):
+		return "buttons"
+	default:
+		return "other"
+	}
+}
+
+func dominantNativeFlow(flows []string) string {
+	if len(flows) == 0 {
+		return ""
+	}
+	counts := make(map[string]int, len(flows))
+	best := flows[0]
+	bestCount := 0
+	for _, f := range flows {
+		counts[f]++
+		if counts[f] > bestCount {
+			bestCount = counts[f]
+			best = f
+		}
+	}
+	return best
+}
+
+func buildInteractiveRich(im *waE2E.InteractiveMessage) *InboundRichContent {
+	body := im.GetBody().GetText()
+	footer := im.GetFooter().GetText()
+	nativeButtons := im.GetNativeFlowMessage().GetButtons()
+
+	buttons := make([]InboundRichButton, 0, len(nativeButtons))
+	flows := make([]string, 0, len(nativeButtons))
+	var list *InboundRichList
+
+	for _, b := range nativeButtons {
+		name := b.GetName()
+		flows = append(flows, classifyNativeFlowName(name))
+
+		params := parseNativeFlowButtonParams(b.GetButtonParamsJSON())
+		if len(params.Sections) > 0 {
+			list = nativeFlowListFrom(params.Sections, params.Title)
+			continue
+		}
+
+		text := params.DisplayText
+		if text == "" {
+			text = params.Title
+		}
+		if text == "" {
+			text = name
+		}
+		buttons = append(buttons, InboundRichButton{
+			ID:   params.ID,
+			Text: text,
+			Name: name,
+			URL:  params.URL,
+		})
+	}
+
+	if body == "" && footer == "" && len(buttons) == 0 && list == nil {
+		return nil
+	}
+
+	return &InboundRichContent{
+		Kind:    "interactive",
+		Flow:    dominantNativeFlow(flows),
+		Body:    body,
+		Footer:  footer,
+		Buttons: buttons,
+		List:    list,
+	}
+}
+
+func formatProductPriceText(amount1000 int64, currency string) string {
+	if amount1000 == 0 && currency == "" {
+		return ""
+	}
+	value := float64(amount1000) / 1000.0
+	symbol := currency
+	if currency == "BRL" {
+		symbol = "R$"
+	}
+	if symbol == "" {
+		return fmt.Sprintf("%.2f", value)
+	}
+	return fmt.Sprintf("%s %.2f", symbol, value)
+}
+
+func buildProductRich(pm *waE2E.ProductMessage) *InboundRichContent {
+	snap := pm.GetProduct()
+	title := snap.GetTitle()
+	if title == "" {
+		return nil
+	}
+
+	return &InboundRichContent{
+		Kind: "product",
+		Product: &InboundRichProduct{
+			Title:       title,
+			Description: snap.GetDescription(),
+			PriceText:   formatProductPriceText(snap.GetPriceAmount1000(), snap.GetCurrencyCode()),
+			Currency:    snap.GetCurrencyCode(),
+			RetailerID:  snap.GetRetailerID(),
+		},
+	}
+}
+
+func buildEventRich(em *waE2E.EventMessage) *InboundRichContent {
+	name := em.GetName()
+	if name == "" {
+		return nil
+	}
+
+	event := &InboundRichEvent{
+		Name:        name,
+		Description: em.GetDescription(),
+		Location:    em.GetLocation().GetName(),
+		JoinLink:    em.GetJoinLink(),
+		Canceled:    em.GetIsCanceled(),
+	}
+	if st := em.GetStartTime(); st != 0 {
+		event.StartTime = strconv.FormatInt(st, 10)
+	}
+	if et := em.GetEndTime(); et != 0 {
+		event.EndTime = strconv.FormatInt(et, 10)
+	}
+
+	return &InboundRichContent{Kind: "event", Event: event}
 }
 
 var contentFieldIgnore = map[string]bool{
