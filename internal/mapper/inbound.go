@@ -130,6 +130,16 @@ type InboundRichEvent struct {
 	Canceled    bool   `json:"canceled,omitempty"`
 }
 
+type InboundRichPollOption struct {
+	Name string `json:"name"`
+}
+
+type InboundRichPoll struct {
+	Question        string                  `json:"question"`
+	Options         []InboundRichPollOption `json:"options"`
+	SelectableCount int                     `json:"selectableCount,omitempty"`
+}
+
 type InboundRichContent struct {
 	Kind    string              `json:"kind"`
 	Flow    string              `json:"flow,omitempty"`
@@ -140,6 +150,7 @@ type InboundRichContent struct {
 	Product *InboundRichProduct `json:"product,omitempty"`
 	Event   *InboundRichEvent   `json:"event,omitempty"`
 	Payment *InboundRichPayment `json:"payment,omitempty"`
+	Poll    *InboundRichPoll    `json:"poll,omitempty"`
 }
 
 type InboundEvent struct {
@@ -391,8 +402,12 @@ func BuildInbound(ctx context.Context, dl Downloader, resolver PNResolver, s3 Me
 		if poll == nil {
 			poll = msg.GetPollCreationMessageV3()
 		}
-		out.Type = "text"
-		out.Text = &InboundText{Body: pollSummary(poll)}
+		rich := buildPollRich(poll)
+		if rich == nil {
+			return InboundEvent{}, ErrSkip
+		}
+		out.Type = "poll"
+		out.RichContent = rich
 		out.ContextMessageID = poll.GetContextInfo().GetStanzaID()
 
 	case msg.GetButtonsMessage() != nil:
@@ -498,12 +513,25 @@ func resolveSenderIdentifiers(ctx context.Context, resolver PNResolver, sender, 
 	return senderLid, senderPn
 }
 
-func pollSummary(poll *waE2E.PollCreationMessage) string {
-	options := make([]string, 0, len(poll.GetOptions()))
+func buildPollRich(poll *waE2E.PollCreationMessage) *InboundRichContent {
+	question := poll.GetName()
+	options := make([]InboundRichPollOption, 0, len(poll.GetOptions()))
 	for _, opt := range poll.GetOptions() {
-		options = append(options, opt.GetOptionName())
+		if name := opt.GetOptionName(); name != "" {
+			options = append(options, InboundRichPollOption{Name: name})
+		}
 	}
-	return "📊 " + poll.GetName() + " — " + strings.Join(options, ", ")
+	if question == "" && len(options) == 0 {
+		return nil
+	}
+	return &InboundRichContent{
+		Kind: "poll",
+		Poll: &InboundRichPoll{
+			Question:        question,
+			Options:         options,
+			SelectableCount: int(poll.GetSelectableOptionsCount()),
+		},
+	}
 }
 
 func applyRichOrFallback(out *InboundEvent, msg *waE2E.Message, rich *InboundRichContent) error {

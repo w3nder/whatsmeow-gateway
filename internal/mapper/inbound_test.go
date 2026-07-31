@@ -1228,12 +1228,15 @@ func TestBuildInboundPollCreation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
-	if out.Type != "text" {
-		t.Fatalf("expected Type=text, got %q", out.Type)
+	if out.Type != "poll" {
+		t.Fatalf("expected Type=poll, got %q", out.Type)
 	}
-	want := "📊 Best pizza topping? — Cheese, Pepperoni"
-	if out.Text == nil || out.Text.Body != want {
-		t.Fatalf("expected Text.Body=%q, got %+v", want, out.Text)
+	if out.RichContent == nil || out.RichContent.Poll == nil {
+		t.Fatalf("expected RichContent.Poll, got %+v", out.RichContent)
+	}
+	p := out.RichContent.Poll
+	if p.Question != "Best pizza topping?" || len(p.Options) != 2 || p.Options[0].Name != "Cheese" || p.Options[1].Name != "Pepperoni" {
+		t.Fatalf("unexpected poll: %+v", p)
 	}
 }
 
@@ -1252,9 +1255,11 @@ func TestBuildInboundPollCreationV2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
-	want := "📊 Meeting time? — 10am"
-	if out.Text == nil || out.Text.Body != want {
-		t.Fatalf("expected Text.Body=%q, got %+v", want, out.Text)
+	if out.Type != "poll" {
+		t.Fatalf("expected Type=poll, got %q", out.Type)
+	}
+	if out.RichContent == nil || out.RichContent.Poll == nil || out.RichContent.Poll.Question != "Meeting time?" || len(out.RichContent.Poll.Options) != 1 {
+		t.Fatalf("unexpected poll v2: %+v", out.RichContent)
 	}
 }
 
