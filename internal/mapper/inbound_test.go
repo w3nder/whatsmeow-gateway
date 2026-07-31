@@ -596,7 +596,7 @@ func TestBuildInboundProtocolMessageBecomesUnsupported(t *testing.T) {
 		Info: baseInfo("wamid.protocol-1", "5511999999999"),
 		Message: &waE2E.Message{
 			ProtocolMessage: &waE2E.ProtocolMessage{
-				Type: waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(),
+				Type: waE2E.ProtocolMessage_EPHEMERAL_SETTING.Enum(),
 			},
 		},
 	}
@@ -610,6 +610,62 @@ func TestBuildInboundProtocolMessageBecomesUnsupported(t *testing.T) {
 	}
 	if out.Unsupported == nil || out.Unsupported.Type != "protocolMessage" {
 		t.Fatalf("expected Unsupported.Type=protocolMessage, got %+v", out.Unsupported)
+	}
+}
+
+func TestBuildInboundProtocolMessageRevoke(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.revoke-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ProtocolMessage: &waE2E.ProtocolMessage{
+				Type: waE2E.ProtocolMessage_REVOKE.Enum(),
+				Key:  &waCommon.MessageKey{ID: proto.String("TARGET123")},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "revoke" {
+		t.Fatalf("expected Type=revoke, got %q", out.Type)
+	}
+	if out.Target == nil || out.Target.ProviderMessageID != "TARGET123" {
+		t.Fatalf("expected Target.ProviderMessageID=TARGET123, got %+v", out.Target)
+	}
+	if out.Media != nil {
+		t.Fatalf("expected no media on revoke, got %+v", out.Media)
+	}
+	if out.Text != nil {
+		t.Fatalf("expected no text on revoke, got %+v", out.Text)
+	}
+}
+
+func TestBuildInboundProtocolMessageEdit(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.edit-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ProtocolMessage: &waE2E.ProtocolMessage{
+				Type:          waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(),
+				Key:           &waCommon.MessageKey{ID: proto.String("TARGET123")},
+				EditedMessage: &waE2E.Message{Conversation: proto.String("novo texto")},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "edit" {
+		t.Fatalf("expected Type=edit, got %q", out.Type)
+	}
+	if out.Target == nil || out.Target.ProviderMessageID != "TARGET123" {
+		t.Fatalf("expected Target.ProviderMessageID=TARGET123, got %+v", out.Target)
+	}
+	if out.Text == nil || out.Text.Body != "novo texto" {
+		t.Fatalf("expected Text.Body=novo texto, got %+v", out.Text)
 	}
 }
 

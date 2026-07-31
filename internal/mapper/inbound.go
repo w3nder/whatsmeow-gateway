@@ -75,6 +75,10 @@ type InboundUnsupported struct {
 	Type string `json:"type,omitempty"`
 }
 
+type InboundTarget struct {
+	ProviderMessageID string `json:"providerMessageId"`
+}
+
 type InboundEvent struct {
 	PhoneNumberID     string              `json:"phoneNumberId"`
 	From              string              `json:"from"`
@@ -91,6 +95,7 @@ type InboundEvent struct {
 	ContextMessageID  string              `json:"contextMessageId,omitempty"`
 	Reaction          *InboundReaction    `json:"reaction,omitempty"`
 	Unsupported       *InboundUnsupported `json:"unsupported,omitempty"`
+	Target            *InboundTarget      `json:"target,omitempty"`
 }
 
 type StatusError struct {
@@ -124,6 +129,21 @@ func BuildInbound(ctx context.Context, dl Downloader, resolver PNResolver, s3 Me
 	}
 
 	msg := unwrapMessage(evt.Message)
+
+	if pm := msg.GetProtocolMessage(); pm != nil {
+		switch pm.GetType() {
+		case waE2E.ProtocolMessage_REVOKE:
+			out.Type = "revoke"
+			out.Target = &InboundTarget{ProviderMessageID: pm.GetKey().GetID()}
+			return out, nil
+		case waE2E.ProtocolMessage_MESSAGE_EDIT:
+			out.Type = "edit"
+			out.Target = &InboundTarget{ProviderMessageID: pm.GetKey().GetID()}
+			out.Text = &InboundText{Body: extractText(unwrapMessage(pm.GetEditedMessage()))}
+			return out, nil
+		}
+	}
+
 	switch {
 	case msg.GetConversation() != "":
 		out.Type = "text"
@@ -332,6 +352,13 @@ func unwrapMessage(msg *waE2E.Message) *waE2E.Message {
 		}
 	}
 	return msg
+}
+
+func extractText(msg *waE2E.Message) string {
+	if body := msg.GetConversation(); body != "" {
+		return body
+	}
+	return msg.GetExtendedTextMessage().GetText()
 }
 
 func resolveSenderIdentifiers(ctx context.Context, resolver PNResolver, sender, senderAlt types.JID) (senderLid, senderPn string) {
