@@ -215,6 +215,42 @@ func TestBuildInboundPNSenderWithLIDAltPopulatesBothIdentifiers(t *testing.T) {
 	}
 }
 
+func TestBuildInboundFromMeKeysToChatContact(t *testing.T) {
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Sender:   types.NewJID("5511900000000", types.DefaultUserServer),
+				Chat:     types.NewJID("5511999999999", types.DefaultUserServer),
+				IsFromMe: true,
+			},
+			ID:        "wamid.fromme-1",
+			PushName:  "Jane Doe",
+			Timestamp: time.Unix(1700000000, 0),
+		},
+		Message: &waE2E.Message{Conversation: proto.String("sent from my phone")},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if !out.FromMe {
+		t.Fatalf("expected FromMe=true, got %v", out.FromMe)
+	}
+	if out.From != "5511999999999" {
+		t.Fatalf("expected From=5511999999999 (chat contact), got %q", out.From)
+	}
+	if out.SenderPn != "5511999999999" {
+		t.Fatalf("expected SenderPn=5511999999999 (chat contact), got %q", out.SenderPn)
+	}
+	if out.Type != "text" {
+		t.Fatalf("expected Type=text, got %q", out.Type)
+	}
+	if out.Text == nil || out.Text.Body != "sent from my phone" {
+		t.Fatalf("expected Text.Body='sent from my phone', got %+v", out.Text)
+	}
+}
+
 func TestBuildInboundExtendedTextWithReply(t *testing.T) {
 	evt := &events.Message{
 		Info: baseInfo("wamid.text-2", "5511999999999"),
@@ -591,7 +627,7 @@ func TestBuildInboundUnsupportedMessage(t *testing.T) {
 	}
 }
 
-func TestBuildInboundProtocolMessageBecomesUnsupported(t *testing.T) {
+func TestBuildInboundNonLifecycleProtocolMessageIsSkipped(t *testing.T) {
 	evt := &events.Message{
 		Info: baseInfo("wamid.protocol-1", "5511999999999"),
 		Message: &waE2E.Message{
@@ -601,15 +637,9 @@ func TestBuildInboundProtocolMessageBecomesUnsupported(t *testing.T) {
 		},
 	}
 
-	out, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
-	if err != nil {
-		t.Fatalf("BuildInbound: %v", err)
-	}
-	if out.Type != "unsupported" {
-		t.Fatalf("expected Type=unsupported, got %q", out.Type)
-	}
-	if out.Unsupported == nil || out.Unsupported.Type != "protocolMessage" {
-		t.Fatalf("expected Unsupported.Type=protocolMessage, got %+v", out.Unsupported)
+	_, err := mapper.BuildInbound(context.Background(), fakeDownloader{}, nil, &fakeMediaStore{}, "channel-1", "tenant-1", evt)
+	if !errors.Is(err, mapper.ErrSkip) {
+		t.Fatalf("expected mapper.ErrSkip for a non-lifecycle protocol message, got %v", err)
 	}
 }
 

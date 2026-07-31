@@ -84,6 +84,7 @@ type InboundEvent struct {
 	From              string              `json:"from"`
 	SenderLid         string              `json:"senderLid,omitempty"`
 	SenderPn          string              `json:"senderPn,omitempty"`
+	FromMe            bool                `json:"fromMe,omitempty"`
 	ProfileName       string              `json:"profileName,omitempty"`
 	ProviderMessageID string              `json:"providerMessageId"`
 	Timestamp         string              `json:"timestamp"`
@@ -112,7 +113,11 @@ type StatusEvent struct {
 }
 
 func BuildInbound(ctx context.Context, dl Downloader, resolver PNResolver, s3 MediaStore, channelID, tenantID string, evt *events.Message) (InboundEvent, error) {
-	senderLid, senderPn := resolveSenderIdentifiers(ctx, resolver, evt.Info.Sender, evt.Info.SenderAlt)
+	identityJID, identityAlt := evt.Info.Sender, evt.Info.SenderAlt
+	if evt.Info.IsFromMe {
+		identityJID, identityAlt = evt.Info.Chat, evt.Info.RecipientAlt
+	}
+	senderLid, senderPn := resolveSenderIdentifiers(ctx, resolver, identityJID, identityAlt)
 	from := senderPn
 	if from == "" {
 		from = senderLid
@@ -123,6 +128,7 @@ func BuildInbound(ctx context.Context, dl Downloader, resolver PNResolver, s3 Me
 		From:              from,
 		SenderLid:         senderLid,
 		SenderPn:          senderPn,
+		FromMe:            evt.Info.IsFromMe,
 		ProfileName:       evt.Info.PushName,
 		ProviderMessageID: evt.Info.ID,
 		Timestamp:         strconv.FormatInt(evt.Info.Timestamp.Unix(), 10),
@@ -141,6 +147,8 @@ func BuildInbound(ctx context.Context, dl Downloader, resolver PNResolver, s3 Me
 			out.Target = &InboundTarget{ProviderMessageID: pm.GetKey().GetID()}
 			out.Text = &InboundText{Body: extractText(unwrapMessage(pm.GetEditedMessage()))}
 			return out, nil
+		default:
+			return InboundEvent{}, ErrSkip
 		}
 	}
 
