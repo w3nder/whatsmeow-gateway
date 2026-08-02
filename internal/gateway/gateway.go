@@ -268,7 +268,9 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 		"message_id", cmd.MessageID,
 		"channel_id", cmd.ChannelID,
 		"to", cmd.To,
-		"type", cmd.Type)
+		"type", cmd.Type,
+		"kind", cmd.Kind,
+		"target_provider_message_id", cmd.TargetProviderMessageID)
 
 	providerID := dedupe.DeterministicProviderID(cmd.MessageID)
 
@@ -277,6 +279,10 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 		return fmt.Errorf("gateway: dedupe begin %s: %w", cmd.MessageID, err)
 	}
 	if alreadySent {
+		g.logger.Info("gateway: command already sent, replaying sent status (skipped)",
+			"message_id", cmd.MessageID,
+			"kind", cmd.Kind,
+			"existing_provider_message_id", existingProviderID)
 		if err := g.publisher.PublishStatus(ctx, mapper.StatusEvent{
 			ProviderMessageID: existingProviderID,
 			OpaqueMessageID:   cmd.MessageID,
