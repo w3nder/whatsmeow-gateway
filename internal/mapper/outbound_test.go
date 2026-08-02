@@ -41,6 +41,10 @@ func (u stubUploader) BuildRevoke(chat, sender types.JID, id types.MessageID) *w
 	return &waE2E.Message{Conversation: proto.String("REVOKE|" + chat.String() + "|sender=" + sender.String() + "|" + string(id))}
 }
 
+func (u stubUploader) BuildReaction(chat, sender types.JID, id types.MessageID, reaction string) *waE2E.Message {
+	return &waE2E.Message{Conversation: proto.String("REACTION|" + chat.String() + "|sender=" + sender.String() + "|" + string(id) + "|" + reaction)}
+}
+
 func stubFetch(data []byte, err error) mapper.MediaFetcher {
 	return func(ctx context.Context, url string) ([]byte, error) {
 		return data, err
@@ -477,6 +481,41 @@ func TestBuildOutboundRevokeCallsBuildRevoke(t *testing.T) {
 	got := msg.GetConversation()
 	if !strings.HasPrefix(got, "REVOKE|") || !strings.Contains(got, "3EB0XYZ") {
 		t.Fatalf("expected revoke routed to BuildRevoke, got %q", got)
+	}
+}
+
+func TestBuildOutboundReactionToOwnMessageUsesEmptySender(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Kind: "reaction", TargetProviderMessageID: "3EB0OWN", TargetFromMe: true, Emoji: "👍"}
+	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	got := msg.GetConversation()
+	if !strings.HasPrefix(got, "REACTION|") || !strings.Contains(got, "sender=") || !strings.Contains(got, "3EB0OWN") || !strings.Contains(got, "👍") {
+		t.Fatalf("unexpected reaction payload: %q", got)
+	}
+	if !strings.Contains(got, "sender=|") {
+		t.Fatalf("expected empty sender for own-message reaction, got %q", got)
+	}
+}
+
+func TestBuildOutboundReactionToContactMessageUsesChatSender(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Kind: "reaction", TargetProviderMessageID: "3EB0THEM", TargetFromMe: false, Emoji: "❤️"}
+	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	got := msg.GetConversation()
+	if !strings.Contains(got, "sender=5511999@s.whatsapp.net") {
+		t.Fatalf("expected the chat JID as sender for a contact-message reaction, got %q", got)
+	}
+}
+
+func TestBuildOutboundReactionRequiresTarget(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Kind: "reaction", Emoji: "👍"}
+	_, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	if err == nil {
+		t.Fatalf("expected an error when reaction has no targetProviderMessageId")
 	}
 }
 

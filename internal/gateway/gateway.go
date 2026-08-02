@@ -344,6 +344,10 @@ func dedupeKeyFor(cmd amqp.GatewaySendCommand) string {
 		h := fnv.New32a()
 		_, _ = h.Write([]byte(cmd.Text))
 		return fmt.Sprintf("%s:edit:%s:%08x", cmd.MessageID, cmd.TargetProviderMessageID, h.Sum32())
+	case "reaction":
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(cmd.Emoji))
+		return fmt.Sprintf("%s:reaction:%s:%08x", cmd.MessageID, cmd.TargetProviderMessageID, h.Sum32())
 	default:
 		return cmd.MessageID
 	}

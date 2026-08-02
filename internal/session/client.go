@@ -29,6 +29,7 @@ type WAClient interface {
 	SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID) (whatsmeow.SendResponse, error)
 	BuildEdit(chat types.JID, id types.MessageID, newContent *waE2E.Message) *waE2E.Message
 	BuildRevoke(chat, sender types.JID, id types.MessageID) *waE2E.Message
+	BuildReaction(chat, sender types.JID, id types.MessageID, reaction string) *waE2E.Message
 	Upload(ctx context.Context, data []byte, mt whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
 	PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error)
@@ -98,6 +99,10 @@ func (w *waClient) BuildEdit(chat types.JID, id types.MessageID, newContent *waE
 
 func (w *waClient) BuildRevoke(chat, sender types.JID, id types.MessageID) *waE2E.Message {
 	return w.client.BuildRevoke(chat, sender, id)
+}
+
+func (w *waClient) BuildReaction(chat, sender types.JID, id types.MessageID, reaction string) *waE2E.Message {
+	return w.client.BuildReaction(chat, sender, id, reaction)
 }
 
 func (w *waClient) Upload(ctx context.Context, data []byte, mt whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {

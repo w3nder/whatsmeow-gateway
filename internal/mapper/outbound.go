@@ -20,6 +20,7 @@ type MessageBuilder interface {
 	Uploader
 	BuildEdit(chat types.JID, id types.MessageID, newContent *waE2E.Message) *waE2E.Message
 	BuildRevoke(chat, sender types.JID, id types.MessageID) *waE2E.Message
+	BuildReaction(chat, sender types.JID, id types.MessageID, reaction string) *waE2E.Message
 }
 
 type MediaFetcher func(ctx context.Context, url string) ([]byte, error)
@@ -44,6 +45,15 @@ func BuildOutbound(ctx context.Context, cli MessageBuilder, cmd amqp.GatewaySend
 			return types.JID{}, nil, fmt.Errorf("mapper: revoke requires targetProviderMessageId")
 		}
 		return to, cli.BuildRevoke(to, types.EmptyJID, types.MessageID(cmd.TargetProviderMessageID)), nil
+	case "reaction":
+		if cmd.TargetProviderMessageID == "" {
+			return types.JID{}, nil, fmt.Errorf("mapper: reaction requires targetProviderMessageId")
+		}
+		sender := types.EmptyJID
+		if !cmd.TargetFromMe {
+			sender = to
+		}
+		return to, cli.BuildReaction(to, sender, types.MessageID(cmd.TargetProviderMessageID), cmd.Emoji), nil
 	}
 
 	msg, err := buildByType(ctx, cli, cmd, fetch)
