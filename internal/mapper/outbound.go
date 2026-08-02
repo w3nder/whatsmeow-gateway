@@ -16,9 +16,15 @@ type Uploader interface {
 	Upload(ctx context.Context, data []byte, mt whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
 }
 
+type MessageBuilder interface {
+	Uploader
+	BuildEdit(chat types.JID, id types.MessageID, newContent *waE2E.Message) *waE2E.Message
+	BuildRevoke(chat, sender types.JID, id types.MessageID) *waE2E.Message
+}
+
 type MediaFetcher func(ctx context.Context, url string) ([]byte, error)
 
-func BuildOutbound(ctx context.Context, up Uploader, cmd amqp.GatewaySendCommand, fetch MediaFetcher) (types.JID, *waE2E.Message, error) {
+func BuildOutbound(ctx context.Context, cli MessageBuilder, cmd amqp.GatewaySendCommand, fetch MediaFetcher) (types.JID, *waE2E.Message, error) {
 	to, err := types.ParseJID(cmd.To)
 	if err != nil {
 		return types.JID{}, nil, fmt.Errorf("mapper: parse recipient jid %q: %w", cmd.To, err)
@@ -27,30 +33,75 @@ func BuildOutbound(ctx context.Context, up Uploader, cmd amqp.GatewaySendCommand
 		return types.JID{}, nil, fmt.Errorf("mapper: invalid recipient jid %q", cmd.To)
 	}
 
+	switch cmd.Kind {
+	case "edit":
+		if cmd.TargetProviderMessageID == "" {
+			return types.JID{}, nil, fmt.Errorf("mapper: edit requires targetProviderMessageId")
+		}
+		return to, cli.BuildEdit(to, types.MessageID(cmd.TargetProviderMessageID), &waE2E.Message{Conversation: proto.String(cmd.Text)}), nil
+	case "revoke":
+		if cmd.TargetProviderMessageID == "" {
+			return types.JID{}, nil, fmt.Errorf("mapper: revoke requires targetProviderMessageId")
+		}
+		return to, cli.BuildRevoke(to, types.EmptyJID, types.MessageID(cmd.TargetProviderMessageID)), nil
+	}
+
+	msg, err := buildByType(ctx, cli, cmd, fetch)
+	if err != nil {
+		return types.JID{}, nil, err
+	}
+	if cmd.Forwarded {
+		msg = markForwarded(msg)
+	}
+	return to, msg, nil
+}
+
+func buildByType(ctx context.Context, up Uploader, cmd amqp.GatewaySendCommand, fetch MediaFetcher) (*waE2E.Message, error) {
 	switch cmd.Type {
 	case "text":
-		return to, buildText(cmd), nil
+		return buildText(cmd), nil
 	case "image":
-		msg, err := buildMedia(ctx, up, fetch, cmd, whatsmeow.MediaImage)
-		return to, msg, err
+		return buildMedia(ctx, up, fetch, cmd, whatsmeow.MediaImage)
 	case "video":
-		msg, err := buildMedia(ctx, up, fetch, cmd, whatsmeow.MediaVideo)
-		return to, msg, err
+		return buildMedia(ctx, up, fetch, cmd, whatsmeow.MediaVideo)
 	case "audio":
-		msg, err := buildMedia(ctx, up, fetch, cmd, whatsmeow.MediaAudio)
-		return to, msg, err
+		return buildMedia(ctx, up, fetch, cmd, whatsmeow.MediaAudio)
 	case "document":
-		msg, err := buildMedia(ctx, up, fetch, cmd, whatsmeow.MediaDocument)
-		return to, msg, err
+		return buildMedia(ctx, up, fetch, cmd, whatsmeow.MediaDocument)
 	case "location":
-		msg, err := buildLocation(cmd)
-		return to, msg, err
+		return buildLocation(cmd)
 	case "contacts":
-		msg, err := buildContacts(cmd)
-		return to, msg, err
+		return buildContacts(cmd)
 	default:
-		return types.JID{}, nil, fmt.Errorf("mapper: unsupported message type %q", cmd.Type)
+		return nil, fmt.Errorf("mapper: unsupported message type %q", cmd.Type)
 	}
+}
+
+func mergeForwarded(ci *waE2E.ContextInfo) *waE2E.ContextInfo {
+	if ci == nil {
+		ci = &waE2E.ContextInfo{}
+	}
+	ci.IsForwarded = proto.Bool(true)
+	ci.ForwardingScore = proto.Uint32(1)
+	return ci
+}
+
+func markForwarded(msg *waE2E.Message) *waE2E.Message {
+	switch {
+	case msg.Conversation != nil:
+		return &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: msg.Conversation, ContextInfo: mergeForwarded(nil)}}
+	case msg.ExtendedTextMessage != nil:
+		msg.ExtendedTextMessage.ContextInfo = mergeForwarded(msg.ExtendedTextMessage.GetContextInfo())
+	case msg.ImageMessage != nil:
+		msg.ImageMessage.ContextInfo = mergeForwarded(msg.ImageMessage.GetContextInfo())
+	case msg.VideoMessage != nil:
+		msg.VideoMessage.ContextInfo = mergeForwarded(msg.VideoMessage.GetContextInfo())
+	case msg.AudioMessage != nil:
+		msg.AudioMessage.ContextInfo = mergeForwarded(msg.AudioMessage.GetContextInfo())
+	case msg.DocumentMessage != nil:
+		msg.DocumentMessage.ContextInfo = mergeForwarded(msg.DocumentMessage.GetContextInfo())
+	}
+	return msg
 }
 
 func buildText(cmd amqp.GatewaySendCommand) *waE2E.Message {

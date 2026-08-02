@@ -24,16 +24,19 @@ type ReplyToPayload struct {
 }
 
 type GatewaySendCommand struct {
-	TenantID  string           `json:"tenantId"`
-	ChannelID string           `json:"channelId"`
-	MessageID string           `json:"messageId"`
-	To        string           `json:"to"`
-	Type      string           `json:"type"`
-	Text      string           `json:"text,omitempty"`
-	Media     *MediaPayload    `json:"media,omitempty"`
-	Location  *LocationPayload `json:"location,omitempty"`
-	Contacts  []ContactPayload `json:"contacts,omitempty"`
-	ReplyTo   *ReplyToPayload  `json:"replyTo,omitempty"`
+	TenantID                string           `json:"tenantId"`
+	ChannelID               string           `json:"channelId"`
+	MessageID               string           `json:"messageId"`
+	To                      string           `json:"to"`
+	Type                    string           `json:"type"`
+	Kind                    string           `json:"kind,omitempty"`
+	TargetProviderMessageID string           `json:"targetProviderMessageId,omitempty"`
+	Forwarded               bool             `json:"forwarded,omitempty"`
+	Text                    string           `json:"text,omitempty"`
+	Media                   *MediaPayload    `json:"media,omitempty"`
+	Location                *LocationPayload `json:"location,omitempty"`
+	Contacts                []ContactPayload `json:"contacts,omitempty"`
+	ReplyTo                 *ReplyToPayload  `json:"replyTo,omitempty"`
 }
 
 type PairCommand struct {

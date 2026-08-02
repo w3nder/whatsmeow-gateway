@@ -120,6 +120,14 @@ func (f *fakeWAClient) SendMessage(ctx context.Context, to types.JID, msg *waE2E
 	return f.sendResp, f.sendErr
 }
 
+func (f *fakeWAClient) BuildEdit(chat types.JID, id types.MessageID, newContent *waE2E.Message) *waE2E.Message {
+	return newContent
+}
+
+func (f *fakeWAClient) BuildRevoke(chat, sender types.JID, id types.MessageID) *waE2E.Message {
+	return &waE2E.Message{}
+}
+
 func (f *fakeWAClient) Upload(ctx context.Context, data []byte, mt whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {
 	return whatsmeow.UploadResponse{}, nil
 }

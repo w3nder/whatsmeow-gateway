@@ -27,6 +27,8 @@ type WAClient interface {
 	WaitForConnection(timeout time.Duration) bool
 	DeviceJID() *types.JID
 	SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID) (whatsmeow.SendResponse, error)
+	BuildEdit(chat types.JID, id types.MessageID, newContent *waE2E.Message) *waE2E.Message
+	BuildRevoke(chat, sender types.JID, id types.MessageID) *waE2E.Message
 	Upload(ctx context.Context, data []byte, mt whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
 	PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error)
@@ -88,6 +90,14 @@ func (w *waClient) DeviceJID() *types.JID {
 
 func (w *waClient) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID) (whatsmeow.SendResponse, error) {
 	return w.client.SendMessage(ctx, to, msg, whatsmeow.SendRequestExtra{ID: id})
+}
+
+func (w *waClient) BuildEdit(chat types.JID, id types.MessageID, newContent *waE2E.Message) *waE2E.Message {
+	return w.client.BuildEdit(chat, id, newContent)
+}
+
+func (w *waClient) BuildRevoke(chat, sender types.JID, id types.MessageID) *waE2E.Message {
+	return w.client.BuildRevoke(chat, sender, id)
 }
 
 func (w *waClient) Upload(ctx context.Context, data []byte, mt whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {

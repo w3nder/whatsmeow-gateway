@@ -3,10 +3,13 @@ package mapper_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
 	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
@@ -28,6 +31,14 @@ type stubUploader struct {
 
 func (u stubUploader) Upload(ctx context.Context, data []byte, mt whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {
 	return u.resp, u.err
+}
+
+func (u stubUploader) BuildEdit(chat types.JID, id types.MessageID, newContent *waE2E.Message) *waE2E.Message {
+	return &waE2E.Message{Conversation: proto.String("EDIT|" + chat.String() + "|" + string(id) + "|" + newContent.GetConversation())}
+}
+
+func (u stubUploader) BuildRevoke(chat, sender types.JID, id types.MessageID) *waE2E.Message {
+	return &waE2E.Message{Conversation: proto.String("REVOKE|" + chat.String() + "|sender=" + sender.String() + "|" + string(id))}
 }
 
 func stubFetch(data []byte, err error) mapper.MediaFetcher {
@@ -432,5 +443,54 @@ func TestBuildOutboundUnknownType(t *testing.T) {
 	_, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err == nil {
 		t.Fatal("expected error for unknown type")
+	}
+}
+
+func TestBuildOutboundEditCallsBuildEdit(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Kind: "edit", TargetProviderMessageID: "3EB0ABC", Text: "corrigido"}
+	to, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	if to.User != "5511999" {
+		t.Fatalf("unexpected to: %+v", to)
+	}
+	got := msg.GetConversation()
+	if !strings.HasPrefix(got, "EDIT|") || !strings.Contains(got, "|3EB0ABC|corrigido") {
+		t.Fatalf("expected edit routed to BuildEdit, got %q", got)
+	}
+}
+
+func TestBuildOutboundEditRequiresTarget(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Kind: "edit", Text: "x"}
+	if _, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil)); err == nil {
+		t.Fatalf("expected error for edit without targetProviderMessageId")
+	}
+}
+
+func TestBuildOutboundRevokeCallsBuildRevoke(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Kind: "revoke", TargetProviderMessageID: "3EB0XYZ"}
+	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	got := msg.GetConversation()
+	if !strings.HasPrefix(got, "REVOKE|") || !strings.Contains(got, "3EB0XYZ") {
+		t.Fatalf("expected revoke routed to BuildRevoke, got %q", got)
+	}
+}
+
+func TestBuildOutboundForwardedTextMarksContext(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Type: "text", Text: "encaminhada", Forwarded: true}
+	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	ext := msg.GetExtendedTextMessage()
+	if ext == nil || ext.GetText() != "encaminhada" {
+		t.Fatalf("expected ExtendedTextMessage, got %+v", msg)
+	}
+	if !ext.GetContextInfo().GetIsForwarded() {
+		t.Fatalf("expected IsForwarded=true")
 	}
 }
