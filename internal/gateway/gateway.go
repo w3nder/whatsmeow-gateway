@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"net/http"
@@ -272,11 +273,12 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 		"kind", cmd.Kind,
 		"target_provider_message_id", cmd.TargetProviderMessageID)
 
-	providerID := dedupe.DeterministicProviderID(cmd.MessageID)
+	dedupeKey := dedupeKeyFor(cmd)
+	providerID := dedupe.DeterministicProviderID(dedupeKey)
 
-	alreadySent, existingProviderID, err := g.dedupe.Begin(ctx, cmd.MessageID, providerID)
+	alreadySent, existingProviderID, err := g.dedupe.Begin(ctx, dedupeKey, providerID)
 	if err != nil {
-		return fmt.Errorf("gateway: dedupe begin %s: %w", cmd.MessageID, err)
+		return fmt.Errorf("gateway: dedupe begin %s: %w", dedupeKey, err)
 	}
 	if alreadySent {
 		g.logger.Info("gateway: command already sent, replaying sent status (skipped)",
@@ -318,8 +320,8 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 
 	g.logger.Info("gateway: message sent to whatsapp", "message_id", cmd.MessageID, "provider_message_id", id, "channel_id", cmd.ChannelID)
 
-	if err := g.dedupe.MarkSent(ctx, cmd.MessageID); err != nil {
-		return fmt.Errorf("gateway: mark sent %s: %w", cmd.MessageID, err)
+	if err := g.dedupe.MarkSent(ctx, dedupeKey); err != nil {
+		return fmt.Errorf("gateway: mark sent %s: %w", dedupeKey, err)
 	}
 
 	if err := g.publisher.PublishStatus(ctx, mapper.StatusEvent{
@@ -332,6 +334,19 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 	}
 
 	return nil
+}
+
+func dedupeKeyFor(cmd amqp.GatewaySendCommand) string {
+	switch cmd.Kind {
+	case "revoke":
+		return fmt.Sprintf("%s:revoke:%s", cmd.MessageID, cmd.TargetProviderMessageID)
+	case "edit":
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(cmd.Text))
+		return fmt.Sprintf("%s:edit:%s:%08x", cmd.MessageID, cmd.TargetProviderMessageID, h.Sum32())
+	default:
+		return cmd.MessageID
+	}
 }
 
 func (g *gateway) publishSendFailure(ctx context.Context, cmd amqp.GatewaySendCommand, providerID string, cause error) error {
