@@ -64,6 +64,45 @@ func waitForCallEvent(t *testing.T, deliveries <-chan rabbitmq.Delivery, wantTyp
 	}
 }
 
+// waitForIncomingCallAndInboundEvent drains the probe channel until it has
+// seen both the "incoming" call.Event and the call.InboundCallEvent an
+// arriving call publishes, regardless of which order they land in. Anything
+// else on the channel (a channel.status delivery from pairing, an unrelated
+// call event type) is ignored rather than consumed and lost, since a single
+// pass has to serve both waits without racing a second reader against this
+// one for the same messages.
+func waitForIncomingCallAndInboundEvent(t *testing.T, deliveries <-chan rabbitmq.Delivery, timeout time.Duration) (call.Event, call.InboundCallEvent) {
+	t.Helper()
+	var incoming call.Event
+	var inbound call.InboundCallEvent
+	gotIncoming, gotInbound := false, false
+	deadline := time.After(timeout)
+	for !gotIncoming || !gotInbound {
+		select {
+		case d := <-deliveries:
+			switch d.RoutingKey {
+			case gatewayamqp.CallRoutingKey:
+				var evt call.Event
+				if err := json.Unmarshal(d.Body, &evt); err != nil {
+					t.Fatalf("failed to unmarshal call event: %v", err)
+				}
+				if evt.Type == call.EventIncoming {
+					incoming = evt
+					gotIncoming = true
+				}
+			case gatewayamqp.InboundRoutingKey:
+				if err := json.Unmarshal(d.Body, &inbound); err != nil {
+					t.Fatalf("failed to unmarshal inbound call event: %v", err)
+				}
+				gotInbound = true
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for the incoming call event (got it: %v) and the inbound call event (got it: %v)", gotIncoming, gotInbound)
+		}
+	}
+	return incoming, inbound
+}
+
 // TestGatewayInboundCallRecordsAndPublishes drives a whole inbound call through
 // a running gateway: the call arrives, the backend answers it over
 // gateway.call, the peer's audio is captured, the call ends, and the recording
@@ -157,7 +196,7 @@ func TestGatewayInboundCallRecordsAndPublishes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to declare probe queue: %v", err)
 	}
-	for _, rk := range []string{gatewayamqp.CallRoutingKey, gatewayamqp.ChannelStatusRoutingKey} {
+	for _, rk := range []string{gatewayamqp.CallRoutingKey, gatewayamqp.ChannelStatusRoutingKey, gatewayamqp.InboundRoutingKey} {
 		if err := probeCh.QueueBind(probeQ.Name, rk, gatewayamqp.EventsExchange, false, nil); err != nil {
 			t.Fatalf("failed to bind probe queue to %s: %v", rk, err)
 		}
@@ -224,15 +263,41 @@ func TestGatewayInboundCallRecordsAndPublishes(t *testing.T) {
 	lc := &fakeLiveCall{callID: "CALL1", peer: "5511888888888@s.whatsapp.net"}
 	caller.fireIncoming(lc)
 
-	incoming := waitForCallEvent(t, deliveries, call.EventIncoming, 15*time.Second)
+	// The arriving call publishes two deliveries on two routing keys: the
+	// call.Event on CallRoutingKey, and the inbound-message-shaped
+	// call.InboundCallEvent on InboundRoutingKey (see call.NewInboundCallEvent),
+	// which is how the backend's message pipeline creates the chat row. Both
+	// have to be drained from one loop over the shared probe channel --
+	// waitForCallEvent alone would silently discard whichever one it isn't
+	// looking for, since a channel read can't be put back.
+	incoming, inboundCall := waitForIncomingCallAndInboundEvent(t, deliveries, 15*time.Second)
 	if incoming.CallID != "CALL1" || incoming.Direction != call.DirectionInbound {
 		t.Fatalf("incoming event = %+v, want inbound CALL1", incoming)
 	}
 	if incoming.TenantID != tenantID || incoming.ChannelID != channelID {
 		t.Fatalf("incoming identity = %+v, want %s/%s", incoming, tenantID, channelID)
 	}
+	// PhoneNumberID must be the channel id, not the device JID the fake pair
+	// establishes ("15550000000" -- see fakeWAClient.QRChannel): the backend
+	// looks a gateway channel up by that field holding the channel's own id,
+	// so a device-JID value would make it match no channel and the event
+	// would be dropped, exactly as it was on the real call this test guards.
+	if incoming.PhoneNumberID != channelID {
+		t.Fatalf("incoming PhoneNumberID = %q, want the channel id %q", incoming.PhoneNumberID, channelID)
+	}
 	if incoming.From != "5511888888888@s.whatsapp.net" {
 		t.Errorf("From = %q, want the peer jid", incoming.From)
+	}
+
+	// This is the exact delivery the reported bug dropped: the backend's
+	// ConsumeInbound logged "no channel found for phoneNumberId ..., dropping
+	// inbound message" for it, because PhoneNumberID carried the device's
+	// phone number instead of the channel id.
+	if inboundCall.PhoneNumberID != channelID {
+		t.Fatalf("inbound call PhoneNumberID = %q, want the channel id %q", inboundCall.PhoneNumberID, channelID)
+	}
+	if inboundCall.ProviderMessageID != "CALL1" {
+		t.Fatalf("inbound call ProviderMessageID = %q, want CALL1", inboundCall.ProviderMessageID)
 	}
 
 	answerBody, err := json.Marshal(gatewayamqp.GatewayCallCommand{

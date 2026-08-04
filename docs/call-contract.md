@@ -100,7 +100,7 @@ compartilhar prefetch travaria o envio de mensagens.
 
 ```json
 {
-  "phoneNumberId": "5511999999999",
+  "phoneNumberId": "channel-1",
   "tenantId": "tenant-1",
   "channelId": "channel-1",
   "callId": "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4",
@@ -115,6 +115,12 @@ compartilhar prefetch travaria o envio de mensagens.
 
 `direction` é `inbound` ou `outbound`. `timestamp` é epoch em segundos, como string.
 Campos ausentes são omitidos: dá para distinguir "sem gravação" de "gravação vazia".
+
+`phoneNumberId` **não é o número de telefone do dispositivo** — é o `channelId`.
+O backend resolve o canal por esse campo, e para um canal do gateway a coluna
+`phoneNumberId` guarda o próprio UUID do canal, não um número. O gateway
+preenche os dois campos com o mesmo valor; não popule `phoneNumberId` com o
+JID do dispositivo nem com o número real da linha.
 
 ### Tipos de evento
 
@@ -155,7 +161,7 @@ mova `media`/`videoMedia` de volta para o `ended`.**
 
 ```json
 {
-  "phoneNumberId": "5511999999999",
+  "phoneNumberId": "channel-1",
   "tenantId": "tenant-1",
   "channelId": "channel-1",
   "callId": "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4",

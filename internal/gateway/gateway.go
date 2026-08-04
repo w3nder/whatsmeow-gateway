@@ -41,7 +41,7 @@ type Deps struct {
 	ShutdownDrainTimeout time.Duration
 	// CallOptions configures call tracking. Run builds the call manager itself:
 	// the identity it stamps on every event comes from the channel's tenant and
-	// its live session's device, neither of which main can reach.
+	// the channel id itself, neither of which main can reach.
 	CallOptions call.Options
 	// OnCallManager, if set, is handed the call manager as soon as it exists --
 	// before Run blocks in its own serving loop. This is the only way anything
@@ -127,17 +127,15 @@ func (c callPublisher) PublishInbound(ctx context.Context, evt call.InboundCallE
 	return c.publisher.PublishInbound(ctx, evt)
 }
 
-// callIdentity resolves the tenant and device a call event belongs to. The
-// device is read from the live session, so a channel that has since dropped
-// simply reports an empty phone number rather than failing the event.
+// callIdentity resolves the tenant and phone-number id a call event belongs
+// to. PhoneNumberID is the channel id, not the device's JID: the backend
+// resolves a channel by its phoneNumberId column, and for a gateway channel
+// that column holds the channel's own UUID, not a phone number. The inbound
+// message path (mapper.BuildInbound) stamps the same value for the same
+// reason -- match it here rather than the device JID, or channel lookups on
+// the backend silently fail to find every call event.
 func (g *gateway) callIdentity(channelID string) call.Identity {
-	id := call.Identity{TenantID: g.tenantFor(channelID)}
-	if client, err := g.manager.Client(channelID); err == nil {
-		if jid := client.DeviceJID(); jid != nil {
-			id.PhoneNumberID = jid.User
-		}
-	}
-	return id
+	return call.Identity{TenantID: g.tenantFor(channelID), PhoneNumberID: channelID}
 }
 
 const defaultSendTimeout = 30 * time.Second

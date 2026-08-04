@@ -74,11 +74,17 @@ func (c *fakeClock) advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
+// newTestManager's identity function derives PhoneNumberID from the channel
+// id, mirroring gateway.callIdentity in production: the backend finds a
+// gateway channel by that field holding the channel's own id, not a phone
+// number. Deriving it here means a test that asserts PhoneNumberID against
+// the channel id it attached is pinned to that relationship, not to a
+// fixture constant that would mask a regression back to the device JID.
 func newTestManager(t *testing.T, pub call.Publisher, store call.RecordingStore, now func() time.Time) *call.Manager {
 	t.Helper()
 	return call.NewManager(pub, store,
-		func(string) call.Identity {
-			return call.Identity{PhoneNumberID: "5511999999999", TenantID: "t1"}
+		func(channelID string) call.Identity {
+			return call.Identity{PhoneNumberID: channelID, TenantID: "t1"}
 		},
 		call.Options{TmpDir: t.TempDir(), Record: true, Now: now},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -110,11 +116,59 @@ func TestManagerPublishesIncomingCall(t *testing.T) {
 	if evt.From != "5511888888888@s.whatsapp.net" {
 		t.Errorf("From = %q, want the peer jid", evt.From)
 	}
-	if evt.TenantID != "t1" || evt.PhoneNumberID != "5511999999999" {
-		t.Errorf("identity = %q/%q, want t1/5511999999999", evt.TenantID, evt.PhoneNumberID)
+	if evt.TenantID != "t1" || evt.PhoneNumberID != "chan-a" {
+		t.Errorf("identity = %q/%q, want t1/chan-a", evt.TenantID, evt.PhoneNumberID)
 	}
 	if _, ok := m.Get("chan-a", "C1"); !ok {
 		t.Error("incoming call was not registered")
+	}
+}
+
+// PhoneNumberID must track the channel id on both the call.Event and the
+// inbound-message-shaped call event: the backend resolves a channel by that
+// field holding the channel's own id, not a phone number or device JID. Two
+// different channel ids are attached here so the assertion actually pins the
+// relationship to whatever channel produced the event -- a fixture that
+// returned one fixed PhoneNumberID regardless of channel would pass a
+// same-channel-only check without proving the mapping is right.
+func TestPhoneNumberIDMatchesChannelID(t *testing.T) {
+	pub := &memPublisher{}
+	m := newTestManager(t, pub, newMemStore(), time.Now)
+
+	callerX := &fakeCaller{}
+	m.Attach("chan-x", callerX)
+	callerX.fireIncoming(&fakeCall{id: "CX", peer: "5511888888888@s.whatsapp.net"})
+
+	callerY := &fakeCaller{}
+	m.Attach("chan-y", callerY)
+	callerY.fireIncoming(&fakeCall{id: "CY", peer: "5511888888888@s.whatsapp.net"})
+
+	events := pub.typed(call.EventIncoming)
+	if len(events) != 2 {
+		t.Fatalf("got %d incoming events, want 2", len(events))
+	}
+	for _, evt := range events {
+		want := "chan-x"
+		if evt.CallID == "CY" {
+			want = "chan-y"
+		}
+		if evt.PhoneNumberID != want {
+			t.Errorf("call %s: PhoneNumberID = %q, want %q (its own channel id)", evt.CallID, evt.PhoneNumberID, want)
+		}
+	}
+
+	inbound := pub.inboundEvents()
+	if len(inbound) != 2 {
+		t.Fatalf("got %d inbound events, want 2", len(inbound))
+	}
+	for _, evt := range inbound {
+		want := "chan-x"
+		if evt.ProviderMessageID == "CY" {
+			want = "chan-y"
+		}
+		if evt.PhoneNumberID != want {
+			t.Errorf("call %s: InboundCallEvent.PhoneNumberID = %q, want %q (its own channel id)", evt.ProviderMessageID, evt.PhoneNumberID, want)
+		}
 	}
 }
 
