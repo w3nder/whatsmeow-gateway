@@ -262,7 +262,7 @@ func TestGatewayEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Open failed: %v", err)
 	}
-	factory := gateway.NewWAClientFactory(sessionContainer, waLogger)
+	factory := gateway.NewWAClientFactory(sessionContainer, waLogger, logger)
 	if _, err := factory("structural-check-channel", nil); err != nil {
 		t.Fatalf("gateway.NewWAClientFactory-produced factory failed: %v", err)
 	}

@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/purpshell/meowcaller"
@@ -12,6 +13,7 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/call"
+	"github.com/w3nder/whatsmeow-gateway/internal/logging"
 )
 
 // MaxAutoReconnectDelay caps the gap between reconnect attempts. whatsmeow sleeps
@@ -46,13 +48,18 @@ type waClient struct {
 	caller call.Caller
 }
 
-func NewWAClient(device *store.Device, log waLog.Logger) WAClient {
+func NewWAClient(channelID string, device *store.Device, log waLog.Logger, slogger *slog.Logger) WAClient {
 	client := whatsmeow.NewClient(device, log)
 	ConfigureAutoReconnect(client)
 
 	// The calling client installs the low-level <call>/<ack> interception, so it
 	// has to exist before the receive loop starts -- that is, before Connect.
-	caller := newCallerAdapter(meowcaller.NewClient(client))
+	//
+	// meowcaller defaults to a no-op logger, which would leave it (including its own
+	// startup failures) completely silent; bridge its zerolog output into the
+	// gateway's slog so a dead calling stack is visible instead of indistinguishable
+	// from no call ever arriving.
+	caller := newCallerAdapter(meowcaller.NewClient(client, meowcaller.WithLogger(logging.NewCallLogger(slogger, channelID))))
 
 	return &waClient{client: client, caller: caller}
 }

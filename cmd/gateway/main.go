@@ -133,7 +133,7 @@ func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *
 		return fmt.Errorf("main: new media store: %w", err)
 	}
 
-	manager := session.NewManager(gateway.NewWAClientFactory(sessionContainer, waLogger))
+	manager := session.NewManager(gateway.NewWAClientFactory(sessionContainer, waLogger, logger))
 
 	return gateway.Run(ctx, gateway.Deps{
 		Consumer:             consumer,

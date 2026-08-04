@@ -369,6 +369,9 @@ func (g *gateway) attachCalls(channelID string) {
 		return
 	}
 	g.calls.Attach(channelID, caller)
+	// The failure path above already logs; without this, a successful attach is
+	// silent and indistinguishable from attachCalls never having run at all.
+	g.logger.Info("gateway: calling client attached", "channel_id", channelID)
 }
 
 func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) error {
@@ -529,8 +532,34 @@ func (g *gateway) handleSessionEvent(channelID string, evt any) {
 		if err := g.registry.Delete(g.workCtx, channelID); err != nil {
 			g.logger.Error("gateway: delete session on logout", "channel_id", channelID, "error", err)
 		}
+	case *events.CallOffer, *events.CallAccept, *events.CallPreAccept, *events.CallTerminate,
+		*events.CallReject, *events.CallOfferNotice, *events.UnknownCallEvent:
+		g.handleCallSignal(channelID, e)
 	default:
 		g.handleConnectionEvent(channelID, evt)
+	}
+}
+
+// handleCallSignal logs whatsmeow's raw call signalling so the gateway is never blind to
+// a call arriving, even when the calling library (meowcaller, subscribed to these same
+// events independently) ignores or mishandles one. This is observability only: nothing
+// here acts on a call, so it cannot change call behaviour.
+func (g *gateway) handleCallSignal(channelID string, evt any) {
+	switch e := evt.(type) {
+	case *events.CallOffer:
+		g.logger.Info("gateway: call offer received", "channel_id", channelID, "call_id", e.CallID, "from", e.From.String())
+	case *events.CallAccept:
+		g.logger.Info("gateway: call accept received", "channel_id", channelID, "call_id", e.CallID, "from", e.From.String())
+	case *events.CallPreAccept:
+		g.logger.Info("gateway: call pre-accept received", "channel_id", channelID, "call_id", e.CallID, "from", e.From.String())
+	case *events.CallTerminate:
+		g.logger.Info("gateway: call terminate received", "channel_id", channelID, "call_id", e.CallID, "from", e.From.String(), "reason", e.Reason)
+	case *events.CallReject:
+		g.logger.Info("gateway: call reject received", "channel_id", channelID, "call_id", e.CallID, "from", e.From.String())
+	case *events.CallOfferNotice:
+		g.logger.Info("gateway: call offer notice received", "channel_id", channelID, "call_id", e.CallID, "from", e.From.String(), "media", e.Media, "type", e.Type)
+	case *events.UnknownCallEvent:
+		g.logger.Info("gateway: unknown call event received", "channel_id", channelID)
 	}
 }
 
@@ -647,7 +676,7 @@ func (g *gateway) clearTenant(channelID string) {
 	g.tenantMu.Unlock()
 }
 
-func NewWAClientFactory(container *sqlstore.Container, waLogger waLog.Logger) session.ClientFactory {
+func NewWAClientFactory(container *sqlstore.Container, waLogger waLog.Logger, slogger *slog.Logger) session.ClientFactory {
 	return func(channelID string, jid *types.JID) (session.WAClient, error) {
 		device, err := store.DeviceFor(context.Background(), container, jid)
 		if err != nil {
@@ -656,7 +685,7 @@ func NewWAClientFactory(container *sqlstore.Container, waLogger waLog.Logger) se
 		if device == nil {
 			return nil, fmt.Errorf("gateway: no stored device for channel %s (jid %s)", channelID, jid)
 		}
-		return session.NewWAClient(device, waLogger), nil
+		return session.NewWAClient(channelID, device, waLogger, slogger), nil
 	}
 }
 
