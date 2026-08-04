@@ -27,6 +27,8 @@ type memCallPublisher struct{}
 
 func (memCallPublisher) PublishCall(context.Context, call.Event) error { return nil }
 
+func (memCallPublisher) PublishInbound(context.Context, call.InboundCallEvent) error { return nil }
+
 type memCallStore struct{}
 
 func (memCallStore) PutStream(context.Context, string, string, io.Reader) error { return nil }

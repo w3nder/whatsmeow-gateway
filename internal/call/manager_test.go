@@ -13,8 +13,9 @@ import (
 )
 
 type memPublisher struct {
-	mu     sync.Mutex
-	events []call.Event
+	mu      sync.Mutex
+	events  []call.Event
+	inbound []call.InboundCallEvent
 }
 
 func (p *memPublisher) PublishCall(_ context.Context, evt call.Event) error {
@@ -22,6 +23,19 @@ func (p *memPublisher) PublishCall(_ context.Context, evt call.Event) error {
 	defer p.mu.Unlock()
 	p.events = append(p.events, evt)
 	return nil
+}
+
+func (p *memPublisher) PublishInbound(_ context.Context, evt call.InboundCallEvent) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.inbound = append(p.inbound, evt)
+	return nil
+}
+
+func (p *memPublisher) inboundEvents() []call.InboundCallEvent {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]call.InboundCallEvent(nil), p.inbound...)
 }
 
 func (p *memPublisher) typed(t string) []call.Event {
@@ -39,6 +53,9 @@ func (p *memPublisher) typed(t string) []call.Event {
 type panicPublisher struct{}
 
 func (panicPublisher) PublishCall(context.Context, call.Event) error { panic("boom") }
+func (panicPublisher) PublishInbound(context.Context, call.InboundCallEvent) error {
+	panic("boom")
+}
 
 type fakeClock struct {
 	mu  sync.Mutex

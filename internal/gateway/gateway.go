@@ -123,6 +123,10 @@ func (c callPublisher) PublishCall(ctx context.Context, evt call.Event) error {
 	return c.publisher.PublishCall(ctx, evt)
 }
 
+func (c callPublisher) PublishInbound(ctx context.Context, evt call.InboundCallEvent) error {
+	return c.publisher.PublishInbound(ctx, evt)
+}
+
 // callIdentity resolves the tenant and device a call event belongs to. The
 // device is read from the live session, so a channel that has since dropped
 // simply reports an empty phone number rather than failing the event.

@@ -11,6 +11,10 @@ import (
 // Publisher carries call events to the backend.
 type Publisher interface {
 	PublishCall(ctx context.Context, evt Event) error
+	// PublishInbound puts an arriving call onto the same routing key inbound
+	// messages use, so the backend's existing message pipeline creates its
+	// chat row.
+	PublishInbound(ctx context.Context, evt InboundCallEvent) error
 }
 
 // Identity is the channel-scoped identity stamped on every event, resolved at
@@ -80,6 +84,10 @@ func (m *Manager) Attach(channelID string, caller Caller) {
 
 	caller.OnIncomingCall(func(lc LiveCall) {
 		t := m.Track(channelID, lc, DirectionInbound, m.opts.Record)
+		// The inbound event goes out before incoming: the backend needs the
+		// chat row to exist before any lifecycle transition -- accepted can
+		// follow within milliseconds on a fast answer -- arrives to update it.
+		m.publishInbound(t)
 		m.publish(m.event(t, EventIncoming))
 	})
 }
@@ -348,6 +356,31 @@ func (m *Manager) event(t *Tracked, eventType string) Event {
 		Timestamp:     strconv.FormatInt(m.opts.Now().Unix(), 10),
 		IsVideo:       t.IsVideo,
 	}
+}
+
+// publishInbound puts an arriving call onto the inbound message stream, shaped
+// as a type: "call" message so the backend's existing pipeline creates the
+// chat row for it. Like publish, it absorbs both publish errors and panics:
+// this also runs on the calling library's media goroutine.
+func (m *Manager) publishInbound(t *Tracked) {
+	defer func() {
+		if r := recover(); r != nil {
+			m.log.Error("call: panic while publishing inbound call event",
+				"channel_id", t.ChannelID, "call_id", t.CallID, "panic", r)
+		}
+	}()
+
+	id := m.identity(t.ChannelID)
+	evt := NewInboundCallEvent(id, t.ChannelID, t.CallID, t.Peer, t.Direction, t.IsVideo,
+		strconv.FormatInt(m.opts.Now().Unix(), 10))
+
+	if err := m.pub.PublishInbound(context.Background(), evt); err != nil {
+		m.log.Error("call: publish inbound call event",
+			"channel_id", t.ChannelID, "call_id", t.CallID, "error", err)
+		return
+	}
+
+	m.log.Info("call: inbound call event published", "channel_id", t.ChannelID, "call_id", t.CallID)
 }
 
 // publish sends an event, absorbing both publish errors and panics. Callbacks
