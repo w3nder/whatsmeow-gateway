@@ -100,3 +100,22 @@ func TestVerifyCallTokenRejectsEmptyClaims(t *testing.T) {
 		}
 	}
 }
+
+// jsonwebtoken (the API's signer) stamps iat whenever expiresIn is used, so
+// every real token carries one. VerifyCallToken must ignore it rather than
+// validate it -- there is no iat requirement in the contract, and adding one
+// later (e.g. jwt.WithIssuedAt()) would silently start rejecting every real
+// token this test guards against that regression.
+func TestVerifyCallTokenAcceptsARealisticIssuedAt(t *testing.T) {
+	claims := validClaims()
+	claims["iat"] = time.Now().Unix()
+
+	got, err := media.VerifyCallToken(sign(t, claims, testSecret), testSecret)
+	if err != nil {
+		t.Fatalf("VerifyCallToken: %v", err)
+	}
+	want := media.CallClaims{TenantID: "tenant-1", ChannelID: "channel-1", CallID: "CALL1", UserID: "user-1"}
+	if got != want {
+		t.Errorf("claims = %+v, want %+v", got, want)
+	}
+}
