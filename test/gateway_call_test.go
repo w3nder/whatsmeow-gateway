@@ -285,8 +285,10 @@ func TestGatewayInboundCallRecordsAndPublishes(t *testing.T) {
 	if incoming.PhoneNumberID != channelID {
 		t.Fatalf("incoming PhoneNumberID = %q, want the channel id %q", incoming.PhoneNumberID, channelID)
 	}
-	if incoming.From != "5511888888888@s.whatsapp.net" {
-		t.Errorf("From = %q, want the peer jid", incoming.From)
+	// From is the resolved phone-number user, matching the shape an inbound
+	// message's From takes -- not the raw peer JID string.
+	if incoming.From != "5511888888888" {
+		t.Errorf("From = %q, want the resolved phone number", incoming.From)
 	}
 
 	// This is the exact delivery the reported bug dropped: the backend's

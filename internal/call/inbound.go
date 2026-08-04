@@ -1,5 +1,7 @@
 package call
 
+import "github.com/w3nder/whatsmeow-gateway/internal/senderid"
+
 // InboundCallEvent mirrors mapper.InboundEvent's shape for a call, so the
 // backend's existing message pipeline treats it as any other inbound message.
 //
@@ -35,12 +37,20 @@ type InboundCallRich struct {
 // call. ProviderMessageID is the call id, not a message id, so the backend
 // can correlate later call.v1 lifecycle events with the chat row this event
 // creates.
-func NewInboundCallEvent(id Identity, channelID, callID, peer, direction string, isVideo bool, timestamp string) InboundCallEvent {
+//
+// senderLid and senderPn are the peer's identity, already resolved by
+// senderid.Resolve the same way an inbound message's sender is -- this event
+// and the call.Event published on the call routing key must agree on who the
+// call was with, or the chat row this creates and the lifecycle events that
+// update it point the backend at two different contacts.
+func NewInboundCallEvent(id Identity, channelID, callID, senderLid, senderPn, direction string, isVideo bool, timestamp string) InboundCallEvent {
 	return InboundCallEvent{
 		PhoneNumberID:     id.PhoneNumberID,
 		TenantID:          id.TenantID,
 		ChannelID:         channelID,
-		From:              peer,
+		From:              senderid.From(senderLid, senderPn),
+		SenderLid:         senderLid,
+		SenderPn:          senderPn,
 		ProviderMessageID: callID,
 		Timestamp:         timestamp,
 		Type:              "call",

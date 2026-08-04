@@ -6,6 +6,10 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"go.mau.fi/whatsmeow/types"
+
+	"github.com/w3nder/whatsmeow-gateway/internal/senderid"
 )
 
 // Publisher carries call events to the backend.
@@ -43,9 +47,15 @@ type Manager struct {
 	pub      Publisher
 	store    RecordingStore
 	identity func(channelID string) Identity
-	opts     Options
-	log      *slog.Logger
-	registry *Registry
+	// senderResolver reaches the channel's own client for its PNForLID store
+	// lookup -- the same lookup an inbound message's sender resolution uses.
+	// A channel with no live client yet (or gone) may return a nil resolver;
+	// senderid.Resolve treats that as "no known phone number" rather than
+	// failing the call.
+	senderResolver func(channelID string) senderid.Resolver
+	opts           Options
+	log            *slog.Logger
+	registry       *Registry
 
 	// uploadWG tracks recording uploads still running off the teardown path,
 	// so shutdown can wait for them instead of killing an upload that is
@@ -57,6 +67,7 @@ func NewManager(
 	pub Publisher,
 	store RecordingStore,
 	identity func(channelID string) Identity,
+	senderResolver func(channelID string) senderid.Resolver,
 	opts Options,
 	log *slog.Logger,
 ) *Manager {
@@ -64,12 +75,13 @@ func NewManager(
 		opts.Now = time.Now
 	}
 	return &Manager{
-		pub:      pub,
-		store:    store,
-		identity: identity,
-		opts:     opts,
-		log:      log,
-		registry: NewRegistry(),
+		pub:            pub,
+		store:          store,
+		identity:       identity,
+		senderResolver: senderResolver,
+		opts:           opts,
+		log:            log,
+		registry:       NewRegistry(),
 	}
 }
 
@@ -100,11 +112,15 @@ func (m *Manager) Get(channelID, callID string) (*Tracked, bool) {
 // Track wires every callback on a call and registers it. Inbound calls come
 // here from Attach, outbound ones from the command dispatcher.
 func (m *Manager) Track(channelID string, lc LiveCall, direction string, record bool) *Tracked {
+	peer := lc.Peer()
+	senderLid, senderPn := m.resolveSenderIdentity(channelID, peer)
 	t := &Tracked{
 		CallID:    lc.ID(),
 		ChannelID: channelID,
 		Direction: direction,
-		Peer:      lc.Peer(),
+		Peer:      peer,
+		SenderLid: senderLid,
+		SenderPn:  senderPn,
 		IsVideo:   lc.IsVideo(),
 		Live:      lc,
 		StartedAt: m.opts.Now(),
@@ -143,6 +159,36 @@ func (m *Manager) Track(channelID string, lc LiveCall, direction string, record 
 		"channel_id", t.ChannelID, "call_id", t.CallID, "direction", t.Direction, "is_video", t.IsVideo)
 
 	return t
+}
+
+// resolveSenderIdentity turns a call's raw peer JID into the same
+// senderLid/senderPn pair an inbound message from the same person carries,
+// so the backend's contact lookup -- keyed on those strings -- finds one
+// contact regardless of which event told it about them. It runs once, here
+// at Track time, rather than on every event a call goes on to publish: the
+// PNForLID lookup behind it can hit the store, and a call's state can change
+// many times before it ends.
+func (m *Manager) resolveSenderIdentity(channelID, peer string) (senderLid, senderPn string) {
+	jid, err := types.ParseJID(peer)
+	if err != nil {
+		// The library handed us peer as a plain string precisely so this
+		// package does not have to trust it as a well-formed JID; a peer it
+		// cannot parse is not fatal to tracking the call, just to resolving
+		// who it was with.
+		m.log.Warn("call: peer is not a parseable JID", "channel_id", channelID, "peer", peer, "error", err)
+		return "", ""
+	}
+
+	var resolver senderid.Resolver
+	if m.senderResolver != nil {
+		resolver = m.senderResolver(channelID)
+	}
+
+	// A call's peer carries no alternate-identity hint the way a message's
+	// Info.SenderAlt does -- the calling library only ever gives us the one
+	// JID -- so the zero JID here always sends Resolve to the resolver
+	// fallback for a @lid peer.
+	return senderid.Resolve(context.Background(), resolver, jid, types.JID{})
 }
 
 // subscribe wires the library's callbacks. Everything published here goes
@@ -350,7 +396,9 @@ func (m *Manager) event(t *Tracked, eventType string) Event {
 		TenantID:      id.TenantID,
 		ChannelID:     t.ChannelID,
 		CallID:        t.CallID,
-		From:          t.Peer,
+		From:          senderid.From(t.SenderLid, t.SenderPn),
+		SenderLid:     t.SenderLid,
+		SenderPn:      t.SenderPn,
 		Direction:     t.Direction,
 		Type:          eventType,
 		Timestamp:     strconv.FormatInt(m.opts.Now().Unix(), 10),
@@ -371,7 +419,7 @@ func (m *Manager) publishInbound(t *Tracked) {
 	}()
 
 	id := m.identity(t.ChannelID)
-	evt := NewInboundCallEvent(id, t.ChannelID, t.CallID, t.Peer, t.Direction, t.IsVideo,
+	evt := NewInboundCallEvent(id, t.ChannelID, t.CallID, t.SenderLid, t.SenderPn, t.Direction, t.IsVideo,
 		strconv.FormatInt(m.opts.Now().Unix(), 10))
 
 	if err := m.pub.PublishInbound(context.Background(), evt); err != nil {

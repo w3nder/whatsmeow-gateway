@@ -54,6 +54,7 @@ func startMediaServerWithOrigins(t *testing.T, origins []string) (*httptest.Serv
 		memCallPublisher{},
 		memCallStore{},
 		func(string) call.Identity { return call.Identity{TenantID: "tenant-1"} },
+		nil,
 		call.Options{TmpDir: t.TempDir()},
 		discardLogger(),
 	)

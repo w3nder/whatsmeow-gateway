@@ -23,6 +23,7 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
 	"github.com/w3nder/whatsmeow-gateway/internal/ownership"
 	"github.com/w3nder/whatsmeow-gateway/internal/registry"
+	"github.com/w3nder/whatsmeow-gateway/internal/senderid"
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
 	"github.com/w3nder/whatsmeow-gateway/internal/store"
 )
@@ -101,6 +102,7 @@ func Run(ctx context.Context, deps Deps) error {
 		callPublisher{deps.Publisher},
 		recordingStore,
 		g.callIdentity,
+		g.callSenderResolver,
 		deps.CallOptions,
 		deps.Logger,
 	)
@@ -136,6 +138,20 @@ func (c callPublisher) PublishInbound(ctx context.Context, evt call.InboundCallE
 // the backend silently fail to find every call event.
 func (g *gateway) callIdentity(channelID string) call.Identity {
 	return call.Identity{TenantID: g.tenantFor(channelID), PhoneNumberID: channelID}
+}
+
+// callSenderResolver hands the call manager the same PNForLID lookup
+// mapper.BuildInbound uses for a message's sender, reached through the
+// channel's own client, so a call's @lid peer resolves to the identical
+// phone number a message from that person would. A channel with no live
+// client -- not yet paired, or gone -- resolves nothing: a call already in
+// flight must not be failed over an identity lookup.
+func (g *gateway) callSenderResolver(channelID string) senderid.Resolver {
+	client, err := g.waClientFor(channelID)
+	if err != nil {
+		return nil
+	}
+	return client
 }
 
 const defaultSendTimeout = 30 * time.Second

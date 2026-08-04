@@ -15,6 +15,13 @@ type Tracked struct {
 	ChannelID string
 	Direction string
 	Peer      string
+	// SenderLid and SenderPn are Peer resolved once, at Track time, the same
+	// way an inbound message's sender is resolved -- every event this call
+	// goes on to publish reads them from here rather than re-resolving on
+	// each publish, which would repeat a store lookup on every state change
+	// of a single call.
+	SenderLid string
+	SenderPn  string
 	IsVideo   bool
 
 	// Live is the underlying call, used by the command dispatcher.

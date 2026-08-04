@@ -86,6 +86,7 @@ func newTestManager(t *testing.T, pub call.Publisher, store call.RecordingStore,
 		func(channelID string) call.Identity {
 			return call.Identity{PhoneNumberID: channelID, TenantID: "t1"}
 		},
+		nil,
 		call.Options{TmpDir: t.TempDir(), Record: true, Now: now},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
@@ -113,8 +114,11 @@ func TestManagerPublishesIncomingCall(t *testing.T) {
 	if !evt.IsVideo {
 		t.Error("IsVideo = false, want true for a video offer")
 	}
-	if evt.From != "5511888888888@s.whatsapp.net" {
-		t.Errorf("From = %q, want the peer jid", evt.From)
+	// From is the resolved phone-number user, not the raw peer JID string --
+	// the same shape an inbound message's From takes, since both derive from
+	// senderid.Resolve/From on the same JID.
+	if evt.From != "5511888888888" {
+		t.Errorf("From = %q, want the resolved phone number", evt.From)
 	}
 	if evt.TenantID != "t1" || evt.PhoneNumberID != "chan-a" {
 		t.Errorf("identity = %q/%q, want t1/chan-a", evt.TenantID, evt.PhoneNumberID)
@@ -439,6 +443,7 @@ func TestManagerRecordingCanBeDisabled(t *testing.T) {
 	store := newMemStore()
 	m := call.NewManager(pub, store,
 		func(string) call.Identity { return call.Identity{TenantID: "t1"} },
+		nil,
 		call.Options{TmpDir: t.TempDir(), Record: false, Now: time.Now},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
@@ -542,6 +547,7 @@ func TestManagerAttachToleratesNilCaller(t *testing.T) {
 func TestManagerSurvivesPanickingPublish(t *testing.T) {
 	m := call.NewManager(panicPublisher{}, newMemStore(),
 		func(string) call.Identity { return call.Identity{} },
+		nil,
 		call.Options{TmpDir: t.TempDir(), Record: true, Now: time.Now},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)

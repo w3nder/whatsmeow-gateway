@@ -54,6 +54,7 @@ func TestStreamWorksWithRecordingDisabled(t *testing.T) {
 	store := newMemStore()
 	m := call.NewManager(&memPublisher{}, store,
 		func(string) call.Identity { return call.Identity{TenantID: "t1"} },
+		nil,
 		call.Options{TmpDir: t.TempDir(), Record: false, Now: time.Now},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)

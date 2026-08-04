@@ -18,6 +18,8 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/encoding/protojson"
+
+	"github.com/w3nder/whatsmeow-gateway/internal/senderid"
 )
 
 var ErrSkip = errors.New("mapper: inbound message has no mappable user content")
@@ -43,9 +45,9 @@ type Downloader interface {
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
 }
 
-type PNResolver interface {
-	PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error)
-}
+// PNResolver is senderid.Resolver under the name this package's callers
+// already know it by.
+type PNResolver = senderid.Resolver
 
 type MediaStore interface {
 	Put(ctx context.Context, key, mime string, data []byte) error
@@ -226,11 +228,8 @@ func BuildInbound(ctx context.Context, dl Downloader, resolver PNResolver, s3 Me
 	if evt.Info.IsFromMe {
 		identityJID, identityAlt = evt.Info.Chat, evt.Info.RecipientAlt
 	}
-	senderLid, senderPn := resolveSenderIdentifiers(ctx, resolver, identityJID, identityAlt)
-	from := senderPn
-	if from == "" {
-		from = senderLid
-	}
+	senderLid, senderPn := senderid.Resolve(ctx, resolver, identityJID, identityAlt)
+	from := senderid.From(senderLid, senderPn)
 
 	out := InboundEvent{
 		PhoneNumberID:     channelID,
@@ -527,28 +526,6 @@ func extractText(msg *waE2E.Message) string {
 		return body
 	}
 	return msg.GetExtendedTextMessage().GetText()
-}
-
-func resolveSenderIdentifiers(ctx context.Context, resolver PNResolver, sender, senderAlt types.JID) (senderLid, senderPn string) {
-	switch sender.Server {
-	case types.HiddenUserServer:
-		senderLid = sender.User
-		if senderAlt.Server == types.DefaultUserServer {
-			senderPn = senderAlt.User
-		} else if resolver != nil {
-			if pn, ok, err := resolver.PNForLID(ctx, sender); err == nil && ok && pn.Server == types.DefaultUserServer {
-				senderPn = pn.User
-			}
-		}
-	case types.DefaultUserServer:
-		senderPn = sender.User
-		if senderAlt.Server == types.HiddenUserServer {
-			senderLid = senderAlt.User
-		}
-	default:
-		senderPn = sender.User
-	}
-	return senderLid, senderPn
 }
 
 func buildPollRich(poll *waE2E.PollCreationMessage) *InboundRichContent {
