@@ -15,6 +15,8 @@ type SendHandler func(ctx context.Context, cmd GatewaySendCommand) error
 
 type PairHandler func(ctx context.Context, cmd PairCommand) error
 
+type CallHandler func(ctx context.Context, cmd GatewayCallCommand) error
+
 type ConsumerConfig struct {
 	Prefetch int
 }
@@ -22,9 +24,11 @@ type ConsumerConfig struct {
 type Consumer struct {
 	sendCh *rabbitmq.Channel
 	pairCh *rabbitmq.Channel
+	callCh *rabbitmq.Channel
 
 	sendStarted bool
 	pairStarted bool
+	callStarted bool
 
 	closing atomic.Bool
 	failed  chan error
@@ -81,7 +85,48 @@ func NewConsumer(conn *rabbitmq.Connection, cfg ConsumerConfig) (*Consumer, erro
 		return nil, fmt.Errorf("amqp: set qos on gateway.pair channel: %w", err)
 	}
 
-	return &Consumer{sendCh: sendCh, pairCh: pairCh, failed: make(chan error, 1)}, nil
+	callCh, err := conn.Channel()
+	if err != nil {
+		_ = sendCh.Close()
+		_ = pairCh.Close()
+		return nil, fmt.Errorf("amqp: open gateway.call channel: %w", err)
+	}
+	if err := declareCommandTopology(callCh, GatewayCallExchange, GatewayCallQueue, GatewayCallDLX, GatewayCallDLQ); err != nil {
+		_ = sendCh.Close()
+		_ = pairCh.Close()
+		_ = callCh.Close()
+		return nil, err
+	}
+	if err := callCh.Qos(cfg.Prefetch, 0, false); err != nil {
+		_ = sendCh.Close()
+		_ = pairCh.Close()
+		_ = callCh.Close()
+		return nil, fmt.Errorf("amqp: set qos on gateway.call channel: %w", err)
+	}
+
+	return &Consumer{sendCh: sendCh, pairCh: pairCh, callCh: callCh, failed: make(chan error, 1)}, nil
+}
+
+func (c *Consumer) StartCall(ctx context.Context, handler CallHandler) error {
+	deliveries, err := c.callCh.Consume(GatewayCallQueue, GatewayCallConsumer, false, false, false, false, nil)
+	if err != nil {
+		return fmt.Errorf("amqp: consume %s: %w", GatewayCallQueue, err)
+	}
+	c.callStarted = true
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		for d := range deliveries {
+			var cmd GatewayCallCommand
+			handlerErr := json.Unmarshal(d.Body, &cmd)
+			if handlerErr == nil {
+				handlerErr = handler(ctx, cmd)
+			}
+			settle(d, handlerErr)
+		}
+		c.reportFailure(fmt.Errorf("amqp: %s consumer stopped: broker closed the delivery channel", GatewayCallQueue))
+	}()
+	return nil
 }
 
 func (c *Consumer) StartSend(ctx context.Context, handler SendHandler) error {
@@ -152,12 +197,20 @@ func (c *Consumer) Close() error {
 			errs = append(errs, fmt.Errorf("amqp: cancel %s consumer: %w", GatewayPairQueue, err))
 		}
 	}
+	if c.callStarted {
+		if err := c.callCh.Cancel(GatewayCallConsumer, false); err != nil {
+			errs = append(errs, fmt.Errorf("amqp: cancel %s consumer: %w", GatewayCallQueue, err))
+		}
+	}
 	c.wg.Wait()
 	if err := c.sendCh.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("amqp: close gateway.send channel: %w", err))
 	}
 	if err := c.pairCh.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("amqp: close gateway.pair channel: %w", err))
+	}
+	if err := c.callCh.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("amqp: close gateway.call channel: %w", err))
 	}
 	return errors.Join(errs...)
 }

@@ -47,6 +47,10 @@ func (p *Publisher) PublishStatus(ctx context.Context, evt any) error {
 	return p.publish(ctx, StatusRoutingKey, evt)
 }
 
+func (p *Publisher) PublishCall(ctx context.Context, evt any) error {
+	return p.publish(ctx, CallRoutingKey, evt)
+}
+
 func (p *Publisher) PublishChannelQR(ctx context.Context, evt ChannelQREvent) error {
 	return p.publish(ctx, ChannelQRRoutingKey, evt)
 }
