@@ -43,7 +43,14 @@ type Deps struct {
 	// the identity it stamps on every event comes from the channel's tenant and
 	// its live session's device, neither of which main can reach.
 	CallOptions call.Options
-	Logger      *slog.Logger
+	// OnCallManager, if set, is handed the call manager as soon as it exists --
+	// before Run blocks in its own serving loop. This is the only way anything
+	// outside this package (namely main's media websocket, which must attach
+	// streams on the very registry the dispatcher populates) ever sees the
+	// manager: Run doesn't return one, since it doesn't return at all until
+	// shutdown.
+	OnCallManager func(*call.Manager)
+	Logger        *slog.Logger
 }
 
 type gateway struct {
@@ -97,6 +104,10 @@ func Run(ctx context.Context, deps Deps) error {
 		deps.CallOptions,
 		deps.Logger,
 	)
+
+	if deps.OnCallManager != nil {
+		deps.OnCallManager(g.calls)
+	}
 
 	return g.run(ctx)
 }

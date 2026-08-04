@@ -73,6 +73,7 @@ type fakeLiveCall struct {
 
 	mu      sync.Mutex
 	actions []string
+	played  []io.ReadCloser
 	onReady func()
 	onEnd   func(string)
 	audioIn func([]float32)
@@ -110,6 +111,18 @@ func (f *fakeLiveCall) fireEnd(reason string) {
 	}
 }
 
+// playedSrc returns the reader from the most recent Play call, or nil if Play
+// was never called. Lets a test read back what was actually written into the
+// pipe, rather than only observing that Play was wired up.
+func (f *fakeLiveCall) playedSrc() io.ReadCloser {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.played) == 0 {
+		return nil
+	}
+	return f.played[len(f.played)-1]
+}
+
 func (f *fakeLiveCall) feedAudio(frame []float32) {
 	f.mu.Lock()
 	fn := f.audioIn
@@ -136,7 +149,12 @@ func (f *fakeLiveCall) SendReaction(string) error             { return f.record(
 func (f *fakeLiveCall) SetHandRaised(bool) error              { return f.record("hand.raise") }
 func (f *fakeLiveCall) StartScreenShare(*uint32) error        { return f.record("screenshare.start") }
 func (f *fakeLiveCall) StopScreenShare() error                { return f.record("screenshare.stop") }
-func (f *fakeLiveCall) Play(io.ReadCloser) error              { return f.record("play") }
+func (f *fakeLiveCall) Play(src io.ReadCloser) error {
+	f.mu.Lock()
+	f.played = append(f.played, src)
+	f.mu.Unlock()
+	return f.record("play")
+}
 
 func (f *fakeLiveCall) AddParticipant(context.Context, string) error {
 	return f.record("participant.add")
