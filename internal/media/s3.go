@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
@@ -47,6 +49,24 @@ func NewS3Store(ctx context.Context, cfg S3Config) (*S3Store, error) {
 	})
 
 	return &S3Store{client: client, bucket: cfg.Bucket}, nil
+}
+
+// PutStream uploads r under key without holding it in memory. Call recordings
+// run to hundreds of megabytes for a long call, so Put's []byte would mean
+// buffering the whole thing; the uploader reads the file through instead and
+// switches to multipart on its own once the body is large enough.
+func (s *S3Store) PutStream(ctx context.Context, key, mime string, r io.Reader) error {
+	uploader := manager.NewUploader(s.client)
+	_, err := uploader.Upload(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(s.bucket),
+		Key:         aws.String(key),
+		Body:        r,
+		ContentType: aws.String(mime),
+	})
+	if err != nil {
+		return fmt.Errorf("media: put stream %s: %w", key, err)
+	}
+	return nil
 }
 
 func (s *S3Store) Put(ctx context.Context, key, mime string, data []byte) error {
