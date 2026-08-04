@@ -11,6 +11,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/w3nder/whatsmeow-gateway/internal/call"
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
 )
 
@@ -43,6 +44,9 @@ type fakeWAClient struct {
 	disconnectCalls int
 
 	handlers []func(any)
+
+	// caller stands in for the channel's calling client; nil unless a test wires one.
+	caller call.Caller
 }
 
 var _ session.WAClient = (*fakeWAClient)(nil)
@@ -156,6 +160,12 @@ func (f *fakeWAClient) AddEventHandler(handler func(any)) uint32 {
 	defer f.mu.Unlock()
 	f.handlers = append(f.handlers, handler)
 	return uint32(len(f.handlers))
+}
+
+func (f *fakeWAClient) Calls() call.Caller {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.caller
 }
 
 func (f *fakeWAClient) Disconnect() {
