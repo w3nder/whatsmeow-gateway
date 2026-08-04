@@ -97,9 +97,27 @@ func (m *Manager) Track(channelID string, lc LiveCall, direction string, record 
 	}
 	if record {
 		t.Recorder = NewRecorder(m.opts.TmpDir, channelID, t.CallID)
-		lc.Receive(t.Recorder.WriteAudio)
-		lc.ReceiveVideo(t.Recorder.WriteVideo)
 	}
+
+	// Both sinks always fan out to the recorder (when recording is on) and to
+	// an attached stream (when an operator is listening in): the two are
+	// independent, so either can be present without the other.
+	lc.Receive(func(frame []float32) {
+		if t.Recorder != nil {
+			t.Recorder.WriteAudio(frame)
+		}
+		if s := t.currentStream(); s != nil {
+			s.receiveAudio(frame)
+		}
+	})
+	lc.ReceiveVideo(func(accessUnit []byte) {
+		if t.Recorder != nil {
+			t.Recorder.WriteVideo(accessUnit)
+		}
+		if s := t.currentStream(); s != nil {
+			s.receiveVideo(accessUnit)
+		}
+	})
 
 	m.registry.Insert(t)
 	m.subscribe(t, lc)

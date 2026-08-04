@@ -22,6 +22,14 @@ type Tracked struct {
 	// Recorder is nil when recording is off for this call.
 	Recorder *Recorder
 
+	// streamMu guards Stream, which an operator can attach or detach at any
+	// point in the call's life, concurrently with the media goroutine reading
+	// it on every frame.
+	streamMu sync.Mutex
+	// Stream is nil until an operator attaches; AttachStream and detach are
+	// the only writers.
+	Stream *Stream
+
 	StartedAt time.Time
 	// AnsweredAt is zero until media starts. Talk time is measured from here,
 	// not from the offer: a call that rang for 40s and talked for 10s is a 10s
@@ -34,6 +42,34 @@ type Tracked struct {
 	// endOnce keeps teardown to one, whether it comes from the library's end
 	// callback or from a channel abort.
 	endOnce sync.Once
+}
+
+// currentStream returns the attached stream, or nil.
+func (t *Tracked) currentStream() *Stream {
+	t.streamMu.Lock()
+	defer t.streamMu.Unlock()
+	return t.Stream
+}
+
+// setStream attaches s, returning whatever stream was attached before it so
+// the caller can close it.
+func (t *Tracked) setStream(s *Stream) *Stream {
+	t.streamMu.Lock()
+	old := t.Stream
+	t.Stream = s
+	t.streamMu.Unlock()
+	return old
+}
+
+// clearStream detaches s, but only if it is still the attached stream: a
+// stale detach (from a stream that AttachStream already replaced) must not
+// clear the one that replaced it.
+func (t *Tracked) clearStream(s *Stream) {
+	t.streamMu.Lock()
+	if t.Stream == s {
+		t.Stream = nil
+	}
+	t.streamMu.Unlock()
 }
 
 // Registry holds the live calls of every channel on this instance.
