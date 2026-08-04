@@ -9,7 +9,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
@@ -53,11 +52,17 @@ func NewS3Store(ctx context.Context, cfg S3Config) (*S3Store, error) {
 
 // PutStream uploads r under key without holding it in memory. Call recordings
 // run to hundreds of megabytes for a long call, so Put's []byte would mean
-// buffering the whole thing; the uploader reads the file through instead and
-// switches to multipart on its own once the body is large enough.
+// buffering the whole thing in RAM per concurrent call.
+//
+// r must be seekable -- both callers pass an *os.File -- because the SDK sizes
+// the body by seeking it. A non-seekable reader is rejected here rather than
+// left to fail deep inside the SDK with an unrelated-looking error.
 func (s *S3Store) PutStream(ctx context.Context, key, mime string, r io.Reader) error {
-	uploader := manager.NewUploader(s.client)
-	_, err := uploader.Upload(ctx, &s3.PutObjectInput{
+	if _, ok := r.(io.ReadSeeker); !ok {
+		return fmt.Errorf("media: put stream %s: body is not seekable", key)
+	}
+
+	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
 		Key:         aws.String(key),
 		Body:        r,

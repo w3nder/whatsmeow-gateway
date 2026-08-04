@@ -677,7 +677,7 @@ func nativeFlowListFrom(sections []nativeFlowButtonSection, buttonText string) *
 	for _, s := range sections {
 		rows := make([]InboundRichListRow, 0, len(s.Rows))
 		for _, r := range s.Rows {
-			rows = append(rows, InboundRichListRow{ID: r.ID, Title: r.Title, Description: r.Description})
+			rows = append(rows, InboundRichListRow(r))
 		}
 		out = append(out, InboundRichListSection{Title: s.Title, Rows: rows})
 	}

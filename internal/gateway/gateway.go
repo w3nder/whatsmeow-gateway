@@ -18,6 +18,7 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
+	"github.com/w3nder/whatsmeow-gateway/internal/call"
 	"github.com/w3nder/whatsmeow-gateway/internal/dedupe"
 	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
 	"github.com/w3nder/whatsmeow-gateway/internal/ownership"
@@ -38,7 +39,11 @@ type Deps struct {
 	ShardLockTTL         time.Duration
 	SendTimeout          time.Duration
 	ShutdownDrainTimeout time.Duration
-	Logger               *slog.Logger
+	// CallOptions configures call tracking. Run builds the call manager itself:
+	// the identity it stamps on every event comes from the channel's tenant and
+	// its live session's device, neither of which main can reach.
+	CallOptions call.Options
+	Logger      *slog.Logger
 }
 
 type gateway struct {
@@ -49,6 +54,7 @@ type gateway struct {
 	dedupe               *dedupe.Store
 	registry             *registry.Store
 	mediaStore           mapper.MediaStore
+	calls                *call.Manager
 	instanceID           string
 	shardLockTTL         time.Duration
 	sendTimeout          time.Duration
@@ -79,7 +85,44 @@ func Run(ctx context.Context, deps Deps) error {
 		tenantByChannel:      make(map[string]string),
 	}
 
+	recordingStore, ok := deps.MediaStore.(call.RecordingStore)
+	if !ok {
+		return fmt.Errorf("gateway: media store does not support streaming uploads, which call recording requires")
+	}
+
+	g.calls = call.NewManager(
+		callPublisher{deps.Publisher},
+		recordingStore,
+		g.callIdentity,
+		deps.CallOptions,
+		deps.Logger,
+	)
+
 	return g.run(ctx)
+}
+
+// callPublisher adapts the amqp publisher to call.Publisher. The amqp package
+// takes `any` for every event, as it does for inbound and status, so it stays
+// unaware of the call package.
+type callPublisher struct {
+	publisher *amqp.Publisher
+}
+
+func (c callPublisher) PublishCall(ctx context.Context, evt call.Event) error {
+	return c.publisher.PublishCall(ctx, evt)
+}
+
+// callIdentity resolves the tenant and device a call event belongs to. The
+// device is read from the live session, so a channel that has since dropped
+// simply reports an empty phone number rather than failing the event.
+func (g *gateway) callIdentity(channelID string) call.Identity {
+	id := call.Identity{TenantID: g.tenantFor(channelID)}
+	if client, err := g.manager.Client(channelID); err == nil {
+		if jid := client.DeviceJID(); jid != nil {
+			id.PhoneNumberID = jid.User
+		}
+	}
+	return id
 }
 
 const defaultSendTimeout = 30 * time.Second
@@ -110,6 +153,11 @@ func (g *gateway) run(ctx context.Context) error {
 		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
 		return fmt.Errorf("gateway: start send consumer: %w", err)
 	}
+	if err := g.consumer.StartCall(g.workCtx, g.CallHandler); err != nil {
+		g.closeConsumerForFailedBoot()
+		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
+		return fmt.Errorf("gateway: start call consumer: %w", err)
+	}
 
 	g.logger.Info("gateway started", "instance_id", g.instanceID)
 
@@ -126,6 +174,10 @@ func (g *gateway) run(ctx context.Context) error {
 	}
 
 	g.closeConsumerWithDrainDeadline()
+
+	// End live calls before the sockets go: a call left registered would flush
+	// no recording and report no end to the backend.
+	g.calls.AbortAll(g.workCtx, "gateway_shutdown")
 
 	g.manager.DisconnectAll()
 
@@ -165,6 +217,8 @@ func (g *gateway) resumeOwnedSessions(ctx context.Context) {
 			g.logger.Error("gateway: resume session", "channel_id", cs.ChannelID, "error", err)
 			continue
 		}
+
+		g.attachCalls(cs.ChannelID)
 	}
 }
 
@@ -208,6 +262,7 @@ func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand) error {
 			if err := g.persistSession(ctx, cmd.ChannelID, cmd.TenantID); err != nil {
 				return fmt.Errorf("gateway: persist session %s: %w", cmd.ChannelID, err)
 			}
+			g.attachCalls(cmd.ChannelID)
 			if err := g.publisher.PublishChannelStatus(ctx, amqp.ChannelStatusEvent{
 				TenantID:  cmd.TenantID,
 				UserID:    cmd.UserID,
@@ -260,6 +315,49 @@ func (g *gateway) publishChannelError(ctx context.Context, tenantID, userID, cha
 	}); err != nil {
 		g.logger.Error("gateway: publish channel.status error", "channel_id", channelID, "error", err)
 	}
+}
+
+// CallHandler runs one call command.
+//
+// It reports a bad command as an event rather than as an error: nacking would
+// requeue it, and a command for a call that does not exist would loop until the
+// DLQ. Only a failure worth retrying comes back as an error.
+func (g *gateway) CallHandler(ctx context.Context, cmd amqp.GatewayCallCommand) error {
+	g.setTenant(cmd.ChannelID, cmd.TenantID)
+
+	g.logger.Info("gateway: call command received",
+		"command_id", cmd.CommandID,
+		"channel_id", cmd.ChannelID,
+		"call_id", cmd.CallID,
+		"action", cmd.Action)
+
+	if err := g.ensureChannelConnected(ctx, cmd.ChannelID); err != nil {
+		return fmt.Errorf("gateway: ensure connected %s: %w", cmd.ChannelID, err)
+	}
+
+	client, err := g.waClientFor(cmd.ChannelID)
+	if err != nil {
+		return fmt.Errorf("gateway: resolve client %s: %w", cmd.ChannelID, err)
+	}
+
+	return g.calls.Dispatch(ctx, client.Calls(), cmd, fetchMediaURL)
+}
+
+// attachCalls subscribes the call manager to a channel's inbound calls. Called
+// once a session is live, from both the pair and the resume paths.
+func (g *gateway) attachCalls(channelID string) {
+	client, err := g.waClientFor(channelID)
+	if err != nil {
+		g.logger.Error("gateway: resolve client to attach calls", "channel_id", channelID, "error", err)
+		return
+	}
+
+	caller := client.Calls()
+	if caller == nil {
+		g.logger.Warn("gateway: channel has no calling client, calls disabled", "channel_id", channelID)
+		return
+	}
+	g.calls.Attach(channelID, caller)
 }
 
 func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) error {
@@ -404,6 +502,7 @@ func (g *gateway) ensureChannelConnected(ctx context.Context, channelID string) 
 	if resumeErr := g.manager.Resume(ctx, channelID, jid); resumeErr != nil {
 		return resumeErr
 	}
+	g.attachCalls(channelID)
 	return g.manager.EnsureConnected(channelID)
 }
 
@@ -414,6 +513,7 @@ func (g *gateway) handleSessionEvent(channelID string, evt any) {
 	case *events.Receipt:
 		g.handleReceipt(channelID, e)
 	case *events.LoggedOut:
+		g.calls.AbortChannel(g.workCtx, channelID, "logged_out")
 		g.clearTenant(channelID)
 		if err := g.registry.Delete(g.workCtx, channelID); err != nil {
 			g.logger.Error("gateway: delete session on logout", "channel_id", channelID, "error", err)
@@ -434,6 +534,9 @@ func (g *gateway) handleConnectionEvent(channelID string, evt any) {
 		g.publishChannelStatus(channelID, "connected", "")
 	case *events.Disconnected:
 		g.logger.Warn("gateway: channel socket disconnected, auto-reconnect running", "channel_id", channelID)
+		// Media does not survive a dead socket. Leaving the call registered
+		// would hide its end from the backend and strand its recording.
+		g.calls.AbortChannel(g.workCtx, channelID, "disconnected")
 		g.publishChannelStatus(channelID, "disconnected", "socket disconnected")
 	case *events.KeepAliveTimeout:
 		g.logger.Warn("gateway: channel keepalive timed out",

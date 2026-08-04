@@ -64,7 +64,14 @@ func NewManager(
 }
 
 // Attach subscribes to a channel's inbound calls. Called once per live session.
+//
+// A nil caller is a no-op: a client built without a calling stack simply never
+// reports a call, which must not be fatal to the channel.
 func (m *Manager) Attach(channelID string, caller Caller) {
+	if caller == nil {
+		return
+	}
+
 	caller.OnIncomingCall(func(lc LiveCall) {
 		t := m.Track(channelID, lc, DirectionInbound, m.opts.Record)
 		m.publish(m.event(t, EventIncoming))

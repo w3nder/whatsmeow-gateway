@@ -323,6 +323,14 @@ func TestManagerPublishesVideoStateAndReaction(t *testing.T) {
 	}
 }
 
+// A client built without a calling stack must not take the channel down.
+func TestManagerAttachToleratesNilCaller(t *testing.T) {
+	m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
+
+	// Must not panic.
+	m.Attach("chan-a", nil)
+}
+
 // A callback runs on the library's media goroutine. A panic there must not take
 // the gateway down with it.
 func TestManagerSurvivesPanickingPublish(t *testing.T) {

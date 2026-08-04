@@ -22,6 +22,8 @@ type Config struct {
 	ShardLockTTL         time.Duration
 	SendTimeout          time.Duration
 	ShutdownDrainTimeout time.Duration
+	CallTmpDir           string
+	CallRecord           bool
 }
 
 func Load() (Config, error) {
@@ -41,6 +43,10 @@ func Load() (Config, error) {
 		ShardLockTTL:         24 * time.Hour,
 		SendTimeout:          30 * time.Second,
 		ShutdownDrainTimeout: 20 * time.Second,
+		CallTmpDir:           os.Getenv("GATEWAY_CALL_TMPDIR"),
+		// Recording is on by default: a call the backend cannot hear afterwards
+		// is of little use to it. GATEWAY_CALL_RECORD=false turns it off.
+		CallRecord: os.Getenv("GATEWAY_CALL_RECORD") != "false",
 	}
 	if c.AMQPURL == "" || c.SessionDSN == "" || c.RedisURL == "" || c.InstanceID == "" {
 		return Config{}, fmt.Errorf("missing required env (GATEWAY_INSTANCE_ID, AMQP_URL, SESSION_DATABASE_URL, REDIS_URL)")
