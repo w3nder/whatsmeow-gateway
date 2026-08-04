@@ -6,8 +6,10 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
 )
@@ -126,6 +128,15 @@ func (f *fakeWAClient) BuildEdit(chat types.JID, id types.MessageID, newContent 
 
 func (f *fakeWAClient) BuildRevoke(chat, sender types.JID, id types.MessageID) *waE2E.Message {
 	return &waE2E.Message{}
+}
+
+func (f *fakeWAClient) BuildReaction(chat, sender types.JID, id types.MessageID, reaction string) *waE2E.Message {
+	return &waE2E.Message{
+		ReactionMessage: &waE2E.ReactionMessage{
+			Key:  &waCommon.MessageKey{ID: proto.String(string(id))},
+			Text: proto.String(reaction),
+		},
+	}
 }
 
 func (f *fakeWAClient) Upload(ctx context.Context, data []byte, mt whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {
