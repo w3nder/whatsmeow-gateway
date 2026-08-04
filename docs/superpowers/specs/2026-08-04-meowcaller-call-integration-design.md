@@ -158,7 +158,7 @@ Regras:
 - `callId` desconhecido → publica `command.failed` com código `call_not_found` e faz
   `Nack(requeue=false)`. Requeue causaria loop até o DLQ.
 - `sendTimeout` não se aplica a `dial`: a chamada toca no destino por dezenas de segundos.
-  Timeout próprio de ring, configurável (`GATEWAY_CALL_RING_TIMEOUT`, default 45 s).
+  O contexto do comando de discagem não carrega o deadline de envio de mensagem.
 - Toda ação responde com um evento `command.ack` ou `command.failed` carregando o
   `commandId`, para o backend correlacionar.
 
@@ -236,10 +236,6 @@ Duas mudanças de infra que isso exige:
 2. Diretório de trabalho para os temporários: `GATEWAY_CALL_TMPDIR`, default `os.TempDir()`.
    A imagem distroless tem `/tmp`; em produção convém montar um volume. Arquivo temp é
    removido com `defer` mesmo em erro de upload.
-
-Limite de segurança: `GATEWAY_CALL_MAX_DURATION` (default 2 h). Ao estourar, o gateway
-derruba a chamada com `hangup`, sobe o que gravou e publica `ended` com
-`reason: "max_duration"`.
 
 ## Vídeo de saída
 
