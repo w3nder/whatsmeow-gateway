@@ -3,6 +3,7 @@ package call_test
 import (
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -288,6 +289,108 @@ func TestStreamDropsFramesWhenTheOperatorIsNotReading(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("feeding audio blocked on an unread stream")
 	}
+}
+
+// The mu fence in close() exists to protect exactly this: a stream torn
+// down while both directions are actively flowing, so a fenceless close
+// would either panic on a send to a closed channel or deadlock the media
+// goroutine behind close's pending Lock (see the review that caught
+// WriteVideo doing precisely that before it snapshotted closed and
+// released the lock). Run under -race and with -count>1, this is where
+// that fencing actually gets exercised instead of merely inspected.
+//
+// teardown runs concurrently with traffic in both directions and reports
+// whether the stream should still be usable afterward: detach makes it
+// dead, but ending some *other* call must leave this stream's traffic
+// untouched.
+func raceTrafficAgainstTeardown(t *testing.T, teardown func(lc *fakeCall, detach func())) {
+	t.Helper()
+	m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
+	caller := &fakeCaller{}
+	m.Attach("chan-a", caller)
+
+	lc := &fakeCall{id: "C1"}
+	caller.fireIncoming(lc)
+
+	stream, detach, ok := m.AttachStream("chan-a", "C1")
+	if !ok {
+		t.Fatal("AttachStream returned false for a live call")
+	}
+	defer detach()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Stands in for the calling library's media goroutine: the one this
+	// whole package exists to keep from ever blocking or panicking.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			lc.feedAudio([]float32{float32(i%3) * 0.1})
+			lc.feedVideo([]byte{0, 0, 0, 1, 0x65, byte(i)})
+		}
+	}()
+
+	// The operator's own traffic, flowing the other way at the same time,
+	// straight through the same Stream that close() is about to tear down.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = stream.WriteAudio([]byte{byte(i), byte(i >> 8)})
+			_ = stream.WriteVideo([]byte{0, 0, 0, 1, 0x65, byte(i)})
+		}
+	}()
+
+	// Let real interleaving build up before tearing down mid-flight.
+	time.Sleep(5 * time.Millisecond)
+	teardown(lc, detach)
+
+	close(stop)
+
+	waitDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("traffic goroutines did not stop after teardown")
+	}
+
+	// Whatever tore it down, the stream itself is now dead: further writes
+	// must fail fast rather than block or silently succeed.
+	if err := stream.WriteAudio([]byte{0, 0}); err == nil {
+		t.Error("WriteAudio succeeded after teardown, want an error")
+	}
+	if err := stream.WriteVideo([]byte{0, 0, 0, 1, 0x65}); err == nil {
+		t.Error("WriteVideo succeeded after teardown, want an error")
+	}
+}
+
+func TestConcurrentTrafficSurvivesDetach(t *testing.T) {
+	raceTrafficAgainstTeardown(t, func(_ *fakeCall, detach func()) {
+		detach()
+	})
+}
+
+func TestConcurrentTrafficSurvivesCallEnding(t *testing.T) {
+	raceTrafficAgainstTeardown(t, func(lc *fakeCall, _ func()) {
+		lc.fireEnd("hangup")
+	})
 }
 
 // Same guarantee as above, for the video sink: dropping is what protects the
