@@ -73,6 +73,18 @@ func (f *fakeCall) sentVideo() [][]byte {
 	return append([][]byte(nil), f.videoOut...)
 }
 
+// playedSrc returns the reader from the most recent Play call, or nil if
+// Play was never called. Lets a test read back what was actually written
+// into the pipe, rather than only observing that Play was wired up.
+func (f *fakeCall) playedSrc() io.ReadCloser {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.played) == 0 {
+		return nil
+	}
+	return f.played[len(f.played)-1]
+}
+
 func (f *fakeCall) ID() string    { return f.id }
 func (f *fakeCall) Peer() string  { return f.peer }
 func (f *fakeCall) IsVideo() bool { return f.video }

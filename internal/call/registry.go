@@ -61,6 +61,17 @@ func (t *Tracked) setStream(s *Stream) *Stream {
 	return old
 }
 
+// takeStream removes and returns whatever stream is attached, or nil. Used
+// when the call itself ends: whoever is parked on Audio()/Video() must see
+// the channels close rather than hang forever on a call that is gone.
+func (t *Tracked) takeStream() *Stream {
+	t.streamMu.Lock()
+	s := t.Stream
+	t.Stream = nil
+	t.streamMu.Unlock()
+	return s
+}
+
 // clearStream detaches s, but only if it is still the attached stream: a
 // stale detach (from a stream that AttachStream already replaced) must not
 // clear the one that replaced it.

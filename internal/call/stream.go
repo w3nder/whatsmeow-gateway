@@ -46,10 +46,11 @@ type Stream struct {
 	pipeW         *io.PipeWriter
 
 	// mu guards closed and, by extension, every channel above: a send must
-	// never race a close of the same channel. Held for read by every sender
-	// (WriteAudio, WriteVideo, receiveAudio, receiveVideo) and for write only
-	// by close, so ordinary traffic never contends with itself, only with
-	// teardown.
+	// never race a close of the same channel. Held for read while a channel
+	// send is in flight (WriteAudio, receiveAudio, receiveVideo) and for
+	// write only by close, so ordinary traffic never contends with itself,
+	// only with teardown. WriteVideo takes it only to snapshot closed, never
+	// across the call into the library -- see the comment there.
 	mu     sync.RWMutex
 	closed bool
 }
@@ -131,10 +132,19 @@ func (s *Stream) WriteAudio(frame []byte) error {
 
 // WriteVideo sends one Annex-B access unit from the operator straight
 // through to the call; the gateway never re-encodes video.
+//
+// SendVideo touches no channel of ours, so it needs no fence against close:
+// the lock here only snapshots closed and is released before the call.
+// SendVideo carries no bounded-time contract (a contended send lock or a
+// full socket buffer in the real implementation can stall it), and holding
+// mu across it would queue every other sender behind a pending Lock in
+// close -- including receiveAudio and receiveVideo on the media goroutine,
+// which is exactly what this package exists to keep from stalling.
 func (s *Stream) WriteVideo(accessUnit []byte) error {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.closed {
+	closed := s.closed
+	s.mu.RUnlock()
+	if closed {
 		return fmt.Errorf("call: write operator video: %w", io.ErrClosedPipe)
 	}
 

@@ -233,6 +233,13 @@ func (m *Manager) end(ctx context.Context, t *Tracked, reason string) {
 // once per call, whichever path reaches it first.
 func (m *Manager) finish(ctx context.Context, t *Tracked, reason string) {
 	t.endOnce.Do(func() {
+		// A stream outlives its call otherwise: nothing else tells an
+		// operator parked on Audio()/Video() that the call is gone, so those
+		// channels would simply never receive again instead of closing.
+		if s := t.takeStream(); s != nil {
+			s.close()
+		}
+
 		evt := m.event(t, EventEnded)
 		evt.Reason = reason
 		if !t.AnsweredAt.IsZero() {
