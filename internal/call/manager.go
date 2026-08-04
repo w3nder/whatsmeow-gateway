@@ -121,6 +121,13 @@ func (m *Manager) Track(channelID string, lc LiveCall, direction string, record 
 
 	m.registry.Insert(t)
 	m.subscribe(t, lc)
+
+	// This is the only proof the library's incoming-call handler actually
+	// fired: whatsmeow calls it silently, so a nil OnIncomingCall and a
+	// handler that ran and published look identical unless this line exists.
+	m.log.Info("call: tracking",
+		"channel_id", t.ChannelID, "call_id", t.CallID, "direction", t.Direction, "is_video", t.IsVideo)
+
 	return t
 }
 
@@ -305,5 +312,18 @@ func (m *Manager) publish(evt Event) {
 	if err := m.pub.PublishCall(context.Background(), evt); err != nil {
 		m.log.Error("call: publish call event",
 			"channel_id", evt.ChannelID, "call_id", evt.CallID, "type", evt.Type, "error", err)
+		return
 	}
+
+	// publish is the single choke point every event goes through, so this is
+	// the one line that proves an event actually reached the broker rather
+	// than silently never being built. State and video-state updates can fire
+	// repeatedly through a single call, so those go to Debug; the lifecycle
+	// events an operator debugging a call cares about stay at Info.
+	level := slog.LevelInfo
+	if evt.Type == EventState || evt.Type == EventVideo {
+		level = slog.LevelDebug
+	}
+	m.log.Log(context.Background(), level, "call: event published",
+		"channel_id", evt.ChannelID, "call_id", evt.CallID, "type", evt.Type)
 }
