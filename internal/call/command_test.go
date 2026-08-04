@@ -233,6 +233,61 @@ func TestDispatchDialTracksTheOutboundCall(t *testing.T) {
 	}
 }
 
+// Dialling must land the call in the operator's chat exactly the way an
+// inbound call does: an inbound-shaped event, fromMe set since the gateway
+// placed it, and the sender fields naming the party called -- not our own
+// device, mirroring how mapper.BuildInbound keys a from-me message to the
+// chat contact -- published before ringing so the chat row exists before any
+// lifecycle transition arrives to update it.
+func TestDispatchDialPublishesInboundCallEventBeforeRinging(t *testing.T) {
+	pub := &memPublisher{}
+	m := newTestManager(t, pub, newMemStore(), time.Now)
+	caller := &fakeCaller{}
+	m.Attach("chan-a", caller)
+
+	if err := m.Dispatch(context.Background(), caller, amqp.GatewayCallCommand{
+		ChannelID: "chan-a", CommandID: "cmd-1", Action: "dial",
+		To: "5511888888888@s.whatsapp.net",
+	}, noFetch); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	inbound := pub.inboundEvents()
+	if len(inbound) != 1 {
+		t.Fatalf("got %d inbound events, want 1", len(inbound))
+	}
+	evt := inbound[0]
+
+	// The call id, not a message id: the backend correlates the ringing/
+	// accepted/ended events that follow with the chat row this event creates.
+	if evt.ProviderMessageID != "OUT1" {
+		t.Errorf("providerMessageId = %q, want the call id OUT1", evt.ProviderMessageID)
+	}
+	if !evt.FromMe {
+		t.Error("FromMe = false, want true: the gateway placed this call")
+	}
+	if evt.RichContent == nil || evt.RichContent.Direction != call.DirectionOutbound {
+		t.Errorf("richContent.direction = %+v, want outbound", evt.RichContent)
+	}
+	if evt.From != "5511888888888" || evt.SenderPn != "5511888888888" {
+		t.Errorf("sender identity = from=%q senderPn=%q, want the party called (5511888888888)", evt.From, evt.SenderPn)
+	}
+
+	seq := pub.sequence()
+	inboundIdx, ringingIdx := -1, -1
+	for i, s := range seq {
+		switch s {
+		case "inbound":
+			inboundIdx = i
+		case call.EventRinging:
+			ringingIdx = i
+		}
+	}
+	if inboundIdx == -1 || ringingIdx == -1 || ringingIdx < inboundIdx {
+		t.Fatalf("event order wrong: inbound at %d, ringing at %d, want inbound first", inboundIdx, ringingIdx)
+	}
+}
+
 func TestDispatchDialWithoutTargetFails(t *testing.T) {
 	pub := &memPublisher{}
 	m := newTestManager(t, pub, newMemStore(), time.Now)

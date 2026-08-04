@@ -130,6 +130,11 @@ func (m *Manager) dispatchCaller(ctx context.Context, caller Caller, cmd amqp.Ga
 func (m *Manager) trackOutbound(cmd amqp.GatewayCallCommand, lc LiveCall) {
 	t := m.Track(cmd.ChannelID, lc, DirectionOutbound, m.recordFor(cmd))
 
+	// The inbound event goes out before ringing, for the same reason Attach
+	// publishes it before incoming: the backend needs the chat row to exist
+	// before any lifecycle transition arrives to update it.
+	m.publishInbound(t)
+
 	evt := m.event(t, EventRinging)
 	evt.CommandID = cmd.CommandID
 	m.publish(evt)

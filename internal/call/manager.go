@@ -406,10 +406,10 @@ func (m *Manager) event(t *Tracked, eventType string) Event {
 	}
 }
 
-// publishInbound puts an arriving call onto the inbound message stream, shaped
-// as a type: "call" message so the backend's existing pipeline creates the
-// chat row for it. Like publish, it absorbs both publish errors and panics:
-// this also runs on the calling library's media goroutine.
+// publishInbound puts a call -- arriving or placed -- onto the inbound message
+// stream, shaped as a type: "call" message so the backend's existing pipeline
+// creates the chat row for it. Like publish, it absorbs both publish errors
+// and panics: this also runs on the calling library's media goroutine.
 func (m *Manager) publishInbound(t *Tracked) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -419,7 +419,12 @@ func (m *Manager) publishInbound(t *Tracked) {
 	}()
 
 	id := m.identity(t.ChannelID)
-	evt := NewInboundCallEvent(id, t.ChannelID, t.CallID, t.SenderLid, t.SenderPn, t.Direction, t.IsVideo,
+	// fromMe follows direction, not who t.SenderLid/SenderPn describe: those
+	// stay the peer's identity either way, exactly as mapper.BuildInbound
+	// resolves a from-me message's identity from the chat rather than from our
+	// own device. fromMe only tells the backend which side placed the call.
+	fromMe := t.Direction == DirectionOutbound
+	evt := NewInboundCallEvent(id, t.ChannelID, t.CallID, t.SenderLid, t.SenderPn, t.Direction, fromMe, t.IsVideo,
 		strconv.FormatInt(m.opts.Now().Unix(), 10))
 
 	if err := m.pub.PublishInbound(context.Background(), evt); err != nil {

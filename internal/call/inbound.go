@@ -33,8 +33,8 @@ type InboundCallRich struct {
 	State     string `json:"state"`
 }
 
-// NewInboundCallEvent builds the inbound-message-shaped view of an arriving
-// call. ProviderMessageID is the call id, not a message id, so the backend
+// NewInboundCallEvent builds the inbound-message-shaped view of a call, arriving
+// or placed. ProviderMessageID is the call id, not a message id, so the backend
 // can correlate later call.v1 lifecycle events with the chat row this event
 // creates.
 //
@@ -42,8 +42,14 @@ type InboundCallRich struct {
 // senderid.Resolve the same way an inbound message's sender is -- this event
 // and the call.Event published on the call routing key must agree on who the
 // call was with, or the chat row this creates and the lifecycle events that
-// update it point the backend at two different contacts.
-func NewInboundCallEvent(id Identity, channelID, callID, senderLid, senderPn, direction string, isVideo bool, timestamp string) InboundCallEvent {
+// update it point the backend at two different contacts. That holds
+// regardless of fromMe: exactly as mapper.BuildInbound keys a from-me message
+// to the chat contact rather than to our own device, these fields always
+// describe the person the call is with, never us.
+//
+// State always starts "ringing": whichever side placed the call, the chat row
+// is created before an answer/reject decision exists to report.
+func NewInboundCallEvent(id Identity, channelID, callID, senderLid, senderPn, direction string, fromMe, isVideo bool, timestamp string) InboundCallEvent {
 	return InboundCallEvent{
 		PhoneNumberID:     id.PhoneNumberID,
 		TenantID:          id.TenantID,
@@ -51,6 +57,7 @@ func NewInboundCallEvent(id Identity, channelID, callID, senderLid, senderPn, di
 		From:              senderid.From(senderLid, senderPn),
 		SenderLid:         senderLid,
 		SenderPn:          senderPn,
+		FromMe:            fromMe,
 		ProviderMessageID: callID,
 		Timestamp:         timestamp,
 		Type:              "call",

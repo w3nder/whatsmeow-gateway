@@ -16,12 +16,18 @@ type memPublisher struct {
 	mu      sync.Mutex
 	events  []call.Event
 	inbound []call.InboundCallEvent
+	// order records "inbound" or a call.Event's type in the sequence both
+	// PublishInbound and PublishCall are actually invoked, since events and
+	// inbound live in separate slices and neither alone proves which method
+	// fired first.
+	order []string
 }
 
 func (p *memPublisher) PublishCall(_ context.Context, evt call.Event) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.events = append(p.events, evt)
+	p.order = append(p.order, evt.Type)
 	return nil
 }
 
@@ -29,6 +35,7 @@ func (p *memPublisher) PublishInbound(_ context.Context, evt call.InboundCallEve
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.inbound = append(p.inbound, evt)
+	p.order = append(p.order, "inbound")
 	return nil
 }
 
@@ -36,6 +43,14 @@ func (p *memPublisher) inboundEvents() []call.InboundCallEvent {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]call.InboundCallEvent(nil), p.inbound...)
+}
+
+// sequence returns the order publish calls actually landed in, "inbound" or a
+// call.Event's type per entry.
+func (p *memPublisher) sequence() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.order...)
 }
 
 func (p *memPublisher) typed(t string) []call.Event {
