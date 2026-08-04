@@ -168,8 +168,9 @@ func runMediaServer(ctx context.Context, calls *call.Manager, cfg config.Config,
 	}
 
 	srv := media.NewServer(calls, media.ServerConfig{
-		Addr:   cfg.CallMediaAddr,
-		Secret: cfg.CallMediaTokenSecret,
+		Addr:           cfg.CallMediaAddr,
+		Secret:         cfg.CallMediaTokenSecret,
+		AllowedOrigins: cfg.CallMediaOrigins,
 	}, logger)
 
 	go func() {

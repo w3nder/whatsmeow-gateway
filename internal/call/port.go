@@ -103,6 +103,12 @@ type LiveCall interface {
 	OnWaitingRoomState(fn func(WaitingRoom))
 	OnHandRaise(fn func(HandState))
 	OnScreenShare(fn func(ScreenShare))
+	// OnVideoKeyframeRequest fires on authenticated WhatsApp PLI/FIR feedback:
+	// the peer's decoder needs a fresh IDR from our outgoing video, typically
+	// after packet loss. The gateway never encodes video itself, so this only
+	// ever has anywhere to go when an operator is attached -- see
+	// Stream.Keyframe.
+	OnVideoKeyframeRequest(fn func())
 }
 
 // RecordingStore is where finished recordings go. It takes a reader rather than

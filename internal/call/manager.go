@@ -193,6 +193,15 @@ func (m *Manager) subscribe(t *Tracked, lc LiveCall) {
 		evt.ScreenShare = &state
 		m.publish(evt)
 	})
+
+	// The peer asking for a fresh IDR only means anything when an operator's
+	// encoder is attached to receive the request; with nothing attached
+	// there is no one to tell.
+	lc.OnVideoKeyframeRequest(func() {
+		if s := t.currentStream(); s != nil {
+			s.requestKeyframe()
+		}
+	})
 }
 
 // markAnswered stamps the answer time once. A call can both report media ready

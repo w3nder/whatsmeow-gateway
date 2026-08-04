@@ -192,6 +192,10 @@ func (c *liveCallAdapter) OnScreenShare(fn func(call.ScreenShare)) {
 	c.call.OnScreenShare(func(s meowcaller.ScreenShareState) { fn(screenShareFrom(s)) })
 }
 
+func (c *liveCallAdapter) OnVideoKeyframeRequest(fn func()) {
+	c.call.OnVideoKeyframeRequest(fn)
+}
+
 var _ call.LiveCall = (*liveCallAdapter)(nil)
 
 // The conversions below flatten the library's types onto the gateway's own.

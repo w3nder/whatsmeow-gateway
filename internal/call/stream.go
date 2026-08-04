@@ -185,9 +185,22 @@ func (s *Stream) receiveVideo(accessUnit []byte) {
 }
 
 // requestKeyframe marks a keyframe as pending, coalescing repeated requests.
-// Only called during construction, before the stream is reachable from
-// anywhere else, so it needs no locking of its own.
+// Two callers share it, and both mean the same thing downstream -- "the
+// operator's encoder needs to emit an IDR now" -- so they share the channel
+// rather than getting one each: newStream, once, for an operator attaching
+// mid-call (it has missed every keyframe so far); and the peer's own
+// OnVideoKeyframeRequest callback, any number of times, after packet loss.
+// The construction-time caller predates any other goroutine reaching this
+// stream and needs no lock, but the peer callback runs on the calling
+// library's own goroutine for the life of the call, arbitrarily late, so it
+// has to be fenced against close the same way receiveAudio/receiveVideo are.
 func (s *Stream) requestKeyframe() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return
+	}
+
 	select {
 	case s.keyframe <- struct{}{}:
 	default:

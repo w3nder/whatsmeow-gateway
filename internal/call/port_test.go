@@ -24,17 +24,18 @@ type fakeCall struct {
 	played   []io.ReadCloser
 	lastArg  string
 
-	onReady       func()
-	onEnd         func(string)
-	onState       func(call.Phase)
-	onPeerAccept  func()
-	onMute        func(bool)
-	onVideoState  func(call.VideoState)
-	onReaction    func(call.Reaction)
-	onGroupState  func(call.GroupState)
-	onWaitingRoom func(call.WaitingRoom)
-	onHand        func(call.HandState)
-	onScreenShare func(call.ScreenShare)
+	onReady           func()
+	onEnd             func(string)
+	onState           func(call.Phase)
+	onPeerAccept      func()
+	onMute            func(bool)
+	onVideoState      func(call.VideoState)
+	onReaction        func(call.Reaction)
+	onGroupState      func(call.GroupState)
+	onWaitingRoom     func(call.WaitingRoom)
+	onHand            func(call.HandState)
+	onScreenShare     func(call.ScreenShare)
+	onKeyframeRequest func()
 
 	audioIn func([]float32)
 	videoIn func([]byte)
@@ -211,6 +212,12 @@ func (f *fakeCall) OnScreenShare(fn func(call.ScreenShare)) {
 	f.mu.Unlock()
 }
 
+func (f *fakeCall) OnVideoKeyframeRequest(fn func()) {
+	f.mu.Lock()
+	f.onKeyframeRequest = fn
+	f.mu.Unlock()
+}
+
 // The fire* helpers stand in for the library's media loop firing a callback.
 
 func (f *fakeCall) fireReady() {
@@ -264,6 +271,15 @@ func (f *fakeCall) feedAudio(frame []float32) {
 	f.mu.Unlock()
 	if fn != nil {
 		fn(frame)
+	}
+}
+
+func (f *fakeCall) fireVideoKeyframeRequest() {
+	f.mu.Lock()
+	fn := f.onKeyframeRequest
+	f.mu.Unlock()
+	if fn != nil {
+		fn()
 	}
 }
 

@@ -160,6 +160,54 @@ func TestOperatorVideoReachesTheCall(t *testing.T) {
 	}
 }
 
+// The peer's own request for a fresh IDR (WhatsApp's PLI/FIR feedback after
+// packet loss) has to reach the attached stream's Keyframe channel, same as
+// the one-shot request on attach -- otherwise a peer that lost packets mid
+// call never gets rescued.
+func TestPeerKeyframeRequestReachesTheAttachedStream(t *testing.T) {
+	m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
+	caller := &fakeCaller{}
+	m.Attach("chan-a", caller)
+
+	lc := &fakeCall{id: "C1"}
+	caller.fireIncoming(lc)
+
+	stream, detach, ok := m.AttachStream("chan-a", "C1")
+	if !ok {
+		t.Fatal("AttachStream returned false for a live call")
+	}
+	defer detach()
+
+	// Drain the one-shot request AttachStream itself makes on attach, so the
+	// assertion below can only pass because of fireVideoKeyframeRequest.
+	select {
+	case <-stream.Keyframe():
+	case <-time.After(time.Second):
+		t.Fatal("timed out draining the attach-time keyframe request")
+	}
+
+	lc.fireVideoKeyframeRequest()
+
+	select {
+	case <-stream.Keyframe():
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the peer's keyframe request on the stream")
+	}
+}
+
+// With no operator attached there is nothing to route a keyframe request to;
+// the callback must simply do nothing rather than panic on a nil stream.
+func TestPeerKeyframeRequestWithNoStreamAttachedIsANoop(t *testing.T) {
+	m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
+	caller := &fakeCaller{}
+	m.Attach("chan-a", caller)
+
+	lc := &fakeCall{id: "C1"}
+	caller.fireIncoming(lc)
+
+	lc.fireVideoKeyframeRequest()
+}
+
 func TestAttachStreamOnAnUnknownCallFails(t *testing.T) {
 	m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
 	if _, _, ok := m.AttachStream("chan-a", "NOPE"); ok {

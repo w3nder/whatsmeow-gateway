@@ -40,6 +40,13 @@ func discardLogger() *slog.Logger {
 // the same construction cmd/gateway/main.go uses, minus ListenAndServe.
 func startMediaServer(t *testing.T) (*httptest.Server, *fakeLiveCall) {
 	t.Helper()
+	return startMediaServerWithOrigins(t, nil)
+}
+
+// startMediaServerWithOrigins is startMediaServer with control over
+// ServerConfig.AllowedOrigins, for the cross-origin cases.
+func startMediaServerWithOrigins(t *testing.T, origins []string) (*httptest.Server, *fakeLiveCall) {
+	t.Helper()
 
 	m := call.NewManager(
 		memCallPublisher{},
@@ -55,7 +62,7 @@ func startMediaServer(t *testing.T) (*httptest.Server, *fakeLiveCall) {
 	lc := &fakeLiveCall{callID: "CALL1", peer: "5511888888888"}
 	caller.fireIncoming(lc)
 
-	srv := media.NewServer(m, media.ServerConfig{Secret: mediaTestSecret}, discardLogger())
+	srv := media.NewServer(m, media.ServerConfig{Secret: mediaTestSecret, AllowedOrigins: origins}, discardLogger())
 	ts := httptest.NewServer(srv.Handler)
 	t.Cleanup(ts.Close)
 
@@ -86,8 +93,21 @@ func mediaClaims(callID string) jwt.MapClaims {
 // carries its status there -- Dial itself only ever returns a generic error.
 func dialMedia(t *testing.T, ts *httptest.Server, callID, token string) (*websocket.Conn, *http.Response, error) {
 	t.Helper()
+	return dialMediaWithOrigin(t, ts, callID, token, "")
+}
+
+// dialMediaWithOrigin is dialMedia with an explicit Origin header, for the
+// cross-origin cases. websocket.Dial itself never sets one (it is a Go
+// client, not a browser), so a mismatched-origin request has to be built by
+// hand.
+func dialMediaWithOrigin(t *testing.T, ts *httptest.Server, callID, token, origin string) (*websocket.Conn, *http.Response, error) {
+	t.Helper()
 	url := "ws" + ts.URL[len("http"):] + "/calls/" + callID + "/media?token=" + token
-	return websocket.Dial(context.Background(), url, nil)
+	var opts *websocket.DialOptions
+	if origin != "" {
+		opts = &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{origin}}}
+	}
+	return websocket.Dial(context.Background(), url, opts)
 }
 
 // readFrameOfKind reads frames off conn until one of the wanted kind arrives,
@@ -163,6 +183,14 @@ func TestMediaSocketDeliversPeerAudioToTheOperator(t *testing.T) {
 		t.Fatalf("Dial: %v (status %v)", err, resp)
 	}
 	defer func() { _ = conn.CloseNow() }()
+
+	// Reading the attach-time keyframe frame first proves AttachStream has
+	// already run server-side -- it is what queues that frame. Feeding audio
+	// before that would race AttachStream: Track's sink only forwards a
+	// frame once a stream is registered, so a frame fed in that gap is
+	// dropped outright rather than merely delayed (see the ordering comment
+	// on handleMedia in internal/media/server.go).
+	readFrameOfKind(t, conn, media.FrameKeyframe, 5*time.Second)
 
 	lc.feedAudio([]float32{0.5, -0.5})
 
@@ -240,5 +268,138 @@ func TestMediaSocketForwardsAKeyframeRequest(t *testing.T) {
 	payload := readFrameOfKind(t, conn, media.FrameKeyframe, 5*time.Second)
 	if len(payload) != 0 {
 		t.Errorf("keyframe payload = % x, want none", payload)
+	}
+}
+
+// TestMediaSocketForwardsAPeerKeyframeRequestMidCall is the mid-call twin of
+// the attach-time test above: after the one-shot request that comes with
+// attaching is drained, WhatsApp's own PLI/FIR feedback (wired in
+// Manager.subscribe via OnVideoKeyframeRequest) must still reach the
+// operator as a second FrameKeyframe.
+func TestMediaSocketForwardsAPeerKeyframeRequestMidCall(t *testing.T) {
+	ts, lc := startMediaServer(t)
+
+	conn, resp, err := dialMedia(t, ts, "CALL1", signMediaToken(t, mediaClaims("CALL1")))
+	if err != nil {
+		t.Fatalf("Dial: %v (status %v)", err, resp)
+	}
+	defer func() { _ = conn.CloseNow() }()
+
+	// Drain the attach-time request first so the read below can only pass
+	// because of fireVideoKeyframeRequest.
+	readFrameOfKind(t, conn, media.FrameKeyframe, 5*time.Second)
+
+	lc.fireVideoKeyframeRequest()
+
+	payload := readFrameOfKind(t, conn, media.FrameKeyframe, 5*time.Second)
+	if len(payload) != 0 {
+		t.Errorf("keyframe payload = % x, want none", payload)
+	}
+}
+
+// TestMediaSocketAcceptsALargeVideoFrameFromTheOperator guards against
+// coder/websocket's default 32 KiB read limit, which is well under a
+// realistic H.264 IDR from a webcam (30-100 KB): without an explicit
+// SetReadLimit, the operator's very first keyframe would exceed it and tear
+// the whole connection down instead of just being read.
+func TestMediaSocketAcceptsALargeVideoFrameFromTheOperator(t *testing.T) {
+	ts, lc := startMediaServer(t)
+
+	conn, resp, err := dialMedia(t, ts, "CALL1", signMediaToken(t, mediaClaims("CALL1")))
+	if err != nil {
+		t.Fatalf("Dial: %v (status %v)", err, resp)
+	}
+	defer func() { _ = conn.CloseNow() }()
+
+	big := make([]byte, 64*1024) // above the library's 32 KiB default
+	for i := range big {
+		big[i] = byte(i)
+	}
+	if err := conn.Write(context.Background(), websocket.MessageBinary, media.EncodeFrame(media.FrameVideo, big)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	waitFor(t, 5*time.Second, "the large video frame to reach SendVideo", func() bool {
+		for _, action := range lc.recordedActions() {
+			if action == "video.send" {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// TestMediaSocketRejectsADisallowedOrigin is the default-closed side of I3:
+// with no AllowedOrigins configured, a cross-origin request is refused before
+// the upgrade, same as any other rejection here.
+func TestMediaSocketRejectsADisallowedOrigin(t *testing.T) {
+	ts, _ := startMediaServer(t)
+
+	token := signMediaToken(t, mediaClaims("CALL1"))
+	conn, resp, err := dialMediaWithOrigin(t, ts, "CALL1", token, "http://evil.example")
+	if err == nil {
+		_ = conn.CloseNow()
+		t.Fatal("Dial succeeded, want the handshake refused for a disallowed Origin")
+	}
+	if resp == nil || resp.StatusCode != http.StatusForbidden {
+		status := "<nil response>"
+		if resp != nil {
+			status = resp.Status
+		}
+		t.Fatalf("status = %s, want %d", status, http.StatusForbidden)
+	}
+}
+
+// TestMediaSocketAllowsAConfiguredCrossOrigin proves the fix side of I3: the
+// operator is a browser tab served from the frontend's own origin, not this
+// listener's, so a real deployment has to be able to allow it explicitly.
+func TestMediaSocketAllowsAConfiguredCrossOrigin(t *testing.T) {
+	ts, _ := startMediaServerWithOrigins(t, []string{"operator.example.com"})
+
+	token := signMediaToken(t, mediaClaims("CALL1"))
+	conn, resp, err := dialMediaWithOrigin(t, ts, "CALL1", token, "http://operator.example.com")
+	if err != nil {
+		t.Fatalf("Dial: %v (status %v)", err, resp)
+	}
+	defer func() { _ = conn.CloseNow() }()
+
+	// A successful read of any frame proves the handshake actually went
+	// through, not just that Dial returned without error.
+	readFrameOfKind(t, conn, media.FrameKeyframe, 5*time.Second)
+}
+
+// TestMediaSocketRejectedOriginDoesNotDisturbTheIncumbentOperator is the
+// regression test for the sharpest edge of I3: AttachStream replaces and
+// closes whatever stream is already live, so if it ran before the upgrade, a
+// second connection that fails the Origin check would still have kicked the
+// first operator off the call. It must not: attaching only happens once a
+// handshake actually succeeds.
+func TestMediaSocketRejectedOriginDoesNotDisturbTheIncumbentOperator(t *testing.T) {
+	ts, lc := startMediaServer(t)
+
+	incumbent, resp, err := dialMedia(t, ts, "CALL1", signMediaToken(t, mediaClaims("CALL1")))
+	if err != nil {
+		t.Fatalf("Dial (incumbent): %v (status %v)", err, resp)
+	}
+	defer func() { _ = incumbent.CloseNow() }()
+
+	// Drain the attach-time keyframe request so the frame read after the
+	// rejected connection below can only be the audio fed at that point.
+	readFrameOfKind(t, incumbent, media.FrameKeyframe, 5*time.Second)
+
+	rejected, rejResp, err := dialMediaWithOrigin(t, ts, "CALL1", signMediaToken(t, mediaClaims("CALL1")), "http://evil.example")
+	if err == nil {
+		_ = rejected.CloseNow()
+		t.Fatal("Dial (rejected) succeeded, want the handshake refused for a disallowed Origin")
+	}
+	if rejResp == nil || rejResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %v, want %d", rejResp, http.StatusForbidden)
+	}
+
+	lc.feedAudio([]float32{0.5, -0.5})
+
+	payload := readFrameOfKind(t, incumbent, media.FrameAudio, 5*time.Second)
+	if len(payload) != 4 {
+		t.Fatalf("incumbent got no audio after the rejected connection, want it undisturbed (payload len = %d)", len(payload))
 	}
 }

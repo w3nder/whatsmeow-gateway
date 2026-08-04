@@ -71,13 +71,14 @@ type fakeLiveCall struct {
 	peer   string
 	video  bool
 
-	mu      sync.Mutex
-	actions []string
-	played  []io.ReadCloser
-	onReady func()
-	onEnd   func(string)
-	audioIn func([]float32)
-	videoIn func([]byte)
+	mu                sync.Mutex
+	actions           []string
+	played            []io.ReadCloser
+	onReady           func()
+	onEnd             func(string)
+	audioIn           func([]float32)
+	videoIn           func([]byte)
+	onKeyframeRequest func()
 }
 
 func (f *fakeLiveCall) record(action string) error {
@@ -209,5 +210,22 @@ func (f *fakeLiveCall) OnGroupState(func(call.GroupState))        {}
 func (f *fakeLiveCall) OnWaitingRoomState(func(call.WaitingRoom)) {}
 func (f *fakeLiveCall) OnHandRaise(func(call.HandState))          {}
 func (f *fakeLiveCall) OnScreenShare(func(call.ScreenShare))      {}
+
+func (f *fakeLiveCall) OnVideoKeyframeRequest(fn func()) {
+	f.mu.Lock()
+	f.onKeyframeRequest = fn
+	f.mu.Unlock()
+}
+
+// fireVideoKeyframeRequest stands in for WhatsApp's PLI/FIR feedback asking
+// our outgoing video for a fresh IDR.
+func (f *fakeLiveCall) fireVideoKeyframeRequest() {
+	f.mu.Lock()
+	fn := f.onKeyframeRequest
+	f.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
 
 var _ call.LiveCall = (*fakeLiveCall)(nil)
