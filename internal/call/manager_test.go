@@ -152,6 +152,9 @@ func TestManagerUnansweredCallHasZeroDuration(t *testing.T) {
 	}
 }
 
+// The recording is a by-product of the call, not a gate on it: the ended
+// event must never carry media, and the recording arrives later as its own
+// event once the upload finishes.
 func TestManagerEndedCarriesRecording(t *testing.T) {
 	pub := &memPublisher{}
 	store := newMemStore()
@@ -164,13 +167,22 @@ func TestManagerEndedCarriesRecording(t *testing.T) {
 	lc.fireReady()
 	lc.feedAudio([]float32{0.5, -0.5})
 	lc.fireEnd("hangup")
+	m.WaitForRecordings(2 * time.Second)
 
 	ended := pub.typed(call.EventEnded)
 	if len(ended) != 1 {
 		t.Fatalf("got %d ended events, want 1", len(ended))
 	}
-	if ended[0].Media == nil || ended[0].Media.Key != "calls/chan-a/C1.wav" {
-		t.Fatalf("Media = %+v, want the wav recording key", ended[0].Media)
+	if ended[0].Media != nil {
+		t.Errorf("ended Media = %+v, want nil: the recording is a separate event", ended[0].Media)
+	}
+
+	recording := pub.typed(call.EventRecording)
+	if len(recording) != 1 {
+		t.Fatalf("got %d recording events, want 1", len(recording))
+	}
+	if recording[0].Media == nil || recording[0].Media.Key != "calls/chan-a/C1.wav" {
+		t.Fatalf("Media = %+v, want the wav recording key", recording[0].Media)
 	}
 	if _, ok := store.object("calls/chan-a/C1.wav"); !ok {
 		t.Error("recording was never uploaded")
@@ -190,10 +202,11 @@ func TestManagerEndedCarriesVideoRecording(t *testing.T) {
 	lc.feedAudio([]float32{0.5})
 	lc.feedVideo([]byte{0, 0, 0, 1, 0x65, 0xAA})
 	lc.fireEnd("hangup")
+	m.WaitForRecordings(2 * time.Second)
 
-	ended := pub.typed(call.EventEnded)[0]
-	if ended.VideoMedia == nil || ended.VideoMedia.Key != "calls/chan-a/C1.h264" {
-		t.Fatalf("VideoMedia = %+v, want the h264 recording key", ended.VideoMedia)
+	recording := pub.typed(call.EventRecording)[0]
+	if recording.VideoMedia == nil || recording.VideoMedia.Key != "calls/chan-a/C1.h264" {
+		t.Fatalf("VideoMedia = %+v, want the h264 recording key", recording.VideoMedia)
 	}
 	if _, ok := store.object("calls/chan-a/C1.h264"); !ok {
 		t.Error("video recording was never uploaded")
@@ -214,6 +227,7 @@ func TestManagerPublishesEndedEvenWhenUploadFails(t *testing.T) {
 	lc.fireReady()
 	lc.feedAudio([]float32{0.5})
 	lc.fireEnd("hangup")
+	m.WaitForRecordings(2 * time.Second)
 
 	ended := pub.typed(call.EventEnded)
 	if len(ended) != 1 {
@@ -222,9 +236,130 @@ func TestManagerPublishesEndedEvenWhenUploadFails(t *testing.T) {
 	if ended[0].Media != nil {
 		t.Errorf("Media = %+v, want nil when the upload failed", ended[0].Media)
 	}
+	if recording := pub.typed(call.EventRecording); len(recording) != 0 {
+		t.Errorf("recording events = %+v, want none: nothing uploaded successfully", recording)
+	}
 	failed := pub.typed(call.EventCommandFailed)
 	if len(failed) != 1 || failed[0].Error == nil || failed[0].Error.Code != call.CodeRecordingUploadFailed {
 		t.Errorf("failures = %+v, want one recording_upload_failed", failed)
+	}
+}
+
+// A slow object store must never delay the event that tells the backend the
+// call is over: ended goes out synchronously, before the upload even has a
+// chance to finish.
+func TestManagerPublishesEndedBeforeRecordingUploadCompletes(t *testing.T) {
+	pub := &memPublisher{}
+	store := newMemStore()
+	release := store.blockPuts()
+	t.Cleanup(release)
+	m := newTestManager(t, pub, store, time.Now)
+	caller := &fakeCaller{}
+	m.Attach("chan-a", caller)
+
+	lc := &fakeCall{id: "C1"}
+	caller.fireIncoming(lc)
+	lc.fireReady()
+	lc.feedAudio([]float32{0.5})
+	lc.fireEnd("hangup")
+
+	// The upload is still blocked on the store: ended must already be out,
+	// and the recording must not be, proving the ordering rather than timing
+	// it.
+	if ended := pub.typed(call.EventEnded); len(ended) != 1 {
+		t.Fatalf("got %d ended events before the upload unblocked, want 1", len(ended))
+	}
+	if recording := pub.typed(call.EventRecording); len(recording) != 0 {
+		t.Fatalf("recording events = %+v, want none before the upload unblocked", recording)
+	}
+
+	release()
+	m.WaitForRecordings(2 * time.Second)
+
+	recordingEvents := pub.typed(call.EventRecording)
+	if len(recordingEvents) != 1 || recordingEvents[0].Media == nil {
+		t.Fatalf("recording events = %+v, want one carrying media", recordingEvents)
+	}
+
+	// Confirm the relative order in the raw event stream: ended must precede
+	// recording, never the reverse.
+	endedIdx, recordingIdx := -1, -1
+	for i, e := range pub.events {
+		switch e.Type {
+		case call.EventEnded:
+			endedIdx = i
+		case call.EventRecording:
+			recordingIdx = i
+		}
+	}
+	if endedIdx == -1 || recordingIdx == -1 || recordingIdx < endedIdx {
+		t.Fatalf("event order wrong: ended at %d, recording at %d", endedIdx, recordingIdx)
+	}
+}
+
+// The recording upload must survive shutdown: WaitForRecordings has to
+// actually wait for an in-flight upload rather than returning immediately.
+func TestManagerWaitForRecordingsWaitsForInFlightUpload(t *testing.T) {
+	pub := &memPublisher{}
+	store := newMemStore()
+	release := store.blockPuts()
+	m := newTestManager(t, pub, store, time.Now)
+	caller := &fakeCaller{}
+	m.Attach("chan-a", caller)
+
+	lc := &fakeCall{id: "C1"}
+	caller.fireIncoming(lc)
+	lc.fireReady()
+	lc.feedAudio([]float32{0.5})
+	lc.fireEnd("hangup")
+
+	waitDone := make(chan struct{})
+	go func() {
+		m.WaitForRecordings(5 * time.Second)
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+		t.Fatal("WaitForRecordings returned before the upload finished")
+	case <-time.After(200 * time.Millisecond):
+		// Still blocked, as expected.
+	}
+
+	release()
+
+	select {
+	case <-waitDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitForRecordings did not return after the upload finished")
+	}
+
+	if recording := pub.typed(call.EventRecording); len(recording) != 1 {
+		t.Errorf("recording events = %+v, want one", recording)
+	}
+}
+
+// WaitForRecordings must not hang forever on an upload that never finishes;
+// it is a bounded wait, not a guarantee.
+func TestManagerWaitForRecordingsRespectsDeadline(t *testing.T) {
+	pub := &memPublisher{}
+	store := newMemStore()
+	release := store.blockPuts()
+	t.Cleanup(release)
+	m := newTestManager(t, pub, store, time.Now)
+	caller := &fakeCaller{}
+	m.Attach("chan-a", caller)
+
+	lc := &fakeCall{id: "C1"}
+	caller.fireIncoming(lc)
+	lc.fireReady()
+	lc.feedAudio([]float32{0.5})
+	lc.fireEnd("hangup")
+
+	start := time.Now()
+	m.WaitForRecordings(100 * time.Millisecond)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("WaitForRecordings took %s, want it bounded near its 100ms deadline", elapsed)
 	}
 }
 

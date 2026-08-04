@@ -39,6 +39,10 @@ func TestPeerAudioReachesBothRecorderAndStream(t *testing.T) {
 
 	lc.fireEnd("hangup")
 
+	// The upload now runs off the call's teardown path; wait for it rather
+	// than racing the assertion against the background goroutine.
+	m.WaitForRecordings(2 * time.Second)
+
 	if _, ok := store.object("calls/chan-a/C1.wav"); !ok {
 		t.Error("the recorder got nothing while the stream was attached")
 	}

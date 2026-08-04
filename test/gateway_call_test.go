@@ -264,9 +264,16 @@ func TestGatewayInboundCallRecordsAndPublishes(t *testing.T) {
 	if ended.Reason != "hangup" {
 		t.Fatalf("ended reason = %q, want hangup", ended.Reason)
 	}
+	if ended.Media != nil {
+		t.Fatalf("ended media = %+v, want nil: the recording arrives on its own event", ended.Media)
+	}
+
+	// The upload runs off the call's teardown path, so the recording's key
+	// arrives on a later, separate event rather than on ended itself.
+	recording := waitForCallEvent(t, deliveries, call.EventRecording, 15*time.Second)
 	wantKey := "calls/" + channelID + "/CALL1.wav"
-	if ended.Media == nil || ended.Media.Key != wantKey {
-		t.Fatalf("ended media = %+v, want key %s", ended.Media, wantKey)
+	if recording.Media == nil || recording.Media.Key != wantKey {
+		t.Fatalf("recording media = %+v, want key %s", recording.Media, wantKey)
 	}
 
 	obj, err := rawS3.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(wantKey)})

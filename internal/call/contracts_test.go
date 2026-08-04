@@ -54,13 +54,15 @@ func TestEventOmitsAbsentFields(t *testing.T) {
 	}
 }
 
-func TestEventEndedCarriesBothRecordings(t *testing.T) {
+// media/videoMedia travel on the recording event, never on ended: the upload
+// runs off the call's teardown path, so ended must be free to go out before
+// the upload even starts.
+func TestEventRecordingCarriesBothRecordings(t *testing.T) {
 	body, err := json.Marshal(call.Event{
 		CallID:     "ABCDEF",
 		Direction:  call.DirectionInbound,
-		Type:       call.EventEnded,
+		Type:       call.EventRecording,
 		Timestamp:  "1754300100",
-		Duration:   100,
 		Media:      &call.Media{Key: "calls/c1/ABCDEF.wav", MimeType: "audio/wav"},
 		VideoMedia: &call.Media{Key: "calls/c1/ABCDEF.h264", MimeType: "video/h264"},
 	})

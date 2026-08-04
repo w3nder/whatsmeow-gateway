@@ -19,16 +19,35 @@ type memStore struct {
 	objects map[string][]byte
 	mimes   map[string]string
 	err     error
+	gate    chan struct{}
 }
 
 func newMemStore() *memStore {
 	return &memStore{objects: map[string][]byte{}, mimes: map[string]string{}}
 }
 
+// blockPuts makes every PutStream call wait until release is called. It
+// stands in for a slow object store, so a test can observe what happens while
+// an upload is still in flight.
+func (m *memStore) blockPuts() (release func()) {
+	gate := make(chan struct{})
+	var once sync.Once
+	m.mu.Lock()
+	m.gate = gate
+	m.mu.Unlock()
+	return func() {
+		once.Do(func() { close(gate) })
+	}
+}
+
 func (m *memStore) PutStream(_ context.Context, key, mime string, r io.Reader) error {
 	m.mu.Lock()
 	failure := m.err
+	gate := m.gate
 	m.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
 	if failure != nil {
 		return failure
 	}

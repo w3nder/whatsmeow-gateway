@@ -150,6 +150,18 @@ func (m *Manager) recordFor(cmd amqp.GatewayCallCommand) bool {
 func (m *Manager) dispatchLive(ctx context.Context, cmd amqp.GatewayCallCommand, fetch MediaFetcher) error {
 	tracked, ok := m.registry.Get(cmd.ChannelID, cmd.CallID)
 	if !ok {
+		if cmd.Action == "hangup" || cmd.Action == "reject" {
+			// hangup and reject express a desired end state, not an action on
+			// a specific live call. When the call is already gone -- an easy
+			// race, since the front can send hangup the same moment the peer
+			// hangs up -- that end state already holds, so the command is
+			// satisfied rather than a fault.
+			m.log.Info("call: command satisfied, call already ended",
+				"channel_id", cmd.ChannelID, "call_id", cmd.CallID,
+				"command_id", cmd.CommandID, "action", cmd.Action)
+			m.ackCommand(cmd)
+			return nil
+		}
 		m.failCommand(cmd, CodeCallNotFound,
 			fmt.Sprintf("no live call %q on channel %q", cmd.CallID, cmd.ChannelID))
 		return nil

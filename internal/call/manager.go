@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -41,6 +42,11 @@ type Manager struct {
 	opts     Options
 	log      *slog.Logger
 	registry *Registry
+
+	// uploadWG tracks recording uploads still running off the teardown path,
+	// so shutdown can wait for them instead of killing an upload that is
+	// nearly done.
+	uploadWG sync.WaitGroup
 }
 
 func NewManager(
@@ -245,8 +251,9 @@ func (m *Manager) end(ctx context.Context, t *Tracked, reason string) {
 	m.finish(ctx, t, reason)
 }
 
-// finish uploads the recording and publishes the ended event. It runs at most
-// once per call, whichever path reaches it first.
+// finish publishes the ended event and, if the call was recording, kicks off
+// the upload in the background. It runs at most once per call, whichever
+// path reaches it first.
 func (m *Manager) finish(ctx context.Context, t *Tracked, reason string) {
 	t.endOnce.Do(func() {
 		// A stream outlives its call otherwise: nothing else tells an
@@ -262,24 +269,69 @@ func (m *Manager) finish(ctx context.Context, t *Tracked, reason string) {
 			evt.Duration = int(m.opts.Now().Sub(t.AnsweredAt).Seconds())
 		}
 
-		var uploadErr error
-		if t.Recorder != nil {
-			audio, video, err := t.Recorder.Finish(ctx, m.store)
-			evt.Media, evt.VideoMedia, uploadErr = audio, video, err
-		}
-
-		// The ended event goes out first. Losing a recording must not hide the
-		// end of the call from the backend.
+		// ended carries no media: a slow or unavailable object store must
+		// never delay -- or, on a long enough stall, effectively withhold --
+		// the event that tells the backend the call is over. The recording is
+		// a by-product of the call, not a gate on its lifecycle.
 		m.publish(evt)
 
-		if uploadErr != nil {
-			m.log.Error("call: recording upload failed",
-				"channel_id", t.ChannelID, "call_id", t.CallID, "error", uploadErr)
-			failure := m.event(t, EventCommandFailed)
-			failure.Error = &EventError{Code: CodeRecordingUploadFailed, Reason: uploadErr.Error()}
-			m.publish(failure)
+		if t.Recorder != nil {
+			m.uploadRecording(ctx, t)
 		}
 	})
+}
+
+// uploadRecording finishes and uploads a call's recording off the call's
+// critical path, then reports the result as its own event. uploadWG lets
+// shutdown wait for this to land instead of the process exiting mid-upload.
+func (m *Manager) uploadRecording(ctx context.Context, t *Tracked) {
+	// The caller's context may be a request context that is cancelled the
+	// moment the handler returns, or (during shutdown) one tied to the
+	// process exiting -- neither may abort an upload that is close to done.
+	// WaitForRecordings, not context cancellation, is what bounds this.
+	uploadCtx := context.WithoutCancel(ctx)
+
+	m.uploadWG.Add(1)
+	go func() {
+		defer m.uploadWG.Done()
+
+		audio, video, err := t.Recorder.Finish(uploadCtx, m.store)
+		if audio != nil || video != nil {
+			evt := m.event(t, EventRecording)
+			evt.Media, evt.VideoMedia = audio, video
+			m.publish(evt)
+		}
+
+		if err != nil {
+			// A failed upload still has to reach the backend -- it must not
+			// be silently swallowed just because it now runs off the main
+			// path.
+			m.log.Error("call: recording upload failed",
+				"channel_id", t.ChannelID, "call_id", t.CallID, "error", err)
+			failure := m.event(t, EventCommandFailed)
+			failure.Error = &EventError{Code: CodeRecordingUploadFailed, Reason: err.Error()}
+			m.publish(failure)
+		}
+	}()
+}
+
+// WaitForRecordings blocks until every recording upload still in flight
+// finishes, or until timeout elapses, whichever comes first. Call it during
+// shutdown, after AbortAll: without it, a process exit races an upload that
+// is nearly done and the recording is lost even though the call otherwise
+// completed cleanly.
+func (m *Manager) WaitForRecordings(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		m.uploadWG.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		m.log.Error("call: shutdown timed out waiting for recording uploads", "timeout", timeout)
+	}
 }
 
 // event builds the common shape of every event for a call.

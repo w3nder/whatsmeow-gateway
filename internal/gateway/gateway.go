@@ -186,9 +186,13 @@ func (g *gateway) run(ctx context.Context) error {
 
 	g.closeConsumerWithDrainDeadline()
 
-	// End live calls before the sockets go: a call left registered would flush
-	// no recording and report no end to the backend.
+	// End live calls before the sockets go: a call left registered would never
+	// report its end to the backend. AbortAll only starts each recording's
+	// upload -- it runs off the call's teardown path -- so WaitForRecordings
+	// gives it a bounded window to finish rather than letting the process
+	// exit and kill an upload that was nearly done.
 	g.calls.AbortAll(g.workCtx, "gateway_shutdown")
+	g.calls.WaitForRecordings(g.shutdownDrainTimeout)
 
 	g.manager.DisconnectAll()
 

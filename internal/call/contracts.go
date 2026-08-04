@@ -1,9 +1,12 @@
 // Package call turns the WhatsApp calling stack into gateway commands and events.
 //
 // The gateway does not carry live call media to a human: it signals and records.
-// A call's audio and video are captured to S3 and delivered by key on the ended
-// event, exactly the way inbound message media already is, and every other
-// lifecycle transition is published as an event for the backend to act on.
+// A call's audio and video are captured to S3 and delivered by key on a
+// recording event, exactly the way inbound message media already is, and
+// every other lifecycle transition is published as an event for the backend
+// to act on. The recording event follows the ended event rather than riding
+// on it: the upload is a by-product of the call, not a gate on reporting that
+// the call is over.
 package call
 
 // Phase is a call's lifecycle phase, mirroring the calling library's own phases.
@@ -51,11 +54,16 @@ const (
 
 // Event types published on the call routing key.
 const (
-	EventIncoming      = "incoming"
-	EventRinging       = "ringing"
-	EventAccepted      = "accepted"
-	EventRejected      = "rejected"
-	EventEnded         = "ended"
+	EventIncoming = "incoming"
+	EventRinging  = "ringing"
+	EventAccepted = "accepted"
+	EventRejected = "rejected"
+	EventEnded    = "ended"
+	// EventRecording reports a call's recording once it has finished
+	// uploading. It is published separately from, and after, EventEnded: the
+	// upload runs off the call's teardown path, so it must not gate the event
+	// that tells the backend the call is over.
+	EventRecording     = "recording"
 	EventState         = "state"
 	EventVideo         = "video.state"
 	EventReactionType  = "reaction"

@@ -89,8 +89,30 @@ func TestDispatchPassesArgumentsThrough(t *testing.T) {
 }
 
 // An unknown call-id must fail loudly and must not be retried: requeueing it
-// would loop until the DLQ.
+// would loop until the DLQ. This holds for any action that is not hangup or
+// reject, which are idempotent instead -- see TestDispatchHangupOnUnknownCallAcks.
 func TestDispatchUnknownCallFails(t *testing.T) {
+	pub := &memPublisher{}
+	m := newTestManager(t, pub, newMemStore(), time.Now)
+	caller := &fakeCaller{}
+	m.Attach("chan-a", caller)
+
+	err := m.Dispatch(context.Background(), caller, amqp.GatewayCallCommand{
+		ChannelID: "chan-a", CallID: "NOPE", CommandID: "cmd-1", Action: "answer",
+	}, noFetch)
+	if err != nil {
+		t.Fatalf("Dispatch returned %v, want nil (a bad command is reported, not retried)", err)
+	}
+	failed := pub.typed(call.EventCommandFailed)
+	if len(failed) != 1 || failed[0].Error == nil || failed[0].Error.Code != call.CodeCallNotFound {
+		t.Errorf("failures = %+v, want one call_not_found", failed)
+	}
+}
+
+// hangup and reject express a desired end state. When the call has already
+// ended -- a normal race with the peer's own hangup -- that state already
+// holds, so the command is satisfied rather than failed.
+func TestDispatchHangupOnUnknownCallAcks(t *testing.T) {
 	pub := &memPublisher{}
 	m := newTestManager(t, pub, newMemStore(), time.Now)
 	caller := &fakeCaller{}
@@ -100,11 +122,58 @@ func TestDispatchUnknownCallFails(t *testing.T) {
 		ChannelID: "chan-a", CallID: "NOPE", CommandID: "cmd-1", Action: "hangup",
 	}, noFetch)
 	if err != nil {
-		t.Fatalf("Dispatch returned %v, want nil (a bad command is reported, not retried)", err)
+		t.Fatalf("Dispatch: %v", err)
+	}
+	acks := pub.typed(call.EventCommandAck)
+	if len(acks) != 1 || acks[0].CommandID != "cmd-1" {
+		t.Errorf("acks = %+v, want one carrying cmd-1", acks)
+	}
+	if failed := pub.typed(call.EventCommandFailed); len(failed) != 0 {
+		t.Errorf("failures = %+v, want none: hangup on a gone call is satisfied, not a fault", failed)
+	}
+}
+
+func TestDispatchRejectOnUnknownCallAcks(t *testing.T) {
+	pub := &memPublisher{}
+	m := newTestManager(t, pub, newMemStore(), time.Now)
+	caller := &fakeCaller{}
+	m.Attach("chan-a", caller)
+
+	err := m.Dispatch(context.Background(), caller, amqp.GatewayCallCommand{
+		ChannelID: "chan-a", CallID: "NOPE", CommandID: "cmd-1", Action: "reject",
+	}, noFetch)
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	acks := pub.typed(call.EventCommandAck)
+	if len(acks) != 1 || acks[0].CommandID != "cmd-1" {
+		t.Errorf("acks = %+v, want one carrying cmd-1", acks)
+	}
+	if failed := pub.typed(call.EventCommandFailed); len(failed) != 0 {
+		t.Errorf("failures = %+v, want none: reject on a gone call is satisfied, not a fault", failed)
+	}
+}
+
+// Unlike hangup/reject, an absent call genuinely means the command cannot be
+// carried out: answer has nothing to make idempotent.
+func TestDispatchAnswerOnUnknownCallStillFails(t *testing.T) {
+	pub := &memPublisher{}
+	m := newTestManager(t, pub, newMemStore(), time.Now)
+	caller := &fakeCaller{}
+	m.Attach("chan-a", caller)
+
+	err := m.Dispatch(context.Background(), caller, amqp.GatewayCallCommand{
+		ChannelID: "chan-a", CallID: "NOPE", CommandID: "cmd-1", Action: "answer",
+	}, noFetch)
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
 	}
 	failed := pub.typed(call.EventCommandFailed)
 	if len(failed) != 1 || failed[0].Error == nil || failed[0].Error.Code != call.CodeCallNotFound {
 		t.Errorf("failures = %+v, want one call_not_found", failed)
+	}
+	if acks := pub.typed(call.EventCommandAck); len(acks) != 0 {
+		t.Errorf("acks = %+v, want none", acks)
 	}
 }
 
