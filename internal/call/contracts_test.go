@@ -54,17 +54,22 @@ func TestEventOmitsAbsentFields(t *testing.T) {
 	}
 }
 
-// media/videoMedia travel on the recording event, never on ended: the upload
+// Every recording travels on the recording event, never on ended: the upload
 // runs off the call's teardown path, so ended must be free to go out before
 // the upload even starts.
-func TestEventRecordingCarriesBothRecordings(t *testing.T) {
+//
+// The four field names are the contract the backend matches on -- see
+// docs/call-contract.md -- so they are pinned here by name, not by struct.
+func TestEventRecordingCarriesEveryTrack(t *testing.T) {
 	body, err := json.Marshal(call.Event{
-		CallID:     "ABCDEF",
-		Direction:  call.DirectionInbound,
-		Type:       call.EventRecording,
-		Timestamp:  "1754300100",
-		Media:      &call.Media{Key: "calls/c1/ABCDEF.wav", MimeType: "audio/wav"},
-		VideoMedia: &call.Media{Key: "calls/c1/ABCDEF.h264", MimeType: "video/h264"},
+		CallID:        "ABCDEF",
+		Direction:     call.DirectionInbound,
+		Type:          call.EventRecording,
+		Timestamp:     "1754300100",
+		Media:         &call.Media{Key: "calls/c1/ABCDEF.wav", MimeType: "audio/wav"},
+		PeerMedia:     &call.Media{Key: "calls/c1/ABCDEF-peer.wav", MimeType: "audio/wav"},
+		OperatorMedia: &call.Media{Key: "calls/c1/ABCDEF-operator.wav", MimeType: "audio/wav"},
+		VideoMedia:    &call.Media{Key: "calls/c1/ABCDEF.h264", MimeType: "video/h264"},
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -73,15 +78,43 @@ func TestEventRecordingCarriesBothRecordings(t *testing.T) {
 	if err := json.Unmarshal(body, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	media, ok := out["media"].(map[string]any)
-	if !ok || media["key"] != "calls/c1/ABCDEF.wav" {
-		t.Errorf("media = %v, want the wav key", out["media"])
-	}
-	videoMedia, ok := out["videoMedia"].(map[string]any)
-	if !ok || videoMedia["key"] != "calls/c1/ABCDEF.h264" {
-		t.Errorf("videoMedia = %v, want the h264 key", out["videoMedia"])
+	for field, wantKey := range map[string]string{
+		"media":         "calls/c1/ABCDEF.wav",
+		"peerMedia":     "calls/c1/ABCDEF-peer.wav",
+		"operatorMedia": "calls/c1/ABCDEF-operator.wav",
+		"videoMedia":    "calls/c1/ABCDEF.h264",
+	} {
+		got, ok := out[field].(map[string]any)
+		if !ok || got["key"] != wantKey {
+			t.Errorf("%s = %v, want key %s", field, out[field], wantKey)
+		}
 	}
 	if _, exists := out["url"]; exists {
 		t.Error("event must not carry a resolved URL, only the S3 key")
+	}
+}
+
+// The two per-side tracks are omitted when absent, like every other optional
+// field, so a consumer can tell "this gateway sent no separate tracks" from
+// "the tracks were empty".
+func TestEventOmitsAbsentPerSideRecordings(t *testing.T) {
+	body, err := json.Marshal(call.Event{
+		CallID:    "ABCDEF",
+		Direction: call.DirectionInbound,
+		Type:      call.EventRecording,
+		Timestamp: "1754300100",
+		Media:     &call.Media{Key: "calls/c1/ABCDEF.wav", MimeType: "audio/wav"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, field := range []string{"peerMedia", "operatorMedia", "videoMedia"} {
+		if _, exists := out[field]; exists {
+			t.Errorf("%s is present but was nil, want it omitted", field)
+		}
 	}
 }

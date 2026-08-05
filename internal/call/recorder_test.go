@@ -7,8 +7,10 @@ import (
 	"errors"
 	"io"
 	"os"
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/call"
 )
@@ -69,6 +71,12 @@ func (m *memStore) object(key string) ([]byte, bool) {
 	return body, ok
 }
 
+func (m *memStore) mime(key string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.mimes[key]
+}
+
 func (m *memStore) objectCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -81,31 +89,75 @@ func (m *memStore) fail(err error) {
 	m.mu.Unlock()
 }
 
+// frameBytes is one frame of s16le on the wire: what a whole tick of one track
+// takes up.
+const frameBytes = call.FrameSamples * 2
+
+// wavSample reads sample i out of a wav body, header included.
+func wavSample(body []byte, i int) int16 {
+	return int16(binary.LittleEndian.Uint16(body[44+i*2:]))
+}
+
+// wavData is the wav's declared data length, which must match what is actually
+// there.
+func wavData(t *testing.T, body []byte) int {
+	t.Helper()
+	declared := int(binary.LittleEndian.Uint32(body[40:44]))
+	if got := len(body) - 44; got != declared {
+		t.Errorf("wav declares %d data bytes but carries %d", declared, got)
+	}
+	if declared%frameBytes != 0 {
+		t.Errorf("wav data = %d bytes, want a whole number of %d-byte frames", declared, frameBytes)
+	}
+	return declared
+}
+
+// operatorFrame builds one full frame of s16le at a constant level, the shape
+// the outbound source hands the recorder.
+func operatorFrame(level int16) []byte {
+	frame := make([]byte, frameBytes)
+	for i := 0; i < len(frame); i += 2 {
+		binary.LittleEndian.PutUint16(frame[i:], uint16(level))
+	}
+	return frame
+}
+
+func peerFrame(level float32) []float32 {
+	frame := make([]float32, call.FrameSamples)
+	for i := range frame {
+		frame[i] = level
+	}
+	return frame
+}
+
 func TestRecorderWritesCanonicalWAV(t *testing.T) {
 	dir := t.TempDir()
 	rec := call.NewRecorder(dir, "chan1", "CALL1")
 
 	// Full-scale positive, silence, full-scale negative.
-	rec.WriteAudio([]float32{1, 0, -1})
+	rec.WritePeerAudio([]float32{1, 0, -1})
 
 	store := newMemStore()
-	audio, video, err := rec.Finish(context.Background(), store)
+	got, err := rec.Finish(context.Background(), store)
 	if err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
-	if video != nil {
-		t.Errorf("video = %+v, want nil when no video frame was written", video)
+	if got.Video != nil {
+		t.Errorf("video = %+v, want nil when no video frame was written", got.Video)
 	}
-	if audio == nil || audio.Key != "calls/chan1/CALL1.wav" || audio.MimeType != "audio/wav" {
-		t.Fatalf("audio = %+v, want the wav key and mime", audio)
+	if got.Audio == nil || got.Audio.Key != "calls/chan1/CALL1.wav" || got.Audio.MimeType != "audio/wav" {
+		t.Fatalf("audio = %+v, want the wav key and mime", got.Audio)
 	}
 
 	body, ok := store.object("calls/chan1/CALL1.wav")
 	if !ok {
 		t.Fatal("the wav was never uploaded")
 	}
-	if len(body) != 44+6 {
-		t.Fatalf("len(wav) = %d, want 50 (44-byte header + 3 samples)", len(body))
+	// The recorder is on a frame grid now, so three samples buy a whole frame:
+	// the remaining 957 are the silence that keeps this track lined up with the
+	// other two.
+	if wavData(t, body) < frameBytes {
+		t.Fatalf("len(wav data) = %d, want at least one %d-byte frame", len(body)-44, frameBytes)
 	}
 	if string(body[0:4]) != "RIFF" || string(body[8:12]) != "WAVE" {
 		t.Errorf("header = %q, want a RIFF/WAVE header", body[0:12])
@@ -119,21 +171,19 @@ func TestRecorderWritesCanonicalWAV(t *testing.T) {
 	if bits := binary.LittleEndian.Uint16(body[34:36]); bits != 16 {
 		t.Errorf("bits per sample = %d, want 16", bits)
 	}
-	if dataLen := binary.LittleEndian.Uint32(body[40:44]); dataLen != 6 {
-		t.Errorf("data chunk size = %d, want 6", dataLen)
-	}
-	if riffLen := binary.LittleEndian.Uint32(body[4:8]); riffLen != 36+6 {
-		t.Errorf("riff size = %d, want 42", riffLen)
-	}
-	samples := []int16{
-		int16(binary.LittleEndian.Uint16(body[44:46])),
-		int16(binary.LittleEndian.Uint16(body[46:48])),
-		int16(binary.LittleEndian.Uint16(body[48:50])),
+	if riffLen := binary.LittleEndian.Uint32(body[4:8]); riffLen != uint32(36+len(body)-44) {
+		t.Errorf("riff size = %d, want %d", riffLen, 36+len(body)-44)
 	}
 	want := []int16{32767, 0, -32767}
 	for i := range want {
-		if samples[i] != want[i] {
-			t.Errorf("sample[%d] = %d, want %d", i, samples[i], want[i])
+		if got := wavSample(body, i); got != want[i] {
+			t.Errorf("sample[%d] = %d, want %d", i, got, want[i])
+		}
+	}
+	// And the rest of the frame is the silence that pads it out.
+	for i := 3; i < call.FrameSamples; i++ {
+		if got := wavSample(body, i); got != 0 {
+			t.Fatalf("sample[%d] = %d, want the frame padded with silence", i, got)
 		}
 	}
 }
@@ -142,20 +192,119 @@ func TestRecorderWritesCanonicalWAV(t *testing.T) {
 func TestRecorderClampsOutOfRangeSamples(t *testing.T) {
 	dir := t.TempDir()
 	rec := call.NewRecorder(dir, "chan1", "CALL1")
-	rec.WriteAudio([]float32{2.5, -2.5})
+	rec.WritePeerAudio([]float32{2.5, -2.5})
 
 	store := newMemStore()
-	if _, _, err := rec.Finish(context.Background(), store); err != nil {
+	if _, err := rec.Finish(context.Background(), store); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 	body, ok := store.object("calls/chan1/CALL1.wav")
 	if !ok {
 		t.Fatal("the wav was never uploaded")
 	}
-	first := int16(binary.LittleEndian.Uint16(body[44:46]))
-	second := int16(binary.LittleEndian.Uint16(body[46:48]))
-	if first != 32767 || second != -32767 {
+	if first, second := wavSample(body, 0), wavSample(body, 1); first != 32767 || second != -32767 {
 		t.Errorf("samples = %d,%d, want 32767,-32767", first, second)
+	}
+}
+
+// Both sides spoke: three objects, three keys, one mime, and one length --
+// they are one recording cut three ways, not three recordings.
+func TestRecorderUploadsAllThreeTracks(t *testing.T) {
+	dir := t.TempDir()
+	rec := call.NewRecorder(dir, "chan1", "CALL1")
+
+	rec.WritePeerAudio(peerFrame(0.5))
+	rec.WriteOperatorAudio(operatorFrame(0x2000))
+
+	store := newMemStore()
+	got, err := rec.Finish(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+
+	for _, track := range []struct {
+		name     string
+		media    *call.Media
+		key      string
+		filename string
+	}{
+		{"mix", got.Audio, "calls/chan1/CALL1.wav", "CALL1.wav"},
+		{"peer", got.PeerAudio, "calls/chan1/CALL1-peer.wav", "CALL1-peer.wav"},
+		{"operator", got.OperatorAudio, "calls/chan1/CALL1-operator.wav", "CALL1-operator.wav"},
+	} {
+		if track.media == nil {
+			t.Fatalf("%s media = nil, want a descriptor", track.name)
+		}
+		if track.media.Key != track.key {
+			t.Errorf("%s key = %q, want %q", track.name, track.media.Key, track.key)
+		}
+		if track.media.MimeType != "audio/wav" {
+			t.Errorf("%s mime = %q, want audio/wav", track.name, track.media.MimeType)
+		}
+		if track.media.Filename != track.filename {
+			t.Errorf("%s filename = %q, want %q", track.name, track.media.Filename, track.filename)
+		}
+		if mime := store.mime(track.key); mime != "audio/wav" {
+			t.Errorf("%s uploaded with mime %q, want audio/wav", track.name, mime)
+		}
+		if _, ok := store.object(track.key); !ok {
+			t.Errorf("%s was never uploaded to %s", track.name, track.key)
+		}
+	}
+
+	mix, _ := store.object(got.Audio.Key)
+	peer, _ := store.object(got.PeerAudio.Key)
+	operator, _ := store.object(got.OperatorAudio.Key)
+	if len(mix) != len(peer) || len(peer) != len(operator) {
+		t.Fatalf("track lengths = %d/%d/%d, want all equal: they share one timeline",
+			len(mix), len(peer), len(operator))
+	}
+
+	// Each side is on its own track and only its own track.
+	if got := wavSample(peer, 0); got < 16382 || got > 16384 {
+		t.Errorf("peer sample = %d, want the customer's 0.5", got)
+	}
+	if got := wavSample(operator, 0); got < 8190 || got > 8194 {
+		t.Errorf("operator sample = %d, want the operator's 0.25", got)
+	}
+	if got := wavSample(mix, 0); got < 24574 || got > 24578 {
+		t.Errorf("mix sample = %d, want the sum of both sides", got)
+	}
+}
+
+// A call where only one side ever spoke still produces three objects. The
+// silent side is silence, not a missing object: a transcription pipeline that
+// fetches -operator.wav and gets a 404 cannot tell "the operator said nothing"
+// from "the upload failed" or "this gateway is too old to produce it", whereas
+// a silent track of exactly the right length says it unambiguously. The
+// "nothing captured, nothing uploaded" rule is about a call with no audio at
+// all, and that one still holds -- see TestRecorderUploadsNothingWhenNoFrames.
+func TestRecorderUploadsASilentTrackForTheSideThatNeverSpoke(t *testing.T) {
+	dir := t.TempDir()
+	rec := call.NewRecorder(dir, "chan1", "CALL1")
+
+	rec.WritePeerAudio(peerFrame(0.5))
+
+	store := newMemStore()
+	got, err := rec.Finish(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if got.OperatorAudio == nil {
+		t.Fatal("operator media = nil, want a silent track rather than nothing")
+	}
+
+	operator, ok := store.object("calls/chan1/CALL1-operator.wav")
+	if !ok {
+		t.Fatal("the operator track was never uploaded")
+	}
+	peer, _ := store.object("calls/chan1/CALL1-peer.wav")
+	if len(operator) != len(peer) {
+		t.Fatalf("operator track is %d bytes and peer is %d: the silent side must span the same time",
+			len(operator), len(peer))
+	}
+	if data := operator[44:]; !bytes.Equal(data, make([]byte, len(data))) {
+		t.Error("the operator track is not silence, but the operator never spoke")
 	}
 }
 
@@ -166,38 +315,45 @@ func TestRecorderWritesVideoVerbatim(t *testing.T) {
 	rec.WriteVideo([]byte{0, 0, 0, 1, 0x65, 0x88})
 
 	store := newMemStore()
-	audio, video, err := rec.Finish(context.Background(), store)
+	got, err := rec.Finish(context.Background(), store)
 	if err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
-	if audio != nil {
-		t.Errorf("audio = %+v, want nil when no audio frame was written", audio)
+	if got.Audio != nil || got.PeerAudio != nil || got.OperatorAudio != nil {
+		t.Errorf("audio = %+v/%+v/%+v, want all nil when no audio frame was written",
+			got.Audio, got.PeerAudio, got.OperatorAudio)
 	}
-	if video == nil || video.Key != "calls/chan1/CALL1.h264" || video.MimeType != "video/h264" {
-		t.Fatalf("video = %+v, want the h264 key and mime", video)
+	if got.Video == nil || got.Video.Key != "calls/chan1/CALL1.h264" || got.Video.MimeType != "video/h264" {
+		t.Fatalf("video = %+v, want the h264 key and mime", got.Video)
 	}
 	want := []byte{0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x65, 0x88}
-	got, ok := store.object("calls/chan1/CALL1.h264")
+	body, ok := store.object("calls/chan1/CALL1.h264")
 	if !ok {
 		t.Fatal("the h264 was never uploaded")
 	}
-	if !bytes.Equal(got, want) {
-		t.Errorf("h264 = % x, want % x", got, want)
+	if !bytes.Equal(body, want) {
+		t.Errorf("h264 = % x, want % x", body, want)
 	}
 }
 
-// A call that captured nothing must not leave an empty object in the bucket.
+// A call that captured nothing must not leave an empty object in the bucket --
+// and must not have started a clock that would have filled three of them with
+// silence.
 func TestRecorderUploadsNothingWhenNoFrames(t *testing.T) {
 	dir := t.TempDir()
 	rec := call.NewRecorder(dir, "chan1", "CALL1")
 
+	// Long enough that a clock running from construction would have ticked
+	// many times over.
+	time.Sleep(200 * time.Millisecond)
+
 	store := newMemStore()
-	audio, video, err := rec.Finish(context.Background(), store)
+	got, err := rec.Finish(context.Background(), store)
 	if err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
-	if audio != nil || video != nil {
-		t.Errorf("audio=%+v video=%+v, want both nil", audio, video)
+	if got != (call.Recording{}) {
+		t.Errorf("recording = %+v, want every descriptor nil", got)
 	}
 	if store.objectCount() != 0 {
 		t.Errorf("uploaded %d objects, want none", store.objectCount())
@@ -211,16 +367,18 @@ func TestRecorderUploadsNothingWhenNoFrames(t *testing.T) {
 	}
 }
 
-// The temp file must go away even when the upload fails, or a long-running
-// gateway fills its disk with dead recordings.
+// The temp files must go away even when the upload fails, or a long-running
+// gateway fills its disk with dead recordings. There are four of them now.
 func TestRecorderRemovesTempFilesOnUploadError(t *testing.T) {
 	dir := t.TempDir()
 	rec := call.NewRecorder(dir, "chan1", "CALL1")
-	rec.WriteAudio([]float32{0.5})
+	rec.WritePeerAudio([]float32{0.5})
+	rec.WriteOperatorAudio(operatorFrame(0x2000))
+	rec.WriteVideo([]byte{0, 0, 0, 1, 0x65})
 
 	store := newMemStore()
 	store.fail(errors.New("bucket is on fire"))
-	if _, _, err := rec.Finish(context.Background(), store); err == nil {
+	if _, err := rec.Finish(context.Background(), store); err == nil {
 		t.Fatal("Finish err = nil, want the upload error")
 	}
 	entries, err := os.ReadDir(dir)
@@ -236,18 +394,23 @@ func TestRecorderRemovesTempFilesOnUploadError(t *testing.T) {
 	}
 }
 
-// Recording runs on the library's media goroutines, so the writes must be safe
-// to call concurrently.
+// Recording runs on the library's media goroutines -- the relay's decoder on
+// one side, the transmit loop on the other -- so both writes must be safe to
+// call concurrently, and concurrently with the clock draining them.
 func TestRecorderIsSafeForConcurrentWrites(t *testing.T) {
 	dir := t.TempDir()
 	rec := call.NewRecorder(dir, "chan1", "CALL1")
 
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
-		wg.Add(2)
+		wg.Add(3)
 		go func() {
 			defer wg.Done()
-			rec.WriteAudio([]float32{0.1, 0.2})
+			rec.WritePeerAudio([]float32{0.1, 0.2})
+		}()
+		go func() {
+			defer wg.Done()
+			rec.WriteOperatorAudio([]byte{0x00, 0x10, 0x00, 0x10})
 		}()
 		go func() {
 			defer wg.Done()
@@ -257,16 +420,51 @@ func TestRecorderIsSafeForConcurrentWrites(t *testing.T) {
 	wg.Wait()
 
 	store := newMemStore()
-	audio, video, err := rec.Finish(context.Background(), store)
+	got, err := rec.Finish(context.Background(), store)
 	if err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
-	body, _ := store.object(audio.Key)
-	if got := binary.LittleEndian.Uint32(body[40:44]); got != 50*2*2 {
-		t.Errorf("wav data size = %d, want %d", got, 50*2*2)
+
+	mix, _ := store.object(got.Audio.Key)
+	peer, _ := store.object(got.PeerAudio.Key)
+	operator, _ := store.object(got.OperatorAudio.Key)
+	if len(mix) != len(peer) || len(peer) != len(operator) {
+		t.Errorf("track lengths = %d/%d/%d, want all equal", len(mix), len(peer), len(operator))
 	}
-	videoBody, _ := store.object(video.Key)
+	wavData(t, mix)
+
+	videoBody, _ := store.object(got.Video.Key)
 	if len(videoBody) != 50*5 {
 		t.Errorf("h264 size = %d, want %d", len(videoBody), 50*5)
+	}
+}
+
+// A ticker per call that outlives the call is a leak that only shows up under
+// load: it costs nothing on one call and everything on a thousand.
+func TestRecorderClockDoesNotOutliveTheCall(t *testing.T) {
+	dir := t.TempDir()
+	store := newMemStore()
+
+	// A baseline taken after one full cycle, so the runtime's own goroutines
+	// are already up and the comparison is about ours.
+	warmup := call.NewRecorder(dir, "chan1", "WARMUP")
+	warmup.WritePeerAudio([]float32{0.5})
+	if _, err := warmup.Finish(context.Background(), store); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	baseline := runtime.NumGoroutine()
+
+	for i := 0; i < 20; i++ {
+		rec := call.NewRecorder(dir, "chan1", "CALL1")
+		rec.WritePeerAudio([]float32{0.5})
+		rec.WriteOperatorAudio(operatorFrame(0x2000))
+		if _, err := rec.Finish(context.Background(), store); err != nil {
+			t.Fatalf("Finish: %v", err)
+		}
+	}
+
+	if got := runtime.NumGoroutine(); got > baseline {
+		t.Errorf("goroutines = %d after 20 finished calls, want no more than the %d baseline: "+
+			"a recorder's clock is outliving its call", got, baseline)
 	}
 }

@@ -133,7 +133,7 @@ JID do dispositivo nem com o número real da linha.
 | `ringing` | Chamada de saída na linha | `isVideo`, `commandId` |
 | `accepted` | Mídia começou | — |
 | `ended` | Chamada encerrada | `duration`, `reason` |
-| `recording` | Gravação da chamada subiu para o S3 | `media`, `videoMedia` |
+| `recording` | Gravação da chamada subiu para o S3 | `media`, `peerMedia`, `operatorMedia`, `videoMedia` |
 | `state` | Fase mudou ou mute mudou | `state`, `muted` |
 | `video.state` | Estado de vídeo do peer | `video` |
 | `reaction` | Reação recebida | `reaction` |
@@ -151,16 +151,15 @@ JID do dispositivo nem com o número real da linha.
 
 ### Gravação
 
-`media`/`videoMedia` viajam num evento `recording` separado, **nunca no `ended`**.
+Os campos de mídia viajam num evento `recording` separado, **nunca no `ended`**.
 Isso é deliberado, não uma omissão: a gravação sobe para o S3 depois que a chamada
 já terminou, e esse upload pode ser lento ou falhar (bucket fora do ar, rede ruim).
-Se `media`/`videoMedia` fossem campos do `ended`, publicar o `ended` teria que
-esperar o upload — e um S3 lento passaria a atrasar, ou numa parada longa
-efetivamente segurar, o evento que diz ao backend que a chamada acabou. Um caso
-real: o upload levou 350 ms depois do `hangup`, e nesse intervalo o backend viu a
-chamada como "ainda ativa" mesmo com o áudio já parado dos dois lados. `ended` sai
-imediatamente, sem mídia; `recording` chega depois, quando o upload terminar. **Não
-mova `media`/`videoMedia` de volta para o `ended`.**
+Se fossem campos do `ended`, publicar o `ended` teria que esperar o upload — e um S3
+lento passaria a atrasar, ou numa parada longa efetivamente segurar, o evento que diz
+ao backend que a chamada acabou. Um caso real: o upload levou 350 ms depois do
+`hangup`, e nesse intervalo o backend viu a chamada como "ainda ativa" mesmo com o
+áudio já parado dos dois lados. `ended` sai imediatamente, sem mídia; `recording`
+chega depois, quando o upload terminar. **Não mova a mídia de volta para o `ended`.**
 
 ```json
 {
@@ -176,21 +175,58 @@ mova `media`/`videoMedia` de volta para o `ended`.**
     "mimeType": "audio/wav",
     "filename": "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4.wav",
     "duration": 42
+  },
+  "peerMedia": {
+    "key": "calls/channel-1/A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4-peer.wav",
+    "mimeType": "audio/wav",
+    "filename": "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4-peer.wav",
+    "duration": 42
+  },
+  "operatorMedia": {
+    "key": "calls/channel-1/A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4-operator.wav",
+    "mimeType": "audio/wav",
+    "filename": "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4-operator.wav",
+    "duration": 42
   }
 }
 ```
 
-O `recording` carrega até dois objetos:
+O `recording` carrega até quatro objetos — **três faixas de áudio e uma de vídeo**:
 
-- `media` — áudio, sempre WAV PCM 16 kHz mono (`audio/wav`), em `calls/<channelId>/<callId>.wav`
-- `videoMedia` — vídeo, H.264 Annex-B cru (`video/h264`), em `calls/<channelId>/<callId>.h264`
+| Campo | Key | Conteúdo |
+|---|---|---|
+| `media` | `calls/<channelId>/<callId>.wav` | Os dois lados **misturados** em mono — é a faixa que o player do chat toca |
+| `peerMedia` | `calls/<channelId>/<callId>-peer.wav` | Só o cliente |
+| `operatorMedia` | `calls/<channelId>/<callId>-operator.wav` | Só o operador (inclui o que o `play` transmitiu) |
+| `videoMedia` | `calls/<channelId>/<callId>.h264` | Vídeo do peer, H.264 Annex-B cru (`video/h264`) |
 
-Ambos carregam a **`key` do S3, nunca uma URL**. O backend resolve a key do mesmo jeito
-que já resolve a mídia das mensagens (`InboundEvent.media.key`).
+As três faixas de áudio são sempre WAV PCM 16 kHz mono (`audio/wav`). Todos os quatro
+carregam a **`key` do S3, nunca uma URL**. O backend resolve a key do mesmo jeito que já
+resolve a mídia das mensagens (`InboundEvent.media.key`).
 
-Uma chamada que não capturou nada não gera objeto, e nenhum `recording` é publicado —
-não vem um evento com campos vazios. Se o upload falhar, também não sai `recording`;
-sai só o `command.failed` com `recording_upload_failed` (ver abaixo).
+**Por que separar.** Mandadas individualmente para a transcrição, `peerMedia` e
+`operatorMedia` já dizem quem falou, sem nenhuma etapa de diarização: o que está no
+arquivo do cliente é do cliente, por construção. O `media` continua sendo a mistura
+porque é o que uma pessoa escuta.
+
+**As três faixas têm exatamente o mesmo tamanho e a mesma linha do tempo.** O gateway
+não escreve cada lado conforme ele chega — os dois chegam em ritmos diferentes (o do
+cliente quando o relay entrega, o do operador quando o navegador manda), e escrever na
+chegada faria as faixas derivarem uma da outra. Um relógio interno escreve um frame de
+60 ms de cada lado por tique, silêncio quando um lado não tem nada. Um lado calado por
+dez segundos rende dez segundos de silêncio na faixa dele, no lugar certo. Alinhar
+`peerMedia` e `operatorMedia` pelo índice da amostra é seguro.
+
+A mistura é a **soma dos dois lados com clamp**, não a média. Dividir por dois cortaria
+o volume pela metade na maior parte de qualquer chamada, em que só um lado fala por vez;
+o clamp só custa alguma coisa nos trechos em que os dois falam alto ao mesmo tempo.
+
+Uma chamada que não capturou **nada** não gera objeto nenhum, e nenhum `recording` é
+publicado — não vem um evento com campos vazios. Mas uma chamada em que só um lado falou
+gera **as três** faixas: a faixa do lado calado é silêncio, não ausência. Um 404 em
+`-operator.wav` não distinguiria "o operador não falou" de "o upload falhou"; uma faixa
+silenciosa do tamanho certo diz isso sem ambiguidade. Se o upload falhar, também não sai
+`recording`; sai só o `command.failed` com `recording_upload_failed` (ver abaixo).
 
 O `.h264` cru toca em ffmpeg e VLC, **não em browser**. A conversão para mp4 é do backend.
 
@@ -288,6 +324,11 @@ A chamada tem **uma** fonte de áudio de saída e dois produtores. A regra, expl
 
 Conectar e desconectar o operador não interrompe nada disso.
 
+É dessa fonte única que sai o `operatorMedia` da gravação: o que é gravado como "lado do
+operador" é exatamente o que o peer ouviu, `play` incluído. Frame que o operador
+enfileirou mas a chamada nunca transmitiu (descartado durante um `play`, ou perdido no
+limite da fila) não entra na gravação, porque nunca foi ouvido.
+
 ## Configuração
 
 | Variável | Default | Efeito |
@@ -303,9 +344,11 @@ Conectar e desconectar o operador não interrompe nada disso.
 - **A biblioteca marca o caminho de mídia de vídeo como não validado**, tanto no envio
   quanto na recepção. A sinalização de vídeo é exercitada; o transporte dos frames precisa
   de uma chamada real de ponta a ponta para ser confirmado. Áudio não tem essa ressalva.
-- **Só o áudio do peer é gravado.** Nada do que o gateway transmite entra no WAV — nem o
-  `play`, nem o microfone do operador.
-- **Chamada de grupo grava uma faixa só**, sem separação por participante.
+- **Só o vídeo do peer é gravado.** O vídeo que o operador transmite não entra no
+  `.h264`. O áudio dos dois lados entra, em três faixas (ver [Gravação](#gravação)).
+- **Chamada de grupo mistura todos os participantes remotos numa faixa só**: o
+  `peerMedia` de um grupo não separa quem falou entre eles. A separação garantida é
+  entre o lado remoto e o operador, que é o que a stack de mídia dá.
 - **`gateway.call` é fila compartilhada** e a chamada é estado preso à instância dona do
   socket. Com mais de uma instância ativa, um comando pode cair na instância errada e
   falhar com `call_not_found`. Hoje não acontece porque cada instância reivindica todos os

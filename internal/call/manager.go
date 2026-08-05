@@ -129,6 +129,15 @@ func (m *Manager) Track(channelID string, lc LiveCall, direction string, record 
 
 	peer := lc.Peer()
 	senderLid, senderPn := m.resolveSenderIdentity(channelID, peer)
+
+	// The recorder is built before the outbound source because the source taps
+	// it: the operator's half of the recording is taken from the one buffer the
+	// gateway transmits through, not intercepted separately upstream.
+	var recorder *Recorder
+	if record {
+		recorder = NewRecorder(m.opts.TmpDir, channelID, lc.ID())
+	}
+
 	t := &Tracked{
 		CallID:    lc.ID(),
 		ChannelID: channelID,
@@ -138,11 +147,9 @@ func (m *Manager) Track(channelID string, lc LiveCall, direction string, record 
 		SenderPn:  senderPn,
 		IsVideo:   lc.IsVideo(),
 		Live:      lc,
-		outbound:  newOutboundAudio(),
+		Recorder:  recorder,
+		outbound:  newOutboundAudio(recorder),
 		StartedAt: m.opts.Now(),
-	}
-	if record {
-		t.Recorder = NewRecorder(m.opts.TmpDir, channelID, t.CallID)
 	}
 
 	// Subscribing the call's outbound audio here, once, is what makes the
@@ -161,7 +168,7 @@ func (m *Manager) Track(channelID string, lc LiveCall, direction string, record 
 	// independent, so either can be present without the other.
 	lc.Receive(func(frame []float32) {
 		if t.Recorder != nil {
-			t.Recorder.WriteAudio(frame)
+			t.Recorder.WritePeerAudio(frame)
 		}
 		if s := t.currentStream(); s != nil {
 			s.receiveAudio(frame)
@@ -396,10 +403,11 @@ func (m *Manager) uploadRecording(ctx context.Context, t *Tracked) {
 	go func() {
 		defer m.uploadWG.Done()
 
-		audio, video, err := t.Recorder.Finish(uploadCtx, m.store)
-		if audio != nil || video != nil {
+		rec, err := t.Recorder.Finish(uploadCtx, m.store)
+		if rec.Audio != nil || rec.Video != nil {
 			evt := m.event(t, EventRecording)
-			evt.Media, evt.VideoMedia = audio, video
+			evt.Media, evt.VideoMedia = rec.Audio, rec.Video
+			evt.PeerMedia, evt.OperatorMedia = rec.PeerAudio, rec.OperatorAudio
 			m.publish(evt)
 		}
 

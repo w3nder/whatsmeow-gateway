@@ -42,6 +42,14 @@ const operatorQueueFrames = 50
 // the operator's microphone and the play command's announcement -- goes
 // through this one source instead.
 type outboundAudio struct {
+	// recorder is the call's recorder, or nil when the call is not being
+	// recorded. It is the recording's tap for the operator's side, and it sits
+	// here rather than upstream at the microphone on purpose: this is the one
+	// buffer every producer already funnels through, so what the peer actually
+	// heard -- announcements included -- is what lands on the record, and there
+	// is no second interception point to keep in step with this one.
+	recorder *Recorder
+
 	// mu is held only for the memcpy-sized critical sections below, never
 	// across anything that can wait, so neither the library's send loop nor
 	// the operator's websocket goroutine can be delayed by the other.
@@ -59,8 +67,8 @@ type outboundAudio struct {
 	pending []byte
 }
 
-func newOutboundAudio() *outboundAudio {
-	return &outboundAudio{}
+func newOutboundAudio(recorder *Recorder) *outboundAudio {
+	return &outboundAudio{recorder: recorder}
 }
 
 // Read fills p with the next outbound audio, in priority order: an
@@ -71,19 +79,21 @@ func newOutboundAudio() *outboundAudio {
 //
 // Reads are paced by the caller, not by us: the send loop asks for exactly one
 // 60 ms frame every 60 ms, so returning immediately here does not run an
-// announcement out at wire speed.
+// announcement out at wire speed. That cadence is also why this is the right
+// place to tap the recording's operator track: what leaves here is what the
+// peer heard, already on the call's own frame grid.
 func (o *outboundAudio) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
 
 	o.mu.Lock()
-	defer o.mu.Unlock()
 
 	// EOF is the only way to tell the library's Player that this source is
 	// finished; it then goes idle and the send loop falls back to its own
 	// silence, which is exactly right for a call that is over.
 	if o.closed {
+		o.mu.Unlock()
 		return 0, io.EOF
 	}
 
@@ -112,6 +122,18 @@ func (o *outboundAudio) Read(p []byte) (int, error) {
 	// short read would send the library's io.ReadFull back around for more,
 	// and with nothing queued it would block there.
 	clear(p[n:])
+	recorder := o.recorder
+	o.mu.Unlock()
+
+	// Tapped outside the lock, and only when a producer actually filled
+	// something: a frame nobody put anything into is not offered at all. The
+	// recorder's clock fills those gaps with silence by itself, and offering
+	// them here would arm a recording -- three files of nothing -- on every
+	// call where neither side ever spoke. WriteOperatorAudio only queues, so
+	// this cannot park the send loop; see outboundAudio's type comment.
+	if recorder != nil && n > 0 {
+		recorder.WriteOperatorAudio(p)
+	}
 	return len(p), nil
 }
 

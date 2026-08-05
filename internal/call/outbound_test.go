@@ -78,8 +78,18 @@ func isSilence(frame []float32) bool {
 // the gateway subscribed to it, wrapped the way the library wraps it.
 func trackedCall(t *testing.T) (*call.Manager, *fakeCall, meowcaller.AudioSource) {
 	t.Helper()
+	m, lc, src, _ := trackedRecordedCall(t)
+	return m, lc, src
+}
 
-	m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
+// trackedRecordedCall is trackedCall with the recording's object store handed
+// back too, for the tests that follow what the source transmits all the way
+// onto the recording.
+func trackedRecordedCall(t *testing.T) (*call.Manager, *fakeCall, meowcaller.AudioSource, *memStore) {
+	t.Helper()
+
+	store := newMemStore()
+	m := newTestManager(t, &memPublisher{}, store, time.Now)
 	caller := &fakeCaller{}
 	m.Attach("chan-a", caller)
 
@@ -90,7 +100,7 @@ func trackedCall(t *testing.T) (*call.Manager, *fakeCall, meowcaller.AudioSource
 	if src == nil {
 		t.Fatal("Track did not subscribe the call's outbound audio")
 	}
-	return m, lc, meowcaller.PCMStream(src)
+	return m, lc, meowcaller.PCMStream(src), store
 }
 
 // The failure this whole change exists for: an operator attaches to listen and
@@ -271,6 +281,74 @@ func TestAttachingMidAnnouncementDoesNotTruncateIt(t *testing.T) {
 		if frame := readFrame(t, source); isSilence(frame) {
 			t.Errorf("announcement frame %d was silence: the attach truncated it", i)
 		}
+	}
+}
+
+// The recording's operator track is tapped from this source, so it is only
+// really covered here, where the frames go out through the library's own
+// AudioSource rather than through a fake. Everything the peer heard belongs on
+// that track -- the operator's microphone and a play command's announcement
+// alike -- and none of it may leak onto the customer's.
+func TestWhatTheSourceTransmitsLandsOnTheOperatorTrack(t *testing.T) {
+	m, lc, source, store := trackedRecordedCall(t)
+
+	stream, detach, ok := m.AttachStream("chan-a", "C1")
+	if !ok {
+		t.Fatal("AttachStream returned false for a live call")
+	}
+	defer detach()
+
+	loud := make([]byte, meowcaller.FrameSamples*2)
+	for i := 0; i < len(loud); i += 2 {
+		loud[i], loud[i+1] = 0x00, 0x40 // +0.5
+	}
+	if err := stream.WriteAudio(loud); err != nil {
+		t.Fatalf("WriteAudio: %v", err)
+	}
+	// The tap fires on the read, not on the write: what was queued but never
+	// transmitted was never heard, so it is not on the record either.
+	readFrame(t, source)
+
+	lc.fireEnd("hangup")
+	m.WaitForRecordings(5 * time.Second)
+
+	operator, ok := store.object("calls/chan-a/C1-operator.wav")
+	if !ok {
+		t.Fatal("the operator track was never uploaded")
+	}
+	if got := wavSample(operator, 0); got < 16382 || got > 16384 {
+		t.Errorf("operator track sample = %d, want the transmitted 0.5", got)
+	}
+
+	// The customer said nothing, and the operator's audio must not have bled
+	// into their track: the split is the whole point of the three files.
+	peer, ok := store.object("calls/chan-a/C1-peer.wav")
+	if !ok {
+		t.Fatal("the peer track was never uploaded")
+	}
+	if data := peer[44:]; !bytes.Equal(data, make([]byte, len(data))) {
+		t.Error("the operator's audio bled into the customer's track")
+	}
+}
+
+// The source transmits silence continuously for the whole life of every call,
+// by design -- WhatsApp's relay will not bridge the peer back otherwise. Those
+// frames must not count as audio: a call nobody spoke a word on has to leave
+// the bucket exactly as empty as it was.
+func TestTransmittedSilenceDoesNotCreateARecording(t *testing.T) {
+	m, lc, source, store := trackedRecordedCall(t)
+
+	for i := 0; i < 5; i++ {
+		if frame := readFrame(t, source); !isSilence(frame) {
+			t.Fatalf("frame %d of an idle call was not silence", i)
+		}
+	}
+
+	lc.fireEnd("hangup")
+	m.WaitForRecordings(5 * time.Second)
+
+	if got := store.objectCount(); got != 0 {
+		t.Errorf("uploaded %d objects for a call with no audio, want none", got)
 	}
 }
 

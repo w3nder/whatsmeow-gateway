@@ -335,17 +335,39 @@ func TestGatewayInboundCallRecordsAndPublishes(t *testing.T) {
 		t.Fatalf("ended media = %+v, want nil: the recording arrives on its own event", ended.Media)
 	}
 
-	// The upload runs off the call's teardown path, so the recording's key
-	// arrives on a later, separate event rather than on ended itself.
+	// The upload runs off the call's teardown path, so the recording's keys
+	// arrive on a later, separate event rather than on ended itself. All three
+	// audio tracks ride on that one event: the mix the chat plays, plus one per
+	// side for transcription to attribute.
 	recording := waitForCallEvent(t, deliveries, call.EventRecording, 15*time.Second)
-	wantKey := "calls/" + channelID + "/CALL1.wav"
-	if recording.Media == nil || recording.Media.Key != wantKey {
-		t.Fatalf("recording media = %+v, want key %s", recording.Media, wantKey)
+	tracks := []struct {
+		field string
+		media *call.Media
+		key   string
+	}{
+		{"media", recording.Media, "calls/" + channelID + "/CALL1.wav"},
+		{"peerMedia", recording.PeerMedia, "calls/" + channelID + "/CALL1-peer.wav"},
+		{"operatorMedia", recording.OperatorMedia, "calls/" + channelID + "/CALL1-operator.wav"},
 	}
+	for _, track := range tracks {
+		if track.media == nil || track.media.Key != track.key {
+			t.Fatalf("recording %s = %+v, want key %s", track.field, track.media, track.key)
+		}
+		if track.media.MimeType != "audio/wav" {
+			t.Fatalf("recording %s mime = %q, want audio/wav", track.field, track.media.MimeType)
+		}
+		assertWAVInBucket(ctx, t, rawS3, bucket, track.key)
+	}
+}
 
-	obj, err := rawS3.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(wantKey)})
+// assertWAVInBucket reads an uploaded recording back and checks it is a real
+// RIFF/WAVE file rather than an empty or half-written object.
+func assertWAVInBucket(ctx context.Context, t *testing.T, client *s3.Client, bucket, key string) {
+	t.Helper()
+
+	obj, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
 	if err != nil {
-		t.Fatalf("recording was not uploaded: %v", err)
+		t.Fatalf("%s was not uploaded: %v", key, err)
 	}
 	defer func() {
 		if err := obj.Body.Close(); err != nil {
@@ -354,9 +376,9 @@ func TestGatewayInboundCallRecordsAndPublishes(t *testing.T) {
 	}()
 	header := make([]byte, 12)
 	if _, err := io.ReadFull(obj.Body, header); err != nil {
-		t.Fatalf("failed to read the recording header: %v", err)
+		t.Fatalf("failed to read the header of %s: %v", key, err)
 	}
 	if !bytes.Equal(header[0:4], []byte("RIFF")) || !bytes.Equal(header[8:12], []byte("WAVE")) {
-		t.Fatalf("recording header = %q, want a RIFF/WAVE header", header)
+		t.Fatalf("%s header = %q, want a RIFF/WAVE header", key, header)
 	}
 }

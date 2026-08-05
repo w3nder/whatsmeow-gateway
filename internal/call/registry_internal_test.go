@@ -8,7 +8,7 @@ import "testing"
 // tests write the interleaving out by hand instead.
 
 func TestSetStreamRefusesOnceTheCallIsFinished(t *testing.T) {
-	tracked := &Tracked{outbound: newOutboundAudio()}
+	tracked := &Tracked{outbound: newOutboundAudio(nil)}
 	first := newStream(nil, tracked.outbound)
 
 	old, ok := tracked.setStream(first)
@@ -39,7 +39,7 @@ func TestSetStreamRefusesOnceTheCallIsFinished(t *testing.T) {
 // callback can still both reach a call, so it has to survive being called
 // twice.
 func TestFinishStreamIsIdempotent(t *testing.T) {
-	tracked := &Tracked{outbound: newOutboundAudio()}
+	tracked := &Tracked{outbound: newOutboundAudio(nil)}
 	stream := newStream(nil, tracked.outbound)
 	if _, ok := tracked.setStream(stream); !ok {
 		t.Fatal("setStream refused a stream on a live call")

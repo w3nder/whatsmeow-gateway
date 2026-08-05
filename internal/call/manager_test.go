@@ -97,7 +97,7 @@ func (c *fakeClock) advance(d time.Duration) {
 // fixture constant that would mask a regression back to the device JID.
 func newTestManager(t *testing.T, pub call.Publisher, store call.RecordingStore, now func() time.Time) *call.Manager {
 	t.Helper()
-	return call.NewManager(pub, store,
+	m := call.NewManager(pub, store,
 		func(channelID string) call.Identity {
 			return call.Identity{PhoneNumberID: channelID, TenantID: "t1"}
 		},
@@ -105,6 +105,12 @@ func newTestManager(t *testing.T, pub call.Publisher, store call.RecordingStore,
 		call.Options{TmpDir: t.TempDir(), Record: true, Now: now},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
+	// Registered after t.TempDir, so it runs before it: an upload still in
+	// flight is still holding its temp files, and removing the directory out
+	// from under it fails the test for a reason that has nothing to do with
+	// what the test was checking.
+	t.Cleanup(func() { m.WaitForRecordings(10 * time.Second) })
+	return m
 }
 
 func TestManagerPublishesIncomingCall(t *testing.T) {
@@ -271,11 +277,23 @@ func TestManagerEndedCarriesRecording(t *testing.T) {
 	if len(recording) != 1 {
 		t.Fatalf("got %d recording events, want 1", len(recording))
 	}
-	if recording[0].Media == nil || recording[0].Media.Key != "calls/chan-a/C1.wav" {
-		t.Fatalf("Media = %+v, want the wav recording key", recording[0].Media)
-	}
-	if _, ok := store.object("calls/chan-a/C1.wav"); !ok {
-		t.Error("recording was never uploaded")
+	// All three audio tracks ride on the one event: the mix for the chat's
+	// player, and one per side for transcription to attribute.
+	for field, wantKey := range map[string]struct {
+		got  *call.Media
+		want string
+	}{
+		"media":         {recording[0].Media, "calls/chan-a/C1.wav"},
+		"peerMedia":     {recording[0].PeerMedia, "calls/chan-a/C1-peer.wav"},
+		"operatorMedia": {recording[0].OperatorMedia, "calls/chan-a/C1-operator.wav"},
+	} {
+		if wantKey.got == nil || wantKey.got.Key != wantKey.want {
+			t.Errorf("%s = %+v, want key %s", field, wantKey.got, wantKey.want)
+			continue
+		}
+		if _, ok := store.object(wantKey.want); !ok {
+			t.Errorf("%s was never uploaded to %s", field, wantKey.want)
+		}
 	}
 }
 
@@ -435,8 +453,11 @@ func TestManagerWaitForRecordingsRespectsDeadline(t *testing.T) {
 	pub := &memPublisher{}
 	store := newMemStore()
 	release := store.blockPuts()
-	t.Cleanup(release)
 	m := newTestManager(t, pub, store, time.Now)
+	// Registered after the manager, so it runs before the manager's own
+	// cleanup: that one waits for uploads to finish, and this is what lets
+	// the deliberately stuck one finish.
+	t.Cleanup(release)
 	caller := &fakeCaller{}
 	m.Attach("chan-a", caller)
 

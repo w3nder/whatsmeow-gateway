@@ -12,7 +12,10 @@ import (
 // constructed in a test. Everything in this package programs against these
 // interfaces instead, so the whole command and event surface is exercised
 // without a real call, and exactly one production file
-// (internal/session/caller.go) knows the library's concrete types.
+// (internal/session/caller.go) knows the library's concrete types. recorder.go
+// takes two numeric constants from the library -- its sample rate and frame
+// size -- and nothing else: restating those would not fail, it would silently
+// stretch every recording.
 //
 // One test file breaks that on purpose: outbound_test.go reads the call's
 // outbound audio through the library's own AudioSource, because the one thing

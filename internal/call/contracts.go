@@ -3,6 +3,9 @@
 // A call's audio and video are captured to S3 and delivered by key on a
 // recording event, exactly the way inbound message media already is, and every
 // lifecycle transition is published as an event for the backend to act on. The
+// audio arrives as three tracks on one timeline -- the two sides mixed, plus
+// each side alone for transcription to attribute -- which is why recorder.go is
+// driven by a clock rather than by the callbacks the frames arrive on. The
 // recording event follows the ended event rather than riding on it: the upload
 // is a by-product of the call, not a gate on reporting that the call is over.
 //
@@ -199,6 +202,11 @@ type EventError struct {
 // Event is one call lifecycle event published to the backend. Every optional
 // field is omitted when absent so a consumer can tell "no recording" from
 // "empty recording".
+//
+// PeerMedia and OperatorMedia are the same recording as Media with one side
+// each, so transcription can attribute what was said to whoever said it without
+// a diarisation step. Media stays the mix: it is what a player in the chat
+// plays.
 type Event struct {
 	PhoneNumberID string           `json:"phoneNumberId"`
 	TenantID      string           `json:"tenantId"`
@@ -217,6 +225,8 @@ type Event struct {
 	Reason        string           `json:"reason,omitempty"`
 	Muted         *bool            `json:"muted,omitempty"`
 	Media         *Media           `json:"media,omitempty"`
+	PeerMedia     *Media           `json:"peerMedia,omitempty"`
+	OperatorMedia *Media           `json:"operatorMedia,omitempty"`
 	VideoMedia    *Media           `json:"videoMedia,omitempty"`
 	Video         *EventVideoState `json:"video,omitempty"`
 	Reaction      *EventReaction   `json:"reaction,omitempty"`
