@@ -73,9 +73,15 @@ func NewServer(calls *call.Manager, cfg ServerConfig, log *slog.Logger) *http.Se
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /calls/{callID}/media", s.handleMedia)
 
+	// This is the one listener in the process a browser reaches directly, and
+	// the token check only runs once a full request has arrived. Without these
+	// timeouts an unauthenticated client can pin a socket indefinitely by
+	// dribbling headers, or by connecting and never speaking at all.
 	return &http.Server{
-		Addr:    cfg.Addr,
-		Handler: mux,
+		Addr:              cfg.Addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 }
 

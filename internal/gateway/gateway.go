@@ -543,13 +543,19 @@ func (g *gateway) ensureChannelConnected(ctx context.Context, channelID string) 
 }
 
 func (g *gateway) handleSessionEvent(channelID string, evt any) {
+	// Every event that really kills a channel's calls goes through one place,
+	// so the difference between "the socket blipped" and "this session is
+	// gone" is decided once rather than per case -- see callsAreDead.
+	if reason, dead := callsAreDead(evt); dead {
+		g.calls.AbortChannel(g.workCtx, channelID, reason)
+	}
+
 	switch e := evt.(type) {
 	case *events.Message:
 		g.handleInboundMessage(channelID, e)
 	case *events.Receipt:
 		g.handleReceipt(channelID, e)
 	case *events.LoggedOut:
-		g.calls.AbortChannel(g.workCtx, channelID, "logged_out")
 		g.clearTenant(channelID)
 		if err := g.registry.Delete(g.workCtx, channelID); err != nil {
 			g.logger.Error("gateway: delete session on logout", "channel_id", channelID, "error", err)
@@ -585,10 +591,42 @@ func (g *gateway) handleCallSignal(channelID string, evt any) {
 	}
 }
 
+// callsAreDead reports whether a session event means the channel's live calls are
+// genuinely over, and the reason to report them ending with. Ending a call publishes
+// its `ended`, closes the operator's stream and finishes its recording, so getting this
+// wrong in either direction is expensive.
+//
+// events.Disconnected is deliberately absent, and it is the whole reason this decision
+// is written down rather than inlined. whatsmeow raises it on every socket drop -- a
+// missed keepalive, a broker-side reset, a two-second blip -- and then reconnects on its
+// own. A call's media does not ride that socket: it is a separate SRTP relay connection
+// the calling library holds, which nothing tears down when the websocket flaps. Treating
+// Disconnected as fatal truncated the recording and the CDR of calls that were still
+// running, and left the live call behind with no registry entry for a hangup to reach.
+//
+// The four below are the ones whatsmeow does not come back from: a logout, a session
+// taken over by another connection, a refused build, and a connect failure it gives up
+// on rather than retrying.
+func callsAreDead(evt any) (reason string, dead bool) {
+	switch evt.(type) {
+	case *events.LoggedOut:
+		return "logged_out", true
+	case *events.StreamReplaced:
+		return "stream_replaced", true
+	case *events.ClientOutdated:
+		return "client_outdated", true
+	case *events.ConnectFailure:
+		return "connect_failure", true
+	default:
+		return "", false
+	}
+}
+
 // handleConnectionEvent reports socket health. Everything here that is recoverable is
 // already being retried by whatsmeow's auto-reconnect, so the gateway only observes and
 // publishes status; the cases whatsmeow deliberately gives up on are published as errors
-// because they need action outside the gateway (re-pair, unban, upgrade).
+// because they need action outside the gateway (re-pair, unban, upgrade). Whether an
+// event also ends the channel's live calls is decided by callsAreDead, before this runs.
 func (g *gateway) handleConnectionEvent(channelID string, evt any) {
 	switch e := evt.(type) {
 	case *events.Connected:
@@ -596,9 +634,6 @@ func (g *gateway) handleConnectionEvent(channelID string, evt any) {
 		g.publishChannelStatus(channelID, "connected", "")
 	case *events.Disconnected:
 		g.logger.Warn("gateway: channel socket disconnected, auto-reconnect running", "channel_id", channelID)
-		// Media does not survive a dead socket. Leaving the call registered
-		// would hide its end from the backend and strand its recording.
-		g.calls.AbortChannel(g.workCtx, channelID, "disconnected")
 		g.publishChannelStatus(channelID, "disconnected", "socket disconnected")
 	case *events.KeepAliveTimeout:
 		g.logger.Warn("gateway: channel keepalive timed out",

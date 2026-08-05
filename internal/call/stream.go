@@ -11,15 +11,9 @@ import (
 // (a slow websocket write, a GC pause) without dropping, but bounded: an
 // operator that never catches up must lose frames, not turn into unbounded
 // memory growth.
-//
-// operatorAudioBuffer sizes the queue feeding Play in the other direction.
-// Play's own consumption sets the real pace (it plays PCM out at 16 kHz,
-// same as it came in); the buffer only has to absorb the gap between an
-// operator's send and Play's next read, not the whole call.
 const (
-	streamAudioBuffer   = 50
-	streamVideoBuffer   = 50
-	operatorAudioBuffer = 50
+	streamAudioBuffer = 50
+	streamVideoBuffer = 50
 )
 
 // Stream carries one call's media to and from a connected operator: the
@@ -37,57 +31,35 @@ type Stream struct {
 	video    chan []byte
 	keyframe chan struct{}
 
-	// operatorAudio queues frames from WriteAudio for the feeder goroutine
-	// below. It sits between the operator and the pipe so a WriteAudio call
-	// never blocks on Play actually consuming: it only ever queues onto a
-	// channel, never writes into the io.Pipe directly.
-	operatorAudio chan []byte
-	pipeR         *io.PipeReader
-	pipeW         *io.PipeWriter
+	// out is the call's own outbound audio source, shared with the play
+	// command and owned by the Tracked call rather than by this stream. The
+	// stream is one producer into it, not its owner: a detaching operator
+	// must not take the call's transmit path down with it.
+	out *outboundAudio
 
 	// mu guards closed and, by extension, every channel above: a send must
 	// never race a close of the same channel. Held for read while a channel
-	// send is in flight (WriteAudio, receiveAudio, receiveVideo) and for
-	// write only by close, so ordinary traffic never contends with itself,
-	// only with teardown. WriteVideo takes it only to snapshot closed, never
-	// across the call into the library -- see the comment there.
+	// send is in flight (receiveAudio, receiveVideo, WriteAudio) and for write
+	// only by close, so ordinary traffic never contends with itself, only with
+	// teardown. WriteVideo takes it only to snapshot closed, never across the
+	// call into the library -- see the comment there.
 	mu     sync.RWMutex
 	closed bool
 }
 
-// newStream builds a stream over a live call and wires the operator's audio
-// path immediately: Play is only ever handed one reader per call, so the
-// pipe is created up front rather than lazily on the first WriteAudio.
-func newStream(lc LiveCall) *Stream {
-	pr, pw := io.Pipe()
+// newStream builds a stream over a live call, writing the operator's audio
+// into the call's shared outbound source. Nothing here subscribes a player:
+// Manager.Track already handed that source to Play once, for the whole life
+// of the call, so attaching and detaching an operator never disturbs what the
+// gateway is transmitting.
+func newStream(lc LiveCall, out *outboundAudio) *Stream {
 	s := &Stream{
-		lc:            lc,
-		audio:         make(chan []float32, streamAudioBuffer),
-		video:         make(chan []byte, streamVideoBuffer),
-		keyframe:      make(chan struct{}, 1),
-		operatorAudio: make(chan []byte, operatorAudioBuffer),
-		pipeR:         pr,
-		pipeW:         pw,
+		lc:       lc,
+		out:      out,
+		audio:    make(chan []float32, streamAudioBuffer),
+		video:    make(chan []byte, streamVideoBuffer),
+		keyframe: make(chan struct{}, 1),
 	}
-
-	// Feeds the pipe from operatorAudio so WriteAudio only ever queues. This
-	// goroutine, unlike WriteAudio's caller, is not on the media path, so it
-	// is fine for it to block on the pipe write until Play drains it.
-	go func() {
-		for frame := range s.operatorAudio {
-			if _, err := pw.Write(frame); err != nil {
-				return
-			}
-		}
-	}()
-
-	// Play blocks for the life of the call, reading whatever the feeder
-	// above writes; it must run off the caller's goroutine.
-	go func() {
-		if err := lc.Play(pr); err != nil {
-			_ = pr.CloseWithError(err)
-		}
-	}()
 
 	// A stream attached mid-call has missed every keyframe so far: H.264
 	// access units between here and the peer's next one are undecodable on
@@ -109,12 +81,20 @@ func (s *Stream) Video() <-chan []byte { return s.video }
 // whether one is pending matters, so the channel holds at most one.
 func (s *Stream) Keyframe() <-chan struct{} { return s.keyframe }
 
-// WriteAudio queues one s16le mono frame from the operator into the call.
-// It only ever queues the frame onto a buffered channel; a background
-// goroutine carries it to Play's reader, so a stalled Play never blocks the
-// caller here. The buffer itself drops rather than blocks when full, for the
-// same reason: an operator sending faster than the call plays must not stall
-// whatever is calling WriteAudio.
+// WriteAudio queues one s16le mono frame from the operator into the call. It
+// only ever queues: the call's transmit loop picks the frame up on its own
+// cadence, so nothing about how fast (or whether) the call is draining can
+// stall the caller here. An operator running ahead of the call loses its
+// oldest queued frames rather than blocking -- see operatorQueueFrames.
+//
+// The frame is copied because the caller owns the buffer it read the
+// websocket message into and is free to reuse it the moment this returns.
+//
+// mu is held across writeOperator, unlike WriteVideo below, and that is safe
+// precisely because writeOperator has a bounded-time contract: it takes one
+// mutex that is only ever held for a memcpy and can never wait on the call.
+// Holding it here is the fence that lets detach flush the call's queue and
+// know no frame from the operator it just dropped can still arrive.
 func (s *Stream) WriteAudio(frame []byte) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -122,12 +102,10 @@ func (s *Stream) WriteAudio(frame []byte) error {
 		return fmt.Errorf("call: write operator audio: %w", io.ErrClosedPipe)
 	}
 
-	select {
-	case s.operatorAudio <- append([]byte(nil), frame...):
-		return nil
-	default:
-		return fmt.Errorf("call: write operator audio: buffer full, operator is sending faster than the call plays")
+	if err := s.out.writeOperator(append([]byte(nil), frame...)); err != nil {
+		return fmt.Errorf("call: write operator audio: %w", err)
 	}
+	return nil
 }
 
 // WriteVideo sends one Annex-B access unit from the operator straight
@@ -212,9 +190,10 @@ func (s *Stream) requestKeyframe() {
 //
 // closed flips under the write lock first, which fences every sender above:
 // none can be mid-send past that point, so every channel below is safe to
-// close. Closing pipeR then unblocks the feeder goroutine if it is stuck
-// writing into a Play that never reads; closing pipeW signals Play's reader
-// with EOF so a real implementation's read loop returns.
+// close. The call's outbound audio source is deliberately left alone: it
+// belongs to the call, not to the operator, and a stream being closed says
+// nothing about whether some other operator now owns it. Flushing it is the
+// detach path's job -- see AttachStream.
 func (s *Stream) close() {
 	s.mu.Lock()
 	if s.closed {
@@ -224,9 +203,6 @@ func (s *Stream) close() {
 	s.closed = true
 	s.mu.Unlock()
 
-	close(s.operatorAudio)
-	_ = s.pipeR.Close()
-	_ = s.pipeW.Close()
 	close(s.audio)
 	close(s.video)
 	close(s.keyframe)
@@ -236,21 +212,44 @@ func (s *Stream) close() {
 // func. Only one stream at a time: a second attach replaces the first,
 // closing it, so a reconnecting operator never leaves two consumers racing
 // for the same frames.
+//
+// It reports false both for a call that was never live and for one that ended
+// between the lookup and the attach. The second case is a real race -- an
+// operator clicking "listen" as the peer hangs up -- and it must not leave a
+// stream registered on a call that has already been finished: nothing would
+// ever close it, so the operator's socket would wait forever for the end frame
+// that only a closed Audio() produces.
 func (m *Manager) AttachStream(channelID, callID string) (*Stream, func(), bool) {
 	t, ok := m.registry.Get(channelID, callID)
 	if !ok {
 		return nil, func() {}, false
 	}
 
-	stream := newStream(t.Live)
+	stream := newStream(t.Live, t.outbound)
 
-	if old := t.setStream(stream); old != nil {
+	old, attached := t.setStream(stream)
+	if !attached {
+		// The call was torn down while this stream was being built. Close it
+		// here rather than handing back something the caller would park on.
+		stream.close()
+		return nil, func() {}, false
+	}
+	if old != nil {
 		old.close()
 	}
 
 	detach := func() {
-		t.clearStream(stream)
+		// close first: it is what fences WriteAudio, so no frame from this
+		// operator can land in the call's queue after the flush below.
 		stream.close()
+
+		// Only an operator that is genuinely still the attached one may flush
+		// the call's queued outbound audio. A stale detach -- a caller's defer
+		// running after AttachStream already replaced this stream -- must not
+		// wipe the audio its replacement has queued.
+		if t.clearStream(stream) {
+			t.outbound.clearOperator()
+		}
 	}
 
 	return stream, detach, true

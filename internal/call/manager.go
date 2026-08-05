@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.mau.fi/whatsmeow/types"
@@ -101,6 +102,7 @@ func (m *Manager) Attach(channelID string, caller Caller) {
 		// follow within milliseconds on a fast answer -- arrives to update it.
 		m.publishInbound(t)
 		m.publish(m.event(t, EventIncoming))
+		m.flushEarlyEnd(t)
 	})
 }
 
@@ -111,7 +113,20 @@ func (m *Manager) Get(channelID, callID string) (*Tracked, bool) {
 
 // Track wires every callback on a call and registers it. Inbound calls come
 // here from Attach, outbound ones from the command dispatcher.
+//
+// Callers must call flushEarlyEnd on the result once they have published the
+// call's arrival: a call can end inside Track, and that end is deliberately
+// held back rather than reported before anything knows the call exists.
 func (m *Manager) Track(channelID string, lc LiveCall, direction string, record bool) *Tracked {
+	// The identity lookup below can hit the store, and a call can end while it
+	// is running -- a peer that cancels immediately, a rejected offer. The
+	// library does not replay an end to a callback registered after the fact,
+	// so an end landing in that window would leave the call registered
+	// forever, never reported and never cleaned up. Catching it costs one
+	// throwaway handler, which m.subscribe replaces below.
+	var endedEarly atomic.Pointer[string]
+	lc.OnEnd(func(reason string) { endedEarly.Store(&reason) })
+
 	peer := lc.Peer()
 	senderLid, senderPn := m.resolveSenderIdentity(channelID, peer)
 	t := &Tracked{
@@ -123,10 +138,22 @@ func (m *Manager) Track(channelID string, lc LiveCall, direction string, record 
 		SenderPn:  senderPn,
 		IsVideo:   lc.IsVideo(),
 		Live:      lc,
+		outbound:  newOutboundAudio(),
 		StartedAt: m.opts.Now(),
 	}
 	if record {
 		t.Recorder = NewRecorder(m.opts.TmpDir, channelID, t.CallID)
+	}
+
+	// Subscribing the call's outbound audio here, once, is what makes the
+	// player slot unambiguous: the library's Play replaces the previous player
+	// without stopping it, so a second caller silently orphans the first. Both
+	// producers -- an attached operator's microphone and the play command --
+	// write into this one source instead. See outbound.go for why it can never
+	// block the library's send loop.
+	if err := lc.Play(t.outbound); err != nil {
+		m.log.Error("call: subscribe outbound audio",
+			"channel_id", channelID, "call_id", t.CallID, "error", err)
 	}
 
 	// Both sinks always fan out to the recorder (when recording is on) and to
@@ -158,7 +185,22 @@ func (m *Manager) Track(channelID string, lc LiveCall, direction string, record 
 	m.log.Info("call: tracking",
 		"channel_id", t.ChannelID, "call_id", t.CallID, "direction", t.Direction, "is_video", t.IsVideo)
 
+	t.earlyEnd = endedEarly.Load()
 	return t
+}
+
+// flushEarlyEnd reports an end that landed while Track was still wiring the
+// call up, which the library will not replay to the handler registered after
+// it. Both of Track's callers must call it, and only once they have published
+// the call's arrival: the backend has to know a call exists before it can be
+// told the call is over.
+func (m *Manager) flushEarlyEnd(t *Tracked) {
+	if t.earlyEnd == nil {
+		return
+	}
+	m.log.Warn("call: ended before tracking finished wiring it up",
+		"channel_id", t.ChannelID, "call_id", t.CallID, "reason", *t.earlyEnd)
+	m.end(context.Background(), t, *t.earlyEnd)
 }
 
 // resolveSenderIdentity turns a call's raw peer JID into the same
@@ -312,10 +354,15 @@ func (m *Manager) finish(ctx context.Context, t *Tracked, reason string) {
 	t.endOnce.Do(func() {
 		// A stream outlives its call otherwise: nothing else tells an
 		// operator parked on Audio()/Video() that the call is gone, so those
-		// channels would simply never receive again instead of closing.
-		if s := t.takeStream(); s != nil {
+		// channels would simply never receive again instead of closing. This
+		// also refuses any attach still in flight, which would otherwise store
+		// a stream on a call nothing will ever come back to close.
+		if s := t.finishStream(); s != nil {
 			s.close()
 		}
+		// Nothing transmits on a call that is over; releasing the source also
+		// tells the library's player to go idle the next time it reads.
+		_ = t.outbound.Close()
 
 		evt := m.event(t, EventEnded)
 		evt.Reason = reason

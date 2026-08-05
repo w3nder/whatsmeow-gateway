@@ -1,19 +1,21 @@
 # Contrato de chamadas — comandos e eventos
 
-O gateway expõe a stack de voz e vídeo do WhatsApp por AMQP. Ele **sinaliza e grava**:
-o áudio e o vídeo nunca trafegam pelo broker. A mídia fica dentro do processo do gateway,
-é gravada em arquivo temporário e sobe para o S3; o broker carrega apenas JSON pequeno com
-o ciclo de vida da chamada e a `key` da gravação.
+O gateway expõe a stack de voz e vídeo do WhatsApp por AMQP. **O áudio e o vídeo nunca
+trafegam pelo broker**: a mídia fica dentro do processo do gateway, é gravada em arquivo
+temporário e sobe para o S3; o broker carrega apenas JSON pequeno com o ciclo de vida da
+chamada e a `key` da gravação.
+
+Para o operador **ouvir e falar na chamada ao vivo** existe um segundo transporte,
+separado do broker: um WebSocket autenticado por token, servido pelo próprio gateway
+(ver [Mídia ao vivo](#mídia-ao-vivo-websocket)).
 
 ```
 WhatsApp ──RTP/mídia──▶ gateway ──arquivo──▶ S3
+                          │  │
+                          │  └──WebSocket (PCM/H.264)──▶ front (operador)
                           │
                           └──JSON──▶ RabbitMQ ──▶ backend ──▶ front
 ```
-
-Para o operador **ouvir a chamada ao vivo** seria preciso um segundo transporte
-(WebSocket ou WebRTC) entre gateway e front. Isso não existe hoje e está fora deste
-contrato.
 
 ## Onde publicar e onde ouvir
 
@@ -68,7 +70,7 @@ compartilhar prefetch travaria o envio de mensagens.
 | `answer` | `callId` | Atende |
 | `reject` | `callId` | Rejeita |
 | `hangup` | `callId` | Desliga |
-| `play` | `callId`, `mediaUrl` | Toca áudio PCM na chamada |
+| `play` | `callId`, `mediaUrl` | Toca áudio PCM na chamada (toma o canal do microfone do operador enquanto durar) |
 | `video.start` | `callId` | Inicia vídeo (upgrade) |
 | `video.accept` | `callId` | Aceita o upgrade do peer |
 | `video.stop` | `callId` | Encerra o vídeo |
@@ -91,7 +93,8 @@ compartilhar prefetch travaria o envio de mensagens.
 ### Formato da mídia nos comandos
 
 - **`play`** — `mediaUrl` aponta para **PCM cru**: signed 16-bit little-endian, mono, 16 kHz.
-  O gateway não decodifica mp3/wav/opus; a conversão é do backend.
+  O gateway não decodifica mp3/wav/opus; a conversão é do backend. O `command.ack` diz que
+  o áudio foi enfileirado, não que já tocou: ele sai na cadência de 60 ms da chamada.
 - **`video.play`** — `mediaUrl` aponta para um arquivo **H.264 Annex-B já codificado**.
   O gateway não tem encoder (imagem distroless, `CGO_ENABLED=0`): ele fatia o arquivo em
   access units e transmite. Quem codifica é o backend.
@@ -218,19 +221,90 @@ terminam a chamada de qualquer forma. Toda outra ação sobre um `callId` inexis
 continua falhando com `call_not_found`, porque para elas (`answer`, `video.*`, `play`,
 `reaction`, etc.) uma chamada ausente realmente significa que a ação não pode acontecer.
 
+## Mídia ao vivo (WebSocket)
+
+O operador ouve e fala na chamada por um WebSocket servido pelo gateway. Ele é **um
+transporte separado do broker**: nenhum byte de mídia passa por AMQP.
+
+```
+GET ws://<CALL_MEDIA_ADDR>/calls/{callID}/media?token=<jwt>
+```
+
+O listener só existe quando `CALL_MEDIA_ADDR` está configurado. Sem ele o gateway roda
+como antes: sinaliza e grava, sem mídia ao vivo.
+
+### Token
+
+O token é um JWT **HS256** assinado com `CALL_MEDIA_TOKEN_SECRET` — quem emite é o
+backend, não o gateway. `exp` é obrigatório (um token sem expiração é recusado), e todas
+as claims abaixo precisam estar presentes e não vazias:
+
+| Claim | Conteúdo |
+|---|---|
+| `tenantId` | tenant do operador |
+| `channelId` | canal dono da chamada |
+| `callId` | chamada autorizada — precisa bater com o `{callID}` da URL |
+| `userId` | operador, para auditoria |
+| `exp` | obrigatório; emita com validade curta |
+
+O token vale para **uma** chamada: um token de `A` não abre a mídia de `B` (403). Token
+inválido/expirado é 401; chamada que não existe (ou já acabou) é 404. Todas as recusas
+acontecem **antes** do upgrade, então um handshake que completa já significa que a
+chamada existia.
+
+`CALL_MEDIA_ALLOWED_ORIGINS` precisa listar a origem do front, senão o navegador é
+recusado pela checagem same-origin do servidor.
+
+### Formato dos frames
+
+Cada mensagem binária do WebSocket é **um** frame: um byte de tipo seguido do payload.
+Não há prefixo de tamanho — a fronteira da mensagem é a fronteira do frame.
+
+| Byte | Tipo | Direção | Payload |
+|---|---|---|---|
+| `0x01` | áudio | ambas | PCM s16le mono 16 kHz |
+| `0x02` | vídeo | ambas | access unit H.264 Annex-B |
+| `0x03` | keyframe | gateway → operador | vazio — "seu encoder precisa emitir um IDR agora" |
+| `0x04` | end | gateway → operador | vazio — a chamada acabou; o gateway fecha em seguida |
+
+O `0x03` chega logo na conexão (quem entra no meio da chamada perdeu todos os keyframes
+anteriores) e de novo sempre que o peer pedir um IDR depois de perda de pacote.
+
+Frames do operador são limitados a 1 MiB — um IDR de webcam passa folgado dos 32 KiB
+default da biblioteca de WebSocket.
+
+### Precedência do áudio de saída
+
+A chamada tem **uma** fonte de áudio de saída e dois produtores. A regra, explícita:
+
+- Um `play` (prompt de URA, mensagem de espera) **toma o canal** enquanto durar, e
+  substitui um `play` anterior que ainda esteja tocando.
+- O microfone do operador volta sozinho assim que o `play` termina. Os frames que ele
+  mandou durante o `play` são descartados, não enfileirados: áudio ao vivo atrasado é
+  pior que áudio perdido.
+- Sem operador e sem `play`, o gateway transmite silêncio — não para de transmitir. Isso
+  é obrigatório: o relay do WhatsApp só devolve a mídia do peer depois de ver o nosso
+  fluxo, então um operador que só escuta não pode fazer o gateway parar de emitir.
+
+Conectar e desconectar o operador não interrompe nada disso.
+
 ## Configuração
 
 | Variável | Default | Efeito |
 |---|---|---|
 | `GATEWAY_CALL_RECORD` | `true` | `false` desliga a gravação de todas as chamadas |
 | `GATEWAY_CALL_TMPDIR` | temp do sistema | Onde a gravação é montada antes de subir |
+| `CALL_MEDIA_ADDR` | vazio (desligado) | Endereço do listener de mídia ao vivo, ex. `:8081` |
+| `CALL_MEDIA_TOKEN_SECRET` | — | Segredo HS256 dos tokens; **obrigatório** se `CALL_MEDIA_ADDR` estiver setado |
+| `CALL_MEDIA_ALLOWED_ORIGINS` | vazio (só same-origin) | Origens do front autorizadas a fazer upgrade, separadas por vírgula |
 
 ## Limitações conhecidas
 
 - **A biblioteca marca o caminho de mídia de vídeo como não validado**, tanto no envio
   quanto na recepção. A sinalização de vídeo é exercitada; o transporte dos frames precisa
   de uma chamada real de ponta a ponta para ser confirmado. Áudio não tem essa ressalva.
-- **Só o áudio do peer é gravado.** O que o gateway toca com `play` não entra no WAV.
+- **Só o áudio do peer é gravado.** Nada do que o gateway transmite entra no WAV — nem o
+  `play`, nem o microfone do operador.
 - **Chamada de grupo grava uma faixa só**, sem separação por participante.
 - **`gateway.call` é fila compartilhada** e a chamada é estado preso à instância dona do
   socket. Com mais de uma instância ativa, um comando pode cair na instância errada e

@@ -135,3 +135,83 @@ func TestManagerPeerAlreadyPhoneJIDNeedsNoResolution(t *testing.T) {
 	assertSenderIdentity(t, "InboundCallEvent", inbound[0].From, inbound[0].SenderLid, inbound[0].SenderPn,
 		"5511888888888", "", "5511888888888")
 }
+
+// hookResolver runs before answering, so a test can make something happen
+// while Track is inside the store lookup -- the one window in Track where the
+// call is real but its callbacks are not wired yet.
+type hookResolver struct{ during func() }
+
+func (h hookResolver) PNForLID(context.Context, types.JID) (types.JID, bool, error) {
+	if h.during != nil {
+		h.during()
+	}
+	return types.JID{}, false, nil
+}
+
+// M2: the identity lookup is a real database round trip, and the calling
+// library does not replay an end to an OnEnd registered after the fact. A call
+// that ends inside that window used to be stuck forever -- never removed from
+// the registry, never reported as ended, its recorder's temp files left on
+// disk until the channel was aborted or the process shut down.
+func TestCallEndingDuringTheIdentityLookupIsStillReported(t *testing.T) {
+	pub := &memPublisher{}
+	lc := &fakeCall{id: "C1", peer: "173907587899617:14@lid"}
+
+	m := call.NewManager(pub, newMemStore(),
+		func(channelID string) call.Identity {
+			return call.Identity{PhoneNumberID: channelID, TenantID: "t1"}
+		},
+		func(string) senderid.Resolver {
+			// The peer gives up while the gateway is still in the store.
+			return hookResolver{during: func() { lc.fireEnd("cancelled") }}
+		},
+		call.Options{TmpDir: t.TempDir(), Now: time.Now},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+
+	caller := &fakeCaller{}
+	m.Attach("chan-a", caller)
+	caller.fireIncoming(lc)
+
+	ended := pub.typed(call.EventEnded)
+	if len(ended) != 1 {
+		t.Fatalf("got %d ended events, want 1 for a call that ended while it was being tracked", len(ended))
+	}
+	if ended[0].Reason != "cancelled" {
+		t.Errorf("reason = %q, want cancelled", ended[0].Reason)
+	}
+
+	// And it must not be left behind in the registry, where no command could
+	// reach it and nothing would ever clean it up.
+	if _, ok := m.Get("chan-a", "C1"); ok {
+		t.Error("the call is still registered after it ended")
+	}
+}
+
+// The arrival has to reach the backend before the end does: a chat row that
+// does not exist yet cannot be updated to say the call is over.
+func TestAnEarlyEndIsReportedAfterTheCallsArrival(t *testing.T) {
+	pub := &memPublisher{}
+	lc := &fakeCall{id: "C1", peer: "173907587899617:14@lid"}
+
+	m := call.NewManager(pub, newMemStore(),
+		func(channelID string) call.Identity {
+			return call.Identity{PhoneNumberID: channelID, TenantID: "t1"}
+		},
+		func(string) senderid.Resolver {
+			return hookResolver{during: func() { lc.fireEnd("cancelled") }}
+		},
+		call.Options{TmpDir: t.TempDir(), Now: time.Now},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+
+	caller := &fakeCaller{}
+	m.Attach("chan-a", caller)
+	caller.fireIncoming(lc)
+
+	order := pub.sequence()
+	if len(order) != 3 ||
+		order[0] != "inbound" || order[1] != call.EventIncoming || order[2] != call.EventEnded {
+		t.Errorf("publish order = %v, want [inbound incoming ended]", order)
+	}
+}

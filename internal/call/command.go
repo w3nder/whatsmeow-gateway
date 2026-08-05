@@ -1,11 +1,9 @@
 package call
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"strconv"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
@@ -140,6 +138,11 @@ func (m *Manager) trackOutbound(cmd amqp.GatewayCallCommand, lc LiveCall) {
 	m.publish(evt)
 
 	m.ackCommand(cmd)
+
+	// A call rejected the instant it was placed can end before Track finished
+	// wiring its callbacks; that end is reported here, after ringing, rather
+	// than lost.
+	m.flushEarlyEnd(t)
 }
 
 // recordFor resolves whether a call records: the command may turn it off, but
@@ -210,7 +213,7 @@ func (m *Manager) dispatchLive(ctx context.Context, cmd amqp.GatewayCallCommand,
 	case "participant.deny":
 		err = lc.DenyParticipant(ctx, cmd.Participant)
 	case "play":
-		err = m.play(ctx, lc, cmd, fetch)
+		err = m.play(ctx, tracked, cmd, fetch)
 	case "video.play":
 		err = m.playVideo(ctx, tracked, cmd, fetch)
 	default:
@@ -282,7 +285,18 @@ func (m *Manager) failCommand(cmd amqp.GatewayCallCommand, code, reason string) 
 
 // play streams audio from the command's media URL into the call. The bytes are
 // s16le mono 16 kHz PCM.
-func (m *Manager) play(ctx context.Context, lc LiveCall, cmd amqp.GatewayCallCommand, fetch MediaFetcher) error {
+//
+// It queues the audio on the call's own outbound source rather than calling
+// Play again. Play is not additive in the calling library -- each call
+// subscribes a fresh player and drops the previous one without stopping it --
+// so a second Play would silently orphan an attached operator's microphone for
+// the rest of the call. The announcement takes the floor while it lasts and the
+// operator's microphone resumes when it ends; see outbound.go.
+//
+// Success here means the audio was queued, not that it has been heard: the
+// send loop drains it over the following seconds, and nothing downstream
+// reports what the peer made of it.
+func (m *Manager) play(ctx context.Context, t *Tracked, cmd amqp.GatewayCallCommand, fetch MediaFetcher) error {
 	if cmd.MediaURL == "" {
 		return fetchError{fmt.Errorf("call: play requires a mediaUrl")}
 	}
@@ -293,5 +307,5 @@ func (m *Manager) play(ctx context.Context, lc LiveCall, cmd amqp.GatewayCallCom
 	if len(data) == 0 {
 		return fetchError{fmt.Errorf("call: play media %s is empty", cmd.MediaURL)}
 	}
-	return lc.Play(io.NopCloser(bytes.NewReader(data)))
+	return t.outbound.playAnnouncement(data)
 }

@@ -11,8 +11,13 @@ import (
 // VoIP stack -- relay sockets, SRTP keys, a running media loop -- and cannot be
 // constructed in a test. Everything in this package programs against these
 // interfaces instead, so the whole command and event surface is exercised
-// without a real call, and exactly one file (internal/session/caller.go) knows
-// the library's concrete types.
+// without a real call, and exactly one production file
+// (internal/session/caller.go) knows the library's concrete types.
+//
+// One test file breaks that on purpose: outbound_test.go reads the call's
+// outbound audio through the library's own AudioSource, because the one thing
+// a fake cannot prove is that the source never parks the library's synchronous
+// send loop.
 
 // GroupOptions controls a group call's media and its optional chat binding.
 type GroupOptions struct {
@@ -85,7 +90,13 @@ type LiveCall interface {
 	AdmitParticipant(ctx context.Context, user string) error
 	DenyParticipant(ctx context.Context, user string) error
 
-	// Play streams s16le mono 16 kHz PCM to the peer.
+	// Play subscribes src as the call's outbound audio, as s16le mono 16 kHz
+	// PCM. It is called exactly once per call, by Manager.Track, and the
+	// source it is given lasts the whole call: the underlying library replaces
+	// its player on every Play and drops the previous one without stopping it,
+	// so a second caller would silently orphan the first. src is read
+	// synchronously by the library's transmit loop, once per frame interval,
+	// and must never block -- see outbound.go.
 	Play(src io.ReadCloser) error
 	// Receive attaches a sink for the peer's decoded audio frames.
 	Receive(sink func(frame []float32))

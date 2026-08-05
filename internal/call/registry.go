@@ -29,13 +29,31 @@ type Tracked struct {
 	// Recorder is nil when recording is off for this call.
 	Recorder *Recorder
 
-	// streamMu guards Stream, which an operator can attach or detach at any
+	// earlyEnd carries an end reason that arrived while Track was still wiring
+	// the call up, for Manager.flushEarlyEnd to report once the call's arrival
+	// has been published. It is written once, by Track, before anything else
+	// can reach this Tracked, and only read afterwards.
+	earlyEnd *string
+
+	// outbound is everything this call transmits to the peer: the operator's
+	// microphone and the play command's announcements, merged behind one
+	// non-blocking source that Manager.Track hands to Play exactly once. It
+	// outlives every attach and detach, because the calling library's send
+	// loop reads it for the whole life of the call.
+	outbound *outboundAudio
+
+	// streamMu guards Stream and finished, which an operator can change at any
 	// point in the call's life, concurrently with the media goroutine reading
-	// it on every frame.
+	// Stream on every frame.
 	streamMu sync.Mutex
 	// Stream is nil until an operator attaches; AttachStream and detach are
 	// the only writers.
 	Stream *Stream
+	// finished marks the call as torn down. It closes the window between an
+	// attach checking the registry and storing its stream: without it, a call
+	// that ends inside that window leaves a stream nobody owns and nobody
+	// closes, and an operator socket that never sees the end of the call.
+	finished bool
 
 	StartedAt time.Time
 	// AnsweredAt is zero until media starts. Talk time is measured from here,
@@ -58,36 +76,48 @@ func (t *Tracked) currentStream() *Stream {
 	return t.Stream
 }
 
-// setStream attaches s, returning whatever stream was attached before it so
-// the caller can close it.
-func (t *Tracked) setStream(s *Stream) *Stream {
+// setStream attaches s, returning whatever stream was attached before it (so
+// the caller can close it) and whether the attach happened at all. It refuses
+// once the call has been finished: teardown has already run and would never
+// come back for this stream, so storing it would strand the operator on a
+// socket that never ends.
+func (t *Tracked) setStream(s *Stream) (old *Stream, ok bool) {
 	t.streamMu.Lock()
-	old := t.Stream
+	defer t.streamMu.Unlock()
+	if t.finished {
+		return nil, false
+	}
+	old = t.Stream
 	t.Stream = s
-	t.streamMu.Unlock()
-	return old
+	return old, true
 }
 
-// takeStream removes and returns whatever stream is attached, or nil. Used
-// when the call itself ends: whoever is parked on Audio()/Video() must see
-// the channels close rather than hang forever on a call that is gone.
-func (t *Tracked) takeStream() *Stream {
+// finishStream removes and returns whatever stream is attached, or nil, and
+// closes the call to any further attach. Used when the call itself ends:
+// whoever is parked on Audio()/Video() must see the channels close rather than
+// hang forever on a call that is gone, and an attach still in flight must be
+// refused rather than land on a call that is already torn down.
+func (t *Tracked) finishStream() *Stream {
 	t.streamMu.Lock()
 	s := t.Stream
 	t.Stream = nil
+	t.finished = true
 	t.streamMu.Unlock()
 	return s
 }
 
 // clearStream detaches s, but only if it is still the attached stream: a
 // stale detach (from a stream that AttachStream already replaced) must not
-// clear the one that replaced it.
-func (t *Tracked) clearStream(s *Stream) {
+// clear the one that replaced it. It reports whether it actually detached, so
+// the caller can tell an operator really leaving from a stale defer.
+func (t *Tracked) clearStream(s *Stream) bool {
 	t.streamMu.Lock()
-	if t.Stream == s {
-		t.Stream = nil
+	defer t.streamMu.Unlock()
+	if t.Stream != s {
+		return false
 	}
-	t.streamMu.Unlock()
+	t.Stream = nil
+	return true
 }
 
 // Registry holds the live calls of every channel on this instance.

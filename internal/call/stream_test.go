@@ -88,10 +88,10 @@ func TestStreamWorksWithRecordingDisabled(t *testing.T) {
 	}
 }
 
-// WriteAudio must be verified end to end: newStream calls lc.Play at
-// construction, so asserting only that "play" was recorded would pass even
-// if WriteAudio silently dropped every frame. Reading the bytes back off the
-// pipe is what actually exercises the write path.
+// WriteAudio must be verified end to end: Manager.Track subscribes the call's
+// outbound source before any operator exists, so asserting only that Play
+// happened would pass even if WriteAudio silently dropped every frame. Reading
+// the bytes back off that source is what actually exercises the write path.
 func TestOperatorAudioReachesTheCall(t *testing.T) {
 	m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
 	caller := &fakeCaller{}
@@ -108,38 +108,65 @@ func TestOperatorAudioReachesTheCall(t *testing.T) {
 		t.Fatalf("WriteAudio: %v", err)
 	}
 
-	// newStream calls Play from a goroutine of its own, so it may not have
-	// run yet; poll rather than assume it already has.
-	var src io.ReadCloser
-	deadline := time.Now().Add(time.Second)
-	for src == nil && time.Now().Before(deadline) {
-		src = lc.playedSrc()
-		if src == nil {
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	src := lc.playedSrc()
 	if src == nil {
-		t.Fatal("Play was never called")
+		t.Fatal("Track did not subscribe the call's outbound audio")
 	}
 
+	// WriteAudio queues synchronously and the source never blocks, so the
+	// bytes are readable the moment it returns -- no polling, no goroutine.
 	got := make([]byte, len(want))
-	readDone := make(chan error, 1)
-	go func() {
-		_, err := io.ReadFull(src, got)
-		readDone <- err
-	}()
-
-	select {
-	case err := <-readDone:
-		if err != nil {
-			t.Fatalf("read operator audio: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out reading the bytes WriteAudio queued")
+	if _, err := io.ReadFull(src, got); err != nil {
+		t.Fatalf("read operator audio: %v", err)
 	}
-
 	if string(got) != string(want) {
 		t.Errorf("got = %v, want %v", got, want)
+	}
+}
+
+// I3: an operator clicking "listen" the instant the peer hangs up used to slip
+// a stream onto a call that teardown had already passed. Nothing ever closed
+// it, so the operator's socket waited forever for an end frame that only a
+// closed Audio() produces, pinning two goroutines and a websocket fd until the
+// browser gave up on its own.
+//
+// The deterministic half of this lives in registry_internal_test.go, where the
+// interleaving can be written out by hand; here the two really race, and the
+// invariant is what matters: every stream AttachStream hands back is closed by
+// somebody, no matter which side won.
+func TestAttachRacingTeardownNeverStrandsAStream(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
+		caller := &fakeCaller{}
+		m.Attach("chan-a", caller)
+
+		lc := &fakeCall{id: "C1"}
+		caller.fireIncoming(lc)
+
+		attached := make(chan *call.Stream, 1)
+		go func() {
+			stream, _, ok := m.AttachStream("chan-a", "C1")
+			if !ok {
+				attached <- nil
+				return
+			}
+			attached <- stream
+		}()
+		lc.fireEnd("hangup")
+
+		stream := <-attached
+		if stream == nil {
+			continue
+		}
+		select {
+		case _, open := <-stream.Audio():
+			if open {
+				t.Fatal("the attached stream delivered a frame on an ended call")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("AttachStream handed back a stream on an ended call and nothing ever closed it: " +
+				"the operator would wait forever for the end frame")
+		}
 	}
 }
 

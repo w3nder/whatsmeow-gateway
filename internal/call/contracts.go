@@ -1,12 +1,16 @@
 // Package call turns the WhatsApp calling stack into gateway commands and events.
 //
-// The gateway does not carry live call media to a human: it signals and records.
 // A call's audio and video are captured to S3 and delivered by key on a
-// recording event, exactly the way inbound message media already is, and
-// every other lifecycle transition is published as an event for the backend
-// to act on. The recording event follows the ended event rather than riding
-// on it: the upload is a by-product of the call, not a gate on reporting that
-// the call is over.
+// recording event, exactly the way inbound message media already is, and every
+// lifecycle transition is published as an event for the backend to act on. The
+// recording event follows the ended event rather than riding on it: the upload
+// is a by-product of the call, not a gate on reporting that the call is over.
+//
+// Media never crosses the broker, but it does reach a human. An operator can
+// attach to a live call over the authenticated websocket in internal/media and
+// both hear the peer and speak back; Stream is that path's end of it, and
+// outbound.go is the single source everything the gateway transmits goes
+// through. See docs/call-contract.md for the wire format.
 package call
 
 // Phase is a call's lifecycle phase, mirroring the calling library's own phases.

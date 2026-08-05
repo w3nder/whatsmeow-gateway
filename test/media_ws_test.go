@@ -1,6 +1,7 @@
 package test
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"io"
@@ -230,28 +231,30 @@ func TestMediaSocketFeedsOperatorAudioIntoTheCall(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 
-	waitFor(t, 5*time.Second, "the operator's audio to reach Play", func() bool {
-		return lc.playedSrc() != nil
-	})
-
-	got := make([]byte, len(sent))
-	readDone := make(chan error, 1)
-	go func() {
-		_, err := io.ReadFull(lc.playedSrc(), got)
-		readDone <- err
-	}()
-
-	select {
-	case err := <-readDone:
-		if err != nil {
-			t.Fatalf("read back operator audio: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out reading back the operator's audio from Play's source")
+	src := lc.playedSrc()
+	if src == nil {
+		t.Fatal("the call has no outbound audio source")
 	}
 
-	if string(got) != string(sent) {
-		t.Errorf("Play read %x, want %x", got, sent)
+	// The source never blocks -- that is the whole point of it, since the
+	// calling library's send loop reads it synchronously -- so a read that
+	// beats the websocket message simply comes back as silence. Poll for the
+	// operator's bytes rather than treating the first read as authoritative.
+	var got []byte
+	waitFor(t, 5*time.Second, "the operator's audio to reach the call's outbound source", func() bool {
+		frame := make([]byte, len(sent))
+		if _, err := io.ReadFull(src, frame); err != nil {
+			t.Fatalf("read back operator audio: %v", err)
+		}
+		if bytes.Equal(frame, sent) {
+			got = frame
+			return true
+		}
+		return false
+	})
+
+	if !bytes.Equal(got, sent) {
+		t.Errorf("the call's outbound audio = %x, want %x", got, sent)
 	}
 }
 

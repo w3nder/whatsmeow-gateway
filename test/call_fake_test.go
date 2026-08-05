@@ -113,8 +113,8 @@ func (f *fakeLiveCall) fireEnd(reason string) {
 }
 
 // playedSrc returns the reader from the most recent Play call, or nil if Play
-// was never called. Lets a test read back what was actually written into the
-// pipe, rather than only observing that Play was wired up.
+// was never called. Lets a test read back what the operator actually wrote,
+// rather than only observing that Play was wired up.
 func (f *fakeLiveCall) playedSrc() io.ReadCloser {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -150,11 +150,15 @@ func (f *fakeLiveCall) SendReaction(string) error             { return f.record(
 func (f *fakeLiveCall) SetHandRaised(bool) error              { return f.record("hand.raise") }
 func (f *fakeLiveCall) StartScreenShare(*uint32) error        { return f.record("screenshare.start") }
 func (f *fakeLiveCall) StopScreenShare() error                { return f.record("screenshare.stop") }
+
+// Play records the source it was handed, and deliberately not an action: the
+// gateway subscribes a call's outbound audio at Track time, so counting it as
+// an action would show up in every assertion about what a command did.
 func (f *fakeLiveCall) Play(src io.ReadCloser) error {
 	f.mu.Lock()
 	f.played = append(f.played, src)
 	f.mu.Unlock()
-	return f.record("play")
+	return nil
 }
 
 func (f *fakeLiveCall) AddParticipant(context.Context, string) error {

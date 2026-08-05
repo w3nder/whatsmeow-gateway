@@ -1,8 +1,10 @@
 package call_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -456,6 +458,10 @@ func TestDispatchDialHonoursRecordFalse(t *testing.T) {
 	}
 }
 
+// The fetched bytes have to actually reach the call's outbound audio.
+// Asserting that Play was called proves nothing: Track subscribes the call's
+// source before any command runs, so a play that queued nothing at all would
+// still look identical from the outside.
 func TestDispatchPlayFetchesAndStreamsAudio(t *testing.T) {
 	pub := &memPublisher{}
 	m := newTestManager(t, pub, newMemStore(), time.Now)
@@ -464,16 +470,31 @@ func TestDispatchPlayFetchesAndStreamsAudio(t *testing.T) {
 	lc := &fakeCall{id: "C1"}
 	caller.fireIncoming(lc)
 
-	fetch := func(context.Context, string) ([]byte, error) { return []byte{0x01, 0x02, 0x03, 0x04}, nil }
+	want := []byte{0x01, 0x02, 0x03, 0x04}
+	fetch := func(context.Context, string) ([]byte, error) { return want, nil }
 	if err := m.Dispatch(context.Background(), caller, amqp.GatewayCallCommand{
 		ChannelID: "chan-a", CallID: "C1", CommandID: "cmd-1",
 		Action: "play", MediaURL: "https://example.test/hello.pcm",
 	}, fetch); err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
-	actions := lc.recordedActions()
-	if len(actions) != 1 || actions[0] != "play" {
-		t.Errorf("actions = %v, want [play]", actions)
+
+	src := lc.playedSrc()
+	if src == nil {
+		t.Fatal("the call has no outbound audio source")
+	}
+	got := make([]byte, len(want))
+	if _, err := io.ReadFull(src, got); err != nil {
+		t.Fatalf("read the announcement back: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("outbound audio = %x, want the fetched announcement %x", got, want)
+	}
+
+	// One subscribe for the whole call: a second Play would replace the
+	// library's player and orphan an attached operator's microphone.
+	if count := lc.playCount(); count != 1 {
+		t.Errorf("Play was called %d times, want 1", count)
 	}
 }
 
