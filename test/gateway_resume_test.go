@@ -303,7 +303,7 @@ func TestGatewayBootSkipsStaleDeviceRowAndResumesValidChannel(t *testing.T) {
 	}
 	t.Cleanup(registryStore.Close)
 
-	waLogger, _ := logging.New()
+	waLogger, waSlogger := logging.New()
 	sessionContainer, err := store.Open(context.Background(), dsn, waLogger)
 	if err != nil {
 		t.Fatalf("store.Open failed: %v", err)
@@ -340,7 +340,7 @@ func TestGatewayBootSkipsStaleDeviceRowAndResumesValidChannel(t *testing.T) {
 	const shardCount = 4
 	ownershipStore := ownership.NewStore(redisClient, shardCount)
 
-	realFactory := gateway.NewWAClientFactory(sessionContainer, waLogger)
+	realFactory := gateway.NewWAClientFactory(sessionContainer, waLogger, waSlogger)
 	fake := newFakeWAClient()
 
 	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {

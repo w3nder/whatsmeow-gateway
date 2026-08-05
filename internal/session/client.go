@@ -2,13 +2,18 @@ package session
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
+	"github.com/purpshell/meowcaller"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
+
+	"github.com/w3nder/whatsmeow-gateway/internal/call"
+	"github.com/w3nder/whatsmeow-gateway/internal/logging"
 )
 
 // MaxAutoReconnectDelay caps the gap between reconnect attempts. whatsmeow sleeps
@@ -34,17 +39,29 @@ type WAClient interface {
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
 	PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error)
 	AddEventHandler(handler func(any)) uint32
+	Calls() call.Caller
 	Disconnect()
 }
 
 type waClient struct {
 	client *whatsmeow.Client
+	caller call.Caller
 }
 
-func NewWAClient(device *store.Device, log waLog.Logger) WAClient {
+func NewWAClient(channelID string, device *store.Device, log waLog.Logger, slogger *slog.Logger) WAClient {
 	client := whatsmeow.NewClient(device, log)
 	ConfigureAutoReconnect(client)
-	return &waClient{client: client}
+
+	// The calling client installs the low-level <call>/<ack> interception, so it
+	// has to exist before the receive loop starts -- that is, before Connect.
+	//
+	// meowcaller defaults to a no-op logger, which would leave it (including its own
+	// startup failures) completely silent; bridge its zerolog output into the
+	// gateway's slog so a dead calling stack is visible instead of indistinguishable
+	// from no call ever arriving.
+	caller := newCallerAdapter(meowcaller.NewClient(client, meowcaller.WithLogger(logging.NewCallLogger(slogger, channelID))))
+
+	return &waClient{client: client, caller: caller}
 }
 
 // ConfigureAutoReconnect turns on whatsmeow's socket recovery for a paired device.
@@ -123,6 +140,10 @@ func (w *waClient) PNForLID(ctx context.Context, lid types.JID) (types.JID, bool
 
 func (w *waClient) AddEventHandler(handler func(any)) uint32 {
 	return w.client.AddEventHandler(handler)
+}
+
+func (w *waClient) Calls() call.Caller {
+	return w.caller
 }
 
 func (w *waClient) Disconnect() {

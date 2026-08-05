@@ -18,10 +18,12 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
+	"github.com/w3nder/whatsmeow-gateway/internal/call"
 	"github.com/w3nder/whatsmeow-gateway/internal/dedupe"
 	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
 	"github.com/w3nder/whatsmeow-gateway/internal/ownership"
 	"github.com/w3nder/whatsmeow-gateway/internal/registry"
+	"github.com/w3nder/whatsmeow-gateway/internal/senderid"
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
 	"github.com/w3nder/whatsmeow-gateway/internal/store"
 )
@@ -38,7 +40,18 @@ type Deps struct {
 	ShardLockTTL         time.Duration
 	SendTimeout          time.Duration
 	ShutdownDrainTimeout time.Duration
-	Logger               *slog.Logger
+	// CallOptions configures call tracking. Run builds the call manager itself:
+	// the identity it stamps on every event comes from the channel's tenant and
+	// the channel id itself, neither of which main can reach.
+	CallOptions call.Options
+	// OnCallManager, if set, is handed the call manager as soon as it exists --
+	// before Run blocks in its own serving loop. This is the only way anything
+	// outside this package (namely main's media websocket, which must attach
+	// streams on the very registry the dispatcher populates) ever sees the
+	// manager: Run doesn't return one, since it doesn't return at all until
+	// shutdown.
+	OnCallManager func(*call.Manager)
+	Logger        *slog.Logger
 }
 
 type gateway struct {
@@ -49,6 +62,7 @@ type gateway struct {
 	dedupe               *dedupe.Store
 	registry             *registry.Store
 	mediaStore           mapper.MediaStore
+	calls                *call.Manager
 	instanceID           string
 	shardLockTTL         time.Duration
 	sendTimeout          time.Duration
@@ -79,7 +93,65 @@ func Run(ctx context.Context, deps Deps) error {
 		tenantByChannel:      make(map[string]string),
 	}
 
+	recordingStore, ok := deps.MediaStore.(call.RecordingStore)
+	if !ok {
+		return fmt.Errorf("gateway: media store does not support streaming uploads, which call recording requires")
+	}
+
+	g.calls = call.NewManager(
+		callPublisher{deps.Publisher},
+		recordingStore,
+		g.callIdentity,
+		g.callSenderResolver,
+		deps.CallOptions,
+		deps.Logger,
+	)
+
+	if deps.OnCallManager != nil {
+		deps.OnCallManager(g.calls)
+	}
+
 	return g.run(ctx)
+}
+
+// callPublisher adapts the amqp publisher to call.Publisher. The amqp package
+// takes `any` for every event, as it does for inbound and status, so it stays
+// unaware of the call package.
+type callPublisher struct {
+	publisher *amqp.Publisher
+}
+
+func (c callPublisher) PublishCall(ctx context.Context, evt call.Event) error {
+	return c.publisher.PublishCall(ctx, evt)
+}
+
+func (c callPublisher) PublishInbound(ctx context.Context, evt call.InboundCallEvent) error {
+	return c.publisher.PublishInbound(ctx, evt)
+}
+
+// callIdentity resolves the tenant and phone-number id a call event belongs
+// to. PhoneNumberID is the channel id, not the device's JID: the backend
+// resolves a channel by its phoneNumberId column, and for a gateway channel
+// that column holds the channel's own UUID, not a phone number. The inbound
+// message path (mapper.BuildInbound) stamps the same value for the same
+// reason -- match it here rather than the device JID, or channel lookups on
+// the backend silently fail to find every call event.
+func (g *gateway) callIdentity(channelID string) call.Identity {
+	return call.Identity{TenantID: g.tenantFor(channelID), PhoneNumberID: channelID}
+}
+
+// callSenderResolver hands the call manager the same PNForLID lookup
+// mapper.BuildInbound uses for a message's sender, reached through the
+// channel's own client, so a call's @lid peer resolves to the identical
+// phone number a message from that person would. A channel with no live
+// client -- not yet paired, or gone -- resolves nothing: a call already in
+// flight must not be failed over an identity lookup.
+func (g *gateway) callSenderResolver(channelID string) senderid.Resolver {
+	client, err := g.waClientFor(channelID)
+	if err != nil {
+		return nil
+	}
+	return client
 }
 
 const defaultSendTimeout = 30 * time.Second
@@ -110,6 +182,11 @@ func (g *gateway) run(ctx context.Context) error {
 		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
 		return fmt.Errorf("gateway: start send consumer: %w", err)
 	}
+	if err := g.consumer.StartCall(g.workCtx, g.CallHandler); err != nil {
+		g.closeConsumerForFailedBoot()
+		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
+		return fmt.Errorf("gateway: start call consumer: %w", err)
+	}
 
 	g.logger.Info("gateway started", "instance_id", g.instanceID)
 
@@ -126,6 +203,14 @@ func (g *gateway) run(ctx context.Context) error {
 	}
 
 	g.closeConsumerWithDrainDeadline()
+
+	// End live calls before the sockets go: a call left registered would never
+	// report its end to the backend. AbortAll only starts each recording's
+	// upload -- it runs off the call's teardown path -- so WaitForRecordings
+	// gives it a bounded window to finish rather than letting the process
+	// exit and kill an upload that was nearly done.
+	g.calls.AbortAll(g.workCtx, "gateway_shutdown")
+	g.calls.WaitForRecordings(g.shutdownDrainTimeout)
 
 	g.manager.DisconnectAll()
 
@@ -165,6 +250,8 @@ func (g *gateway) resumeOwnedSessions(ctx context.Context) {
 			g.logger.Error("gateway: resume session", "channel_id", cs.ChannelID, "error", err)
 			continue
 		}
+
+		g.attachCalls(cs.ChannelID)
 	}
 }
 
@@ -208,6 +295,7 @@ func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand) error {
 			if err := g.persistSession(ctx, cmd.ChannelID, cmd.TenantID); err != nil {
 				return fmt.Errorf("gateway: persist session %s: %w", cmd.ChannelID, err)
 			}
+			g.attachCalls(cmd.ChannelID)
 			if err := g.publisher.PublishChannelStatus(ctx, amqp.ChannelStatusEvent{
 				TenantID:  cmd.TenantID,
 				UserID:    cmd.UserID,
@@ -260,6 +348,52 @@ func (g *gateway) publishChannelError(ctx context.Context, tenantID, userID, cha
 	}); err != nil {
 		g.logger.Error("gateway: publish channel.status error", "channel_id", channelID, "error", err)
 	}
+}
+
+// CallHandler runs one call command.
+//
+// It reports a bad command as an event rather than as an error: nacking would
+// requeue it, and a command for a call that does not exist would loop until the
+// DLQ. Only a failure worth retrying comes back as an error.
+func (g *gateway) CallHandler(ctx context.Context, cmd amqp.GatewayCallCommand) error {
+	g.setTenant(cmd.ChannelID, cmd.TenantID)
+
+	g.logger.Info("gateway: call command received",
+		"command_id", cmd.CommandID,
+		"channel_id", cmd.ChannelID,
+		"call_id", cmd.CallID,
+		"action", cmd.Action)
+
+	if err := g.ensureChannelConnected(ctx, cmd.ChannelID); err != nil {
+		return fmt.Errorf("gateway: ensure connected %s: %w", cmd.ChannelID, err)
+	}
+
+	client, err := g.waClientFor(cmd.ChannelID)
+	if err != nil {
+		return fmt.Errorf("gateway: resolve client %s: %w", cmd.ChannelID, err)
+	}
+
+	return g.calls.Dispatch(ctx, client.Calls(), cmd, fetchMediaURL)
+}
+
+// attachCalls subscribes the call manager to a channel's inbound calls. Called
+// once a session is live, from both the pair and the resume paths.
+func (g *gateway) attachCalls(channelID string) {
+	client, err := g.waClientFor(channelID)
+	if err != nil {
+		g.logger.Error("gateway: resolve client to attach calls", "channel_id", channelID, "error", err)
+		return
+	}
+
+	caller := client.Calls()
+	if caller == nil {
+		g.logger.Warn("gateway: channel has no calling client, calls disabled", "channel_id", channelID)
+		return
+	}
+	g.calls.Attach(channelID, caller)
+	// The failure path above already logs; without this, a successful attach is
+	// silent and indistinguishable from attachCalls never having run at all.
+	g.logger.Info("gateway: calling client attached", "channel_id", channelID)
 }
 
 func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) error {
@@ -404,10 +538,18 @@ func (g *gateway) ensureChannelConnected(ctx context.Context, channelID string) 
 	if resumeErr := g.manager.Resume(ctx, channelID, jid); resumeErr != nil {
 		return resumeErr
 	}
+	g.attachCalls(channelID)
 	return g.manager.EnsureConnected(channelID)
 }
 
 func (g *gateway) handleSessionEvent(channelID string, evt any) {
+	// Every event that really kills a channel's calls goes through one place,
+	// so the difference between "the socket blipped" and "this session is
+	// gone" is decided once rather than per case -- see callsAreDead.
+	if reason, dead := callsAreDead(evt); dead {
+		g.calls.AbortChannel(g.workCtx, channelID, reason)
+	}
+
 	switch e := evt.(type) {
 	case *events.Message:
 		g.handleInboundMessage(channelID, e)
@@ -418,15 +560,73 @@ func (g *gateway) handleSessionEvent(channelID string, evt any) {
 		if err := g.registry.Delete(g.workCtx, channelID); err != nil {
 			g.logger.Error("gateway: delete session on logout", "channel_id", channelID, "error", err)
 		}
+	case *events.CallOffer, *events.CallAccept, *events.CallPreAccept, *events.CallTerminate,
+		*events.CallReject, *events.CallOfferNotice, *events.UnknownCallEvent:
+		g.handleCallSignal(channelID, e)
 	default:
 		g.handleConnectionEvent(channelID, evt)
+	}
+}
+
+// handleCallSignal logs whatsmeow's raw call signalling so the gateway is never blind to
+// a call arriving, even when the calling library (meowcaller, subscribed to these same
+// events independently) ignores or mishandles one. This is observability only: nothing
+// here acts on a call, so it cannot change call behaviour.
+func (g *gateway) handleCallSignal(channelID string, evt any) {
+	switch e := evt.(type) {
+	case *events.CallOffer:
+		g.logger.Info("gateway: call offer received", "channel_id", channelID, "call_id", e.CallID, "from", e.From.String())
+	case *events.CallAccept:
+		g.logger.Info("gateway: call accept received", "channel_id", channelID, "call_id", e.CallID, "from", e.From.String())
+	case *events.CallPreAccept:
+		g.logger.Info("gateway: call pre-accept received", "channel_id", channelID, "call_id", e.CallID, "from", e.From.String())
+	case *events.CallTerminate:
+		g.logger.Info("gateway: call terminate received", "channel_id", channelID, "call_id", e.CallID, "from", e.From.String(), "reason", e.Reason)
+	case *events.CallReject:
+		g.logger.Info("gateway: call reject received", "channel_id", channelID, "call_id", e.CallID, "from", e.From.String())
+	case *events.CallOfferNotice:
+		g.logger.Info("gateway: call offer notice received", "channel_id", channelID, "call_id", e.CallID, "from", e.From.String(), "media", e.Media, "type", e.Type)
+	case *events.UnknownCallEvent:
+		g.logger.Info("gateway: unknown call event received", "channel_id", channelID)
+	}
+}
+
+// callsAreDead reports whether a session event means the channel's live calls are
+// genuinely over, and the reason to report them ending with. Ending a call publishes
+// its `ended`, closes the operator's stream and finishes its recording, so getting this
+// wrong in either direction is expensive.
+//
+// events.Disconnected is deliberately absent, and it is the whole reason this decision
+// is written down rather than inlined. whatsmeow raises it on every socket drop -- a
+// missed keepalive, a broker-side reset, a two-second blip -- and then reconnects on its
+// own. A call's media does not ride that socket: it is a separate SRTP relay connection
+// the calling library holds, which nothing tears down when the websocket flaps. Treating
+// Disconnected as fatal truncated the recording and the CDR of calls that were still
+// running, and left the live call behind with no registry entry for a hangup to reach.
+//
+// The four below are the ones whatsmeow does not come back from: a logout, a session
+// taken over by another connection, a refused build, and a connect failure it gives up
+// on rather than retrying.
+func callsAreDead(evt any) (reason string, dead bool) {
+	switch evt.(type) {
+	case *events.LoggedOut:
+		return "logged_out", true
+	case *events.StreamReplaced:
+		return "stream_replaced", true
+	case *events.ClientOutdated:
+		return "client_outdated", true
+	case *events.ConnectFailure:
+		return "connect_failure", true
+	default:
+		return "", false
 	}
 }
 
 // handleConnectionEvent reports socket health. Everything here that is recoverable is
 // already being retried by whatsmeow's auto-reconnect, so the gateway only observes and
 // publishes status; the cases whatsmeow deliberately gives up on are published as errors
-// because they need action outside the gateway (re-pair, unban, upgrade).
+// because they need action outside the gateway (re-pair, unban, upgrade). Whether an
+// event also ends the channel's live calls is decided by callsAreDead, before this runs.
 func (g *gateway) handleConnectionEvent(channelID string, evt any) {
 	switch e := evt.(type) {
 	case *events.Connected:
@@ -533,7 +733,7 @@ func (g *gateway) clearTenant(channelID string) {
 	g.tenantMu.Unlock()
 }
 
-func NewWAClientFactory(container *sqlstore.Container, waLogger waLog.Logger) session.ClientFactory {
+func NewWAClientFactory(container *sqlstore.Container, waLogger waLog.Logger, slogger *slog.Logger) session.ClientFactory {
 	return func(channelID string, jid *types.JID) (session.WAClient, error) {
 		device, err := store.DeviceFor(context.Background(), container, jid)
 		if err != nil {
@@ -542,7 +742,7 @@ func NewWAClientFactory(container *sqlstore.Container, waLogger waLog.Logger) se
 		if device == nil {
 			return nil, fmt.Errorf("gateway: no stored device for channel %s (jid %s)", channelID, jid)
 		}
-		return session.NewWAClient(device, waLogger), nil
+		return session.NewWAClient(channelID, device, waLogger, slogger), nil
 	}
 }
 

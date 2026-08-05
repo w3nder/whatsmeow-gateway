@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 	rabbitmq "github.com/rabbitmq/amqp091-go"
@@ -14,6 +17,7 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
+	"github.com/w3nder/whatsmeow-gateway/internal/call"
 	"github.com/w3nder/whatsmeow-gateway/internal/config"
 	"github.com/w3nder/whatsmeow-gateway/internal/dedupe"
 	"github.com/w3nder/whatsmeow-gateway/internal/gateway"
@@ -24,6 +28,11 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
 	"github.com/w3nder/whatsmeow-gateway/internal/store"
 )
+
+// mediaShutdownTimeout bounds how long the media server gets to close live
+// operator sockets on shutdown. Short on purpose: it rides the same signal as
+// the rest of the gateway, which has its own drain deadline to honour.
+const mediaShutdownTimeout = 5 * time.Second
 
 func main() {
 	_ = godotenv.Load()
@@ -124,7 +133,7 @@ func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *
 		return fmt.Errorf("main: new media store: %w", err)
 	}
 
-	manager := session.NewManager(gateway.NewWAClientFactory(sessionContainer, waLogger))
+	manager := session.NewManager(gateway.NewWAClientFactory(sessionContainer, waLogger, logger))
 
 	return gateway.Run(ctx, gateway.Deps{
 		Consumer:             consumer,
@@ -138,6 +147,46 @@ func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *
 		ShardLockTTL:         cfg.ShardLockTTL,
 		SendTimeout:          cfg.SendTimeout,
 		ShutdownDrainTimeout: cfg.ShutdownDrainTimeout,
-		Logger:               logger,
+		CallOptions: call.Options{
+			TmpDir: cfg.CallTmpDir,
+			Record: cfg.CallRecord,
+		},
+		OnCallManager: func(calls *call.Manager) {
+			runMediaServer(ctx, calls, cfg, logger)
+		},
+		Logger: logger,
 	})
+}
+
+// runMediaServer starts the call-media websocket listener in the background
+// when CALL_MEDIA_ADDR is configured, and ties its shutdown to the same
+// context the rest of the gateway shuts down on. An empty address is a no-op:
+// that is today's behaviour, with no listener at all.
+func runMediaServer(ctx context.Context, calls *call.Manager, cfg config.Config, logger *slog.Logger) {
+	if cfg.CallMediaAddr == "" {
+		return
+	}
+
+	srv := media.NewServer(calls, media.ServerConfig{
+		Addr:           cfg.CallMediaAddr,
+		Secret:         cfg.CallMediaTokenSecret,
+		AllowedOrigins: cfg.CallMediaOrigins,
+	}, logger)
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("media: server failed", "addr", cfg.CallMediaAddr, "error", err)
+		}
+	}()
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mediaShutdownTimeout)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			logger.Error("media: server shutdown", "error", err)
+		}
+	}()
+
+	logger.Info("media: server listening", "addr", cfg.CallMediaAddr)
 }

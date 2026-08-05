@@ -11,6 +11,7 @@ const EventsExchange = "sender.events"
 const (
 	InboundRoutingKey       = "whatsapp.inbound.v1"
 	StatusRoutingKey        = "whatsapp.status.v1"
+	CallRoutingKey          = "whatsapp.call.v1"
 	ChannelQRRoutingKey     = "channel.qr"
 	ChannelStatusRoutingKey = "channel.status"
 )
@@ -21,6 +22,15 @@ const (
 	GatewaySendDLX      = "gateway.send.dlx"
 	GatewaySendDLQ      = "gateway.send.dlq"
 	GatewaySendConsumer = "whatsmeow-gateway.send"
+
+	// Call commands get their own queue rather than sharing gateway.send: a call
+	// is long-lived, and letting one sit in a shared prefetch would stall
+	// message delivery behind it.
+	GatewayCallExchange = "whatsapp.gateway.call.v1"
+	GatewayCallQueue    = "gateway.call"
+	GatewayCallDLX      = "gateway.call.dlx"
+	GatewayCallDLQ      = "gateway.call.dlq"
+	GatewayCallConsumer = "whatsmeow-gateway.call"
 
 	GatewayPairExchange = "whatsapp.gateway.pair.v1"
 	GatewayPairQueue    = "gateway.pair"
