@@ -247,6 +247,9 @@ func TestBuildInboundFromMeKeysToChatContact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildInbound: %v", err)
 	}
+	if out.ProfileName != "" {
+		t.Errorf("ProfileName = %q on a fromMe echo; PushName there is the tenant's own device name, not the contact's", out.ProfileName)
+	}
 	if !out.FromMe {
 		t.Fatalf("expected FromMe=true, got %v", out.FromMe)
 	}

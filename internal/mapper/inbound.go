@@ -280,6 +280,13 @@ func identityJIDs(evt *events.Message) (jid, alt types.JID) {
 	return evt.Info.Sender, evt.Info.SenderAlt
 }
 
+func contactPushName(evt *events.Message) string {
+	if evt.Info.IsFromMe {
+		return ""
+	}
+	return evt.Info.PushName
+}
+
 func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (InboundEvent, error) {
 	dl, s3 := deps.Downloader, deps.Media
 	tenantID := deps.TenantID
@@ -294,7 +301,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		SenderLid:         senderLid,
 		SenderPn:          senderPn,
 		FromMe:            evt.Info.IsFromMe,
-		ProfileName:       evt.Info.PushName,
+		ProfileName:       contactPushName(evt),
 		ProviderMessageID: evt.Info.ID,
 		Timestamp:         strconv.FormatInt(evt.Info.Timestamp.Unix(), 10),
 	}
