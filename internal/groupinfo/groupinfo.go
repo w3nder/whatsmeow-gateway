@@ -14,6 +14,7 @@ const (
 	defaultRetryAfter         = 5 * time.Minute
 	defaultIdleBeforeEviction = defaultTTL
 	evictionThreshold         = 20000
+	lookupTimeout             = 5 * time.Second
 )
 
 type Lookup interface {
@@ -82,6 +83,9 @@ func (c *Cache) Name(ctx context.Context, lookup Lookup, channelID string, jid t
 		return e.name
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, lookupTimeout)
+	defer cancel()
+
 	return c.resolve(ctx, e, lookup, channelID, jid)
 }
 
@@ -132,7 +136,12 @@ func (c *Cache) entryFor(channelID string, jid types.JID) *entry {
 func (c *Cache) evictIdle() {
 	cutoff := c.now().Add(-c.idleBeforeEviction)
 	for key, e := range c.entries {
-		if e.expiresAt.Before(cutoff) {
+		if !e.mu.TryLock() {
+			continue
+		}
+		expired := e.expiresAt.Before(cutoff)
+		e.mu.Unlock()
+		if expired {
 			delete(c.entries, key)
 		}
 	}
