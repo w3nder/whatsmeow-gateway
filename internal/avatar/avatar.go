@@ -23,9 +23,21 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 )
+
+func extensionFor(mimeType string) string {
+	switch mimeType {
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".jpg"
+	}
+}
 
 const (
 	// ttl is how long a known photo is trusted before it is rechecked. A
@@ -203,7 +215,7 @@ func (c *Cache) resolve(ctx context.Context, e *entry, lookup Lookup, channelID,
 		return e.store(e.pic, c.now().Add(retryAfter))
 	}
 
-	key := fmt.Sprintf("profile-pictures/%s/%s/%s", tenantID, jid.User, info.ID)
+	key := fmt.Sprintf("profile-pictures/%s%s", uuid.NewString(), extensionFor(mimeType))
 	if err := c.store.Put(ctx, key, mimeType, data); err != nil {
 		c.log.Warn("avatar: store profile picture",
 			"channel_id", channelID, "jid", jid.String(), "key", key, "error", err)

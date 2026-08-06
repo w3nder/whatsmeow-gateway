@@ -9,11 +9,13 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.106.4
 	github.com/coder/websocket v1.8.15
 	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/joho/godotenv v1.5.1
 	github.com/purpshell/meowcaller v0.0.0-20260726180203-6d9b7b2c1807
 	github.com/rabbitmq/amqp091-go v1.10.0
 	github.com/redis/go-redis/v9 v9.21.0
+	github.com/rs/zerolog v1.35.1
 	github.com/testcontainers/testcontainers-go v0.43.0
 	github.com/testcontainers/testcontainers-go/modules/minio v0.43.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.43.0
@@ -60,7 +62,6 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/hajimehoshi/go-mp3 v0.3.4 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
@@ -92,7 +93,6 @@ require (
 	github.com/pion/transport/v4 v4.0.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
-	github.com/rs/zerolog v1.35.1 // indirect
 	github.com/shirou/gopsutil/v4 v4.26.5 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect

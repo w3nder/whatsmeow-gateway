@@ -2,6 +2,7 @@ package avatar_test
 
 import (
 	"context"
+	"strings"
 	"errors"
 	"io"
 	"log/slog"
@@ -141,9 +142,11 @@ func TestForStoresPhotoUnderTenantAndPictureID(t *testing.T) {
 	if pic == nil {
 		t.Fatal("expected a picture, got nil")
 	}
-	wantKey := "profile-pictures/tenant-1/5511999999999/pic-1"
-	if pic.Key != wantKey {
-		t.Errorf("key = %q, want %q", pic.Key, wantKey)
+	if strings.Contains(pic.Key, tenantID) || strings.Contains(pic.Key, "5511999999999") || strings.Contains(pic.Key, "pic-1") {
+		t.Errorf("key %q leaks tenant, phone or picture id; a public object must not be guessable", pic.Key)
+	}
+	if !strings.HasPrefix(pic.Key, "profile-pictures/") || !strings.HasSuffix(pic.Key, ".jpg") {
+		t.Errorf("key = %q, want profile-pictures/<random>.jpg", pic.Key)
 	}
 	if pic.ID != "pic-1" {
 		t.Errorf("id = %q, want %q", pic.ID, "pic-1")
@@ -156,8 +159,8 @@ func TestForStoresPhotoUnderTenantAndPictureID(t *testing.T) {
 		t.Fatalf("store puts = %d, want 1", store.count())
 	}
 	stored := store.last()
-	if stored.key != wantKey {
-		t.Errorf("stored key = %q, want %q", stored.key, wantKey)
+	if stored.key != pic.Key {
+		t.Errorf("stored key = %q, want the key the cache reported (%q)", stored.key, pic.Key)
 	}
 	if stored.mime != "image/jpeg" {
 		t.Errorf("stored mime = %q, want image/jpeg", stored.mime)
@@ -184,7 +187,7 @@ func TestForAsksAboutThePersonRatherThanTheDeviceThatMessaged(t *testing.T) {
 	}
 	// The key must not vary by device either, or the same photo would be
 	// stored once per phone the contact answers from.
-	if pic == nil || pic.Key != "profile-pictures/tenant-1/5511999999999/pic-1" {
+	if pic == nil || !strings.HasPrefix(pic.Key, "profile-pictures/") {
 		t.Errorf("picture = %+v, want the device-free key", pic)
 	}
 }
@@ -257,12 +260,11 @@ func TestForStoresTheNewPhotoWhenThePictureChanged(t *testing.T) {
 	if store.count() != 2 {
 		t.Fatalf("store puts = %d, want 2", store.count())
 	}
-	wantKey := "profile-pictures/tenant-1/5511999999999/pic-2"
-	if second == nil || second.Key != wantKey {
-		t.Errorf("second key = %+v, want %q", second, wantKey)
+	if second == nil || !strings.HasPrefix(second.Key, "profile-pictures/") {
+		t.Errorf("second key = %+v, want a profile-pictures key", second)
 	}
-	if store.last().key != wantKey {
-		t.Errorf("stored key = %q, want %q", store.last().key, wantKey)
+	if store.last().key != second.Key {
+		t.Errorf("stored key = %q, want the key the cache reported (%q)", store.last().key, second.Key)
 	}
 }
 
