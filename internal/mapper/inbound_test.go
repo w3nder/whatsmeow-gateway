@@ -757,6 +757,22 @@ func TestBuildInboundEmptyMessageIsSkipped(t *testing.T) {
 	}
 }
 
+func TestBuildInboundSkipsBroadcast(t *testing.T) {
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:   types.NewJID("status", types.BroadcastServer),
+				Sender: types.NewJID("5511999998888", types.DefaultUserServer),
+			},
+			ID: "BROADCAST1",
+		},
+		Message: &waE2E.Message{Conversation: proto.String("oi")},
+	}
+	if _, err := mapper.BuildInbound(context.Background(), mapper.InboundDeps{}, evt); !errors.Is(err, mapper.ErrSkip) {
+		t.Fatalf("expected ErrSkip, got %v", err)
+	}
+}
+
 func TestBuildInboundEphemeralWrappedTextIsUnwrapped(t *testing.T) {
 	evt := &events.Message{
 		Info: baseInfo("wamid.ephemeral-text-1", "5511999999999"),

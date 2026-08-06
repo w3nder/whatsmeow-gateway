@@ -288,6 +288,10 @@ func contactPushName(evt *events.Message) string {
 }
 
 func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (InboundEvent, error) {
+	if KindOf(evt.Info.Chat) == ChatIgnored {
+		return InboundEvent{}, ErrSkip
+	}
+
 	dl, s3 := deps.Downloader, deps.Media
 	tenantID := deps.TenantID
 
