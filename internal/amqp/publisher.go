@@ -51,6 +51,10 @@ func (p *Publisher) PublishGroupInbound(ctx context.Context, evt any) error {
 	return p.publish(ctx, GroupInboundRoutingKey, evt)
 }
 
+func (p *Publisher) PublishGroupStatus(ctx context.Context, evt any) error {
+	return p.publish(ctx, GroupStatusRoutingKey, evt)
+}
+
 func (p *Publisher) PublishCall(ctx context.Context, evt any) error {
 	return p.publish(ctx, CallRoutingKey, evt)
 }

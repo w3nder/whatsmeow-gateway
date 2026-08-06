@@ -803,6 +803,13 @@ func (g *gateway) handleInboundMessage(channelID string, evt *events.Message) {
 }
 
 func (g *gateway) handleReceipt(channelID string, evt *events.Receipt) {
+	if group := mapper.BuildGroupStatus(evt); group != nil {
+		if err := g.publisher.PublishGroupStatus(g.workCtx, group); err != nil {
+			g.logger.Error("gateway: publish group status event", "channel_id", channelID, "error", err)
+		}
+		return
+	}
+
 	for _, status := range mapper.BuildStatus(evt) {
 		if err := g.publisher.PublishStatus(g.workCtx, status); err != nil {
 			g.logger.Error("gateway: publish status event", "channel_id", channelID, "error", err)
