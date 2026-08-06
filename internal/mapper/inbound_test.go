@@ -820,6 +820,18 @@ func TestBuildInboundNamesTheGroupAsTheContact(t *testing.T) {
 	if out.From != "120363000000000000@g.us" {
 		t.Fatalf("from = %q, want the group", out.From)
 	}
+	if out.SenderLid != "" {
+		t.Fatalf("SenderLid = %q, want empty on a group event", out.SenderLid)
+	}
+	if out.SenderPn != "" {
+		t.Fatalf("SenderPn = %q, want empty on a group event", out.SenderPn)
+	}
+	if out.ProfileName != "" {
+		t.Fatalf("ProfileName = %q, want empty on a group event", out.ProfileName)
+	}
+	if out.Group.Participant == nil {
+		t.Fatal("expected a participant")
+	}
 	if out.Group.Participant.JID != "5511888887777@s.whatsapp.net" {
 		t.Fatalf("participant jid = %q", out.Group.Participant.JID)
 	}
@@ -836,8 +848,8 @@ func TestBuildInboundLeavesTheParticipantEmptyOnOurOwnGroupMessage(t *testing.T)
 	if out.Group == nil {
 		t.Fatal("expected a group block")
 	}
-	if out.Group.Participant.JID != "" {
-		t.Fatalf("participant jid = %q, want empty on a message we sent", out.Group.Participant.JID)
+	if out.Group.Participant != nil {
+		t.Fatalf("participant = %+v, want nil on a message we sent", out.Group.Participant)
 	}
 }
 

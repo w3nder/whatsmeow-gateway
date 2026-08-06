@@ -226,10 +226,10 @@ type InboundGroupParticipant struct {
 }
 
 type InboundGroup struct {
-	JID            string                  `json:"jid"`
-	Name           string                  `json:"name,omitempty"`
-	ProfilePicture *avatar.Picture         `json:"profilePicture,omitempty"`
-	Participant    InboundGroupParticipant `json:"participant"`
+	JID            string                   `json:"jid"`
+	Name           string                   `json:"name,omitempty"`
+	ProfilePicture *avatar.Picture          `json:"profilePicture,omitempty"`
+	Participant    *InboundGroupParticipant `json:"participant,omitempty"`
 }
 
 type InboundEvent struct {
@@ -306,22 +306,23 @@ func applyGroup(ctx context.Context, deps InboundDeps, evt *events.Message, out 
 	}
 
 	if !evt.Info.IsFromMe {
-		lid, pn := senderid.Resolve(ctx, deps.Resolver, evt.Info.Sender, evt.Info.SenderAlt)
-		group.Participant = InboundGroupParticipant{
+		participant := InboundGroupParticipant{
 			JID:  evt.Info.Sender.ToNonAD().String(),
-			Lid:  lid,
-			Pn:   pn,
+			Lid:  out.SenderLid,
+			Pn:   out.SenderPn,
 			Name: evt.Info.PushName,
 		}
 		if deps.Avatars != nil {
-			group.Participant.ProfilePicture = deps.Avatars.For(ctx, evt.Info.Sender)
+			participant.ProfilePicture = deps.Avatars.For(ctx, evt.Info.Sender)
 		}
+		group.Participant = &participant
 	}
 
 	out.Group = &group
 	out.From = group.JID
 	out.SenderLid = ""
 	out.SenderPn = ""
+	out.ProfileName = ""
 }
 
 // identityJIDs picks the pair naming the person an event is with: the sender
