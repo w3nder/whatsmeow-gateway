@@ -38,6 +38,7 @@ type WAClient interface {
 	Upload(ctx context.Context, data []byte, mt whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
 	PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error)
+	GetProfilePictureInfo(ctx context.Context, jid types.JID, params *whatsmeow.GetProfilePictureParams) (*types.ProfilePictureInfo, error)
 	AddEventHandler(handler func(any)) uint32
 	Calls() call.Caller
 	Disconnect()
@@ -136,6 +137,10 @@ func (w *waClient) PNForLID(ctx context.Context, lid types.JID) (types.JID, bool
 		return types.JID{}, false, err
 	}
 	return pn, !pn.IsEmpty(), nil
+}
+
+func (w *waClient) GetProfilePictureInfo(ctx context.Context, jid types.JID, params *whatsmeow.GetProfilePictureParams) (*types.ProfilePictureInfo, error) {
+	return w.client.GetProfilePictureInfo(ctx, jid, params)
 }
 
 func (w *waClient) AddEventHandler(handler func(any)) uint32 {

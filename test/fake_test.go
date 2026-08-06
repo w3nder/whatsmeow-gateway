@@ -155,6 +155,13 @@ func (f *fakeWAClient) PNForLID(ctx context.Context, lid types.JID) (types.JID, 
 	return types.JID{}, false, nil
 }
 
+// GetProfilePictureInfo answers as a contact with no photo does. These
+// end-to-end tests assert on the events a channel publishes, and a profile
+// photo is decoration on those events rather than part of their shape.
+func (f *fakeWAClient) GetProfilePictureInfo(ctx context.Context, jid types.JID, params *whatsmeow.GetProfilePictureParams) (*types.ProfilePictureInfo, error) {
+	return nil, whatsmeow.ErrProfilePictureNotSet
+}
+
 func (f *fakeWAClient) AddEventHandler(handler func(any)) uint32 {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -19,6 +19,7 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/encoding/protojson"
 
+	"github.com/w3nder/whatsmeow-gateway/internal/avatar"
 	"github.com/w3nder/whatsmeow-gateway/internal/senderid"
 )
 
@@ -51,6 +52,28 @@ type PNResolver = senderid.Resolver
 
 type MediaStore interface {
 	Put(ctx context.Context, key, mime string, data []byte) error
+}
+
+// AvatarSource resolves the profile photo of the contact an event is with.
+// The caller binds it to a channel and tenant before handing it over, so this
+// package stays out of a lookup that is neither about mapping nor about the
+// message it is mapping. A nil source simply leaves events without photos.
+type AvatarSource interface {
+	For(ctx context.Context, jid types.JID) *avatar.Picture
+}
+
+// InboundDeps is everything BuildInbound reaches for beyond the event itself.
+// It is a struct rather than a parameter list because the list had already
+// grown past the point where a reader could tell the arguments apart at a
+// call site.
+type InboundDeps struct {
+	Downloader Downloader
+	Resolver   PNResolver
+	Media      MediaStore
+	// Avatars is optional: nil publishes events without a profile picture.
+	Avatars   AvatarSource
+	ChannelID string
+	TenantID  string
 }
 
 type InboundText struct {
@@ -208,6 +231,7 @@ type InboundEvent struct {
 	Unsupported       *InboundUnsupported `json:"unsupported,omitempty"`
 	Target            *InboundTarget      `json:"target,omitempty"`
 	RichContent       *InboundRichContent `json:"richContent,omitempty"`
+	ProfilePicture    *avatar.Picture     `json:"profilePicture,omitempty"`
 }
 
 type StatusError struct {
@@ -223,16 +247,49 @@ type StatusEvent struct {
 	Error             *StatusError `json:"error,omitempty"`
 }
 
-func BuildInbound(ctx context.Context, dl Downloader, resolver PNResolver, s3 MediaStore, channelID, tenantID string, evt *events.Message) (InboundEvent, error) {
-	identityJID, identityAlt := evt.Info.Sender, evt.Info.SenderAlt
-	if evt.Info.IsFromMe {
-		identityJID, identityAlt = evt.Info.Chat, evt.Info.RecipientAlt
+// BuildInbound maps a whatsmeow message into the event the backend consumes.
+//
+// The contact's profile photo is resolved last, and only for an event that is
+// actually going out: a message this mapper skips publishes nothing, so
+// paying an IQ round trip for its photo would be pure waste on the protocol
+// messages that arrive constantly. A message we sent resolves no photo at
+// all -- the contact it is with already has one from their own messages, and
+// our own photo is not what the event is about.
+func BuildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (InboundEvent, error) {
+	out, err := buildInbound(ctx, deps, evt)
+	if err != nil {
+		return InboundEvent{}, err
 	}
-	senderLid, senderPn := senderid.Resolve(ctx, resolver, identityJID, identityAlt)
+
+	if deps.Avatars != nil && !evt.Info.IsFromMe {
+		jid, _ := identityJIDs(evt)
+		out.ProfilePicture = deps.Avatars.For(ctx, jid)
+	}
+
+	return out, nil
+}
+
+// identityJIDs picks the pair naming the person an event is with: the sender
+// and their alternate identity, or the chat and the recipient's when the
+// message is one of ours. Every identity this package stamps -- sender ids
+// and profile photo alike -- starts from this one choice.
+func identityJIDs(evt *events.Message) (jid, alt types.JID) {
+	if evt.Info.IsFromMe {
+		return evt.Info.Chat, evt.Info.RecipientAlt
+	}
+	return evt.Info.Sender, evt.Info.SenderAlt
+}
+
+func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (InboundEvent, error) {
+	dl, s3 := deps.Downloader, deps.Media
+	tenantID := deps.TenantID
+
+	identityJID, identityAlt := identityJIDs(evt)
+	senderLid, senderPn := senderid.Resolve(ctx, deps.Resolver, identityJID, identityAlt)
 	from := senderid.From(senderLid, senderPn)
 
 	out := InboundEvent{
-		PhoneNumberID:     channelID,
+		PhoneNumberID:     deps.ChannelID,
 		From:              from,
 		SenderLid:         senderLid,
 		SenderPn:          senderPn,

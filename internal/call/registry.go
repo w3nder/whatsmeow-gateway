@@ -3,6 +3,8 @@ package call
 import (
 	"sync"
 	"time"
+
+	"github.com/w3nder/whatsmeow-gateway/internal/avatar"
 )
 
 // Tracked is one call the gateway is following, with everything needed to
@@ -22,7 +24,12 @@ type Tracked struct {
 	// of a single call.
 	SenderLid string
 	SenderPn  string
-	IsVideo   bool
+	// ProfilePicture is the peer's photo, resolved alongside their identity
+	// and for the same reason: once per call rather than once per event. Nil
+	// on a call we placed, on a peer with no reachable photo, and whenever
+	// the lookup did not work out.
+	ProfilePicture *avatar.Picture
+	IsVideo        bool
 
 	// Live is the underlying call, used by the command dispatcher.
 	Live LiveCall

@@ -102,6 +102,7 @@ func newTestManager(t *testing.T, pub call.Publisher, store call.RecordingStore,
 			return call.Identity{PhoneNumberID: channelID, TenantID: "t1"}
 		},
 		nil,
+		nil,
 		call.Options{TmpDir: t.TempDir(), Record: true, Now: now},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
@@ -480,6 +481,7 @@ func TestManagerRecordingCanBeDisabled(t *testing.T) {
 	m := call.NewManager(pub, store,
 		func(string) call.Identity { return call.Identity{TenantID: "t1"} },
 		nil,
+		nil,
 		call.Options{TmpDir: t.TempDir(), Record: false, Now: time.Now},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
@@ -583,6 +585,7 @@ func TestManagerAttachToleratesNilCaller(t *testing.T) {
 func TestManagerSurvivesPanickingPublish(t *testing.T) {
 	m := call.NewManager(panicPublisher{}, newMemStore(),
 		func(string) call.Identity { return call.Identity{} },
+		nil,
 		nil,
 		call.Options{TmpDir: t.TempDir(), Record: true, Now: time.Now},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),

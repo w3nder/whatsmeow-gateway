@@ -33,6 +33,7 @@ func newIdentityTestManager(t *testing.T, pub call.Publisher, resolver senderid.
 			return call.Identity{PhoneNumberID: channelID, TenantID: "t1"}
 		},
 		func(string) senderid.Resolver { return resolver },
+		nil,
 		call.Options{TmpDir: t.TempDir(), Now: time.Now},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
@@ -165,6 +166,7 @@ func TestCallEndingDuringTheIdentityLookupIsStillReported(t *testing.T) {
 			// The peer gives up while the gateway is still in the store.
 			return hookResolver{during: func() { lc.fireEnd("cancelled") }}
 		},
+		nil,
 		call.Options{TmpDir: t.TempDir(), Now: time.Now},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
@@ -201,6 +203,7 @@ func TestAnEarlyEndIsReportedAfterTheCallsArrival(t *testing.T) {
 		func(string) senderid.Resolver {
 			return hookResolver{during: func() { lc.fireEnd("cancelled") }}
 		},
+		nil,
 		call.Options{TmpDir: t.TempDir(), Now: time.Now},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)

@@ -10,6 +10,7 @@ import (
 
 	"go.mau.fi/whatsmeow/types"
 
+	"github.com/w3nder/whatsmeow-gateway/internal/avatar"
 	"github.com/w3nder/whatsmeow-gateway/internal/senderid"
 )
 
@@ -54,9 +55,13 @@ type Manager struct {
 	// senderid.Resolve treats that as "no known phone number" rather than
 	// failing the call.
 	senderResolver func(channelID string) senderid.Resolver
-	opts           Options
-	log            *slog.Logger
-	registry       *Registry
+	// avatars reaches the channel's own client for the peer's profile photo,
+	// bound to that channel and its tenant. Like senderResolver it may return
+	// nil for a channel with no live client, and may itself be nil.
+	avatars  func(channelID string) AvatarSource
+	opts     Options
+	log      *slog.Logger
+	registry *Registry
 
 	// uploadWG tracks recording uploads still running off the teardown path,
 	// so shutdown can wait for them instead of killing an upload that is
@@ -69,6 +74,7 @@ func NewManager(
 	store RecordingStore,
 	identity func(channelID string) Identity,
 	senderResolver func(channelID string) senderid.Resolver,
+	avatars func(channelID string) AvatarSource,
 	opts Options,
 	log *slog.Logger,
 ) *Manager {
@@ -80,6 +86,7 @@ func NewManager(
 		store:          store,
 		identity:       identity,
 		senderResolver: senderResolver,
+		avatars:        avatars,
 		opts:           opts,
 		log:            log,
 		registry:       NewRegistry(),
@@ -128,7 +135,15 @@ func (m *Manager) Track(channelID string, lc LiveCall, direction string, record 
 	lc.OnEnd(func(reason string) { endedEarly.Store(&reason) })
 
 	peer := lc.Peer()
-	senderLid, senderPn := m.resolveSenderIdentity(channelID, peer)
+	peerJID := m.parsePeerJID(channelID, peer)
+	senderLid, senderPn := m.resolveSenderIdentity(channelID, peerJID)
+
+	// A peer that resolved to neither identifier is one the gateway could not
+	// make sense of, and there is nobody to ask WhatsApp about.
+	var picture *avatar.Picture
+	if direction == DirectionInbound && (senderLid != "" || senderPn != "") {
+		picture = m.resolveProfilePicture(channelID, peerJID)
+	}
 
 	// The recorder is built before the outbound source because the source taps
 	// it: the operator's half of the recording is taken from the one buffer the
@@ -145,6 +160,9 @@ func (m *Manager) Track(channelID string, lc LiveCall, direction string, record 
 		Peer:      peer,
 		SenderLid: senderLid,
 		SenderPn:  senderPn,
+
+		ProfilePicture: picture,
+
 		IsVideo:   lc.IsVideo(),
 		Live:      lc,
 		Recorder:  recorder,
@@ -210,24 +228,29 @@ func (m *Manager) flushEarlyEnd(t *Tracked) {
 	m.end(context.Background(), t, *t.earlyEnd)
 }
 
-// resolveSenderIdentity turns a call's raw peer JID into the same
-// senderLid/senderPn pair an inbound message from the same person carries,
-// so the backend's contact lookup -- keyed on those strings -- finds one
-// contact regardless of which event told it about them. It runs once, here
-// at Track time, rather than on every event a call goes on to publish: the
-// PNForLID lookup behind it can hit the store, and a call's state can change
-// many times before it ends.
-func (m *Manager) resolveSenderIdentity(channelID, peer string) (senderLid, senderPn string) {
+// parsePeerJID reads the peer the calling library handed us as a plain
+// string. It is a string precisely so this package does not have to trust it
+// as a well-formed JID; one it cannot parse is not fatal to tracking the
+// call, only to saying who the call is with.
+// A peer it cannot read yields the zero JID, which resolves to no identity
+// and no photo rather than failing the call.
+func (m *Manager) parsePeerJID(channelID, peer string) types.JID {
 	jid, err := types.ParseJID(peer)
 	if err != nil {
-		// The library handed us peer as a plain string precisely so this
-		// package does not have to trust it as a well-formed JID; a peer it
-		// cannot parse is not fatal to tracking the call, just to resolving
-		// who it was with.
 		m.log.Warn("call: peer is not a parseable JID", "channel_id", channelID, "peer", peer, "error", err)
-		return "", ""
+		return types.JID{}
 	}
+	return jid
+}
 
+// resolveSenderIdentity turns a call's peer JID into the same
+// senderLid/senderPn pair an inbound message from the same person carries,
+// so the backend's contact lookup -- keyed on those strings -- finds one
+// contact regardless of which event told it about them. It runs once, at
+// Track time, rather than on every event a call goes on to publish: the
+// PNForLID lookup behind it can hit the store, and a call's state can change
+// many times before it ends.
+func (m *Manager) resolveSenderIdentity(channelID string, jid types.JID) (senderLid, senderPn string) {
 	var resolver senderid.Resolver
 	if m.senderResolver != nil {
 		resolver = m.senderResolver(channelID)
@@ -238,6 +261,24 @@ func (m *Manager) resolveSenderIdentity(channelID, peer string) (senderLid, send
 	// JID -- so the zero JID here always sends Resolve to the resolver
 	// fallback for a @lid peer.
 	return senderid.Resolve(context.Background(), resolver, jid, types.JID{})
+}
+
+// resolveProfilePicture fetches the peer's photo, for the same reason and at
+// the same moment as their identity: once per call, at Track time, so a call
+// that changes state a dozen times costs one lookup rather than a dozen.
+//
+// Only a call arriving resolves one. On a call we placed, the peer is a
+// contact the backend already knows -- it just told us to dial them -- so the
+// photo would be a round trip for something already on file.
+func (m *Manager) resolveProfilePicture(channelID string, jid types.JID) *avatar.Picture {
+	if m.avatars == nil {
+		return nil
+	}
+	source := m.avatars(channelID)
+	if source == nil {
+		return nil
+	}
+	return source.For(context.Background(), jid)
 }
 
 // subscribe wires the library's callbacks. Everything published here goes
@@ -480,7 +521,7 @@ func (m *Manager) publishInbound(t *Tracked) {
 	// own device. fromMe only tells the backend which side placed the call.
 	fromMe := t.Direction == DirectionOutbound
 	evt := NewInboundCallEvent(id, t.ChannelID, t.CallID, t.SenderLid, t.SenderPn, t.Direction, fromMe, t.IsVideo,
-		strconv.FormatInt(m.opts.Now().Unix(), 10))
+		strconv.FormatInt(m.opts.Now().Unix(), 10), t.ProfilePicture)
 
 	if err := m.pub.PublishInbound(context.Background(), evt); err != nil {
 		m.log.Error("call: publish inbound call event",

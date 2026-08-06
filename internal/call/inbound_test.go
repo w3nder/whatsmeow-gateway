@@ -10,7 +10,7 @@ import (
 
 func TestInboundCallEventShape(t *testing.T) {
 	evt := call.NewInboundCallEvent(call.Identity{PhoneNumberID: "5511999999999", TenantID: "t1"},
-		"chan-a", "CALL1", "", "5511888888888", call.DirectionInbound, false, true, "1754300000")
+		"chan-a", "CALL1", "", "5511888888888", call.DirectionInbound, false, true, "1754300000", nil)
 
 	body, err := json.Marshal(evt)
 	if err != nil {

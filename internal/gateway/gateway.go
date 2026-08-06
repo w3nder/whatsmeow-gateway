@@ -18,6 +18,7 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
+	"github.com/w3nder/whatsmeow-gateway/internal/avatar"
 	"github.com/w3nder/whatsmeow-gateway/internal/call"
 	"github.com/w3nder/whatsmeow-gateway/internal/dedupe"
 	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
@@ -62,6 +63,7 @@ type gateway struct {
 	dedupe               *dedupe.Store
 	registry             *registry.Store
 	mediaStore           mapper.MediaStore
+	avatars              *avatar.Cache
 	calls                *call.Manager
 	instanceID           string
 	shardLockTTL         time.Duration
@@ -84,6 +86,7 @@ func Run(ctx context.Context, deps Deps) error {
 		dedupe:               deps.Dedupe,
 		registry:             deps.Registry,
 		mediaStore:           deps.MediaStore,
+		avatars:              avatar.New(deps.MediaStore, fetchMediaURL, avatar.Options{}, deps.Logger),
 		instanceID:           deps.InstanceID,
 		shardLockTTL:         deps.ShardLockTTL,
 		sendTimeout:          sendTimeout(deps.SendTimeout),
@@ -103,6 +106,7 @@ func Run(ctx context.Context, deps Deps) error {
 		recordingStore,
 		g.callIdentity,
 		g.callSenderResolver,
+		g.callAvatars,
 		deps.CallOptions,
 		deps.Logger,
 	)
@@ -152,6 +156,50 @@ func (g *gateway) callSenderResolver(channelID string) senderid.Resolver {
 		return nil
 	}
 	return client
+}
+
+// channelAvatars binds the shared photo cache to one channel: its own client
+// does the asking, since WhatsApp evaluates photo privacy against the account
+// that asks, and its tenant decides where the photo is stored. A channel with
+// no live client resolves nothing, exactly as callSenderResolver does -- a
+// call or a message must never be lost over a profile photo.
+//
+// It satisfies both mapper.AvatarSource and call.AvatarSource, which is the
+// point: a message and a call from the same person name the same photo.
+func (g *gateway) channelAvatars(channelID string) *channelAvatarSource {
+	// A channel with no live client leaves lookup nil, which the cache reads
+	// as "cannot ask" and answers with no photo.
+	var lookup avatar.Lookup
+	if client, err := g.waClientFor(channelID); err == nil {
+		lookup = client
+	}
+	return &channelAvatarSource{
+		cache:     g.avatars,
+		lookup:    lookup,
+		channelID: channelID,
+		tenantID:  g.tenantFor(channelID),
+	}
+}
+
+// callAvatars is channelAvatars as the call manager's own interface. The two
+// packages each declare the interface they consume, so the gateway is where
+// the one implementation is named as both.
+func (g *gateway) callAvatars(channelID string) call.AvatarSource {
+	return g.channelAvatars(channelID)
+}
+
+type channelAvatarSource struct {
+	cache     *avatar.Cache
+	lookup    avatar.Lookup
+	channelID string
+	tenantID  string
+}
+
+func (s *channelAvatarSource) For(ctx context.Context, jid types.JID) *avatar.Picture {
+	if s == nil {
+		return nil
+	}
+	return s.cache.For(ctx, s.lookup, s.channelID, s.tenantID, jid)
 }
 
 const defaultSendTimeout = 30 * time.Second
@@ -685,7 +733,14 @@ func (g *gateway) handleInboundMessage(channelID string, evt *events.Message) {
 		return
 	}
 
-	inbound, err := mapper.BuildInbound(g.workCtx, client, client, g.mediaStore, channelID, g.tenantFor(channelID), evt)
+	inbound, err := mapper.BuildInbound(g.workCtx, mapper.InboundDeps{
+		Downloader: client,
+		Resolver:   client,
+		Media:      g.mediaStore,
+		Avatars:    g.channelAvatars(channelID),
+		ChannelID:  channelID,
+		TenantID:   g.tenantFor(channelID),
+	}, evt)
 	if err != nil {
 		if errors.Is(err, mapper.ErrSkip) {
 			g.logger.Info("gateway: skip non-content inbound event", "channel_id", channelID, "message_id", evt.Info.ID)
