@@ -21,6 +21,7 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/avatar"
 	"github.com/w3nder/whatsmeow-gateway/internal/call"
 	"github.com/w3nder/whatsmeow-gateway/internal/dedupe"
+	"github.com/w3nder/whatsmeow-gateway/internal/groupinfo"
 	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
 	"github.com/w3nder/whatsmeow-gateway/internal/ownership"
 	"github.com/w3nder/whatsmeow-gateway/internal/registry"
@@ -64,6 +65,7 @@ type gateway struct {
 	registry             *registry.Store
 	mediaStore           mapper.MediaStore
 	avatars              *avatar.Cache
+	groups               *groupinfo.Cache
 	calls                *call.Manager
 	instanceID           string
 	shardLockTTL         time.Duration
@@ -87,6 +89,7 @@ func Run(ctx context.Context, deps Deps) error {
 		registry:             deps.Registry,
 		mediaStore:           deps.MediaStore,
 		avatars:              avatar.New(deps.MediaStore, fetchMediaURL, avatar.Options{}, deps.Logger),
+		groups:               groupinfo.New(groupinfo.Options{}, deps.Logger),
 		instanceID:           deps.InstanceID,
 		shardLockTTL:         deps.ShardLockTTL,
 		sendTimeout:          sendTimeout(deps.SendTimeout),
@@ -200,6 +203,31 @@ func (s *channelAvatarSource) For(ctx context.Context, jid types.JID) *avatar.Pi
 		return nil
 	}
 	return s.cache.For(ctx, s.lookup, s.channelID, s.tenantID, jid)
+}
+
+func (g *gateway) channelGroups(channelID string) *channelGroupSource {
+	var lookup groupinfo.Lookup
+	if client, err := g.waClientFor(channelID); err == nil {
+		lookup = client
+	}
+	return &channelGroupSource{
+		cache:     g.groups,
+		lookup:    lookup,
+		channelID: channelID,
+	}
+}
+
+type channelGroupSource struct {
+	cache     *groupinfo.Cache
+	lookup    groupinfo.Lookup
+	channelID string
+}
+
+func (s *channelGroupSource) Name(ctx context.Context, jid types.JID) string {
+	if s == nil {
+		return ""
+	}
+	return s.cache.Name(ctx, s.lookup, s.channelID, jid)
 }
 
 const defaultSendTimeout = 30 * time.Second
@@ -603,6 +631,10 @@ func (g *gateway) handleSessionEvent(channelID string, evt any) {
 		g.handleInboundMessage(channelID, e)
 	case *events.Receipt:
 		g.handleReceipt(channelID, e)
+	case *events.GroupInfo:
+		if e.Name != nil {
+			g.groups.Invalidate(channelID, e.JID)
+		}
 	case *events.LoggedOut:
 		g.clearTenant(channelID)
 		if err := g.registry.Delete(g.workCtx, channelID); err != nil {
@@ -738,6 +770,7 @@ func (g *gateway) handleInboundMessage(channelID string, evt *events.Message) {
 		Resolver:   client,
 		Media:      g.mediaStore,
 		Avatars:    g.channelAvatars(channelID),
+		Groups:     g.channelGroups(channelID),
 		ChannelID:  channelID,
 		TenantID:   g.tenantFor(channelID),
 	}, evt)
@@ -750,7 +783,14 @@ func (g *gateway) handleInboundMessage(channelID string, evt *events.Message) {
 		return
 	}
 
-	if err := g.publisher.PublishInbound(g.workCtx, inbound); err != nil {
+	routingKey := amqp.InboundRoutingKey
+	publish := g.publisher.PublishInbound
+	if inbound.Group != nil {
+		routingKey = amqp.GroupInboundRoutingKey
+		publish = g.publisher.PublishGroupInbound
+	}
+
+	if err := publish(g.workCtx, inbound); err != nil {
 		g.logger.Error("gateway: publish inbound event", "channel_id", channelID, "message_id", evt.Info.ID, "error", err)
 		return
 	}
@@ -759,7 +799,7 @@ func (g *gateway) handleInboundMessage(channelID string, evt *events.Message) {
 		"channel_id", channelID,
 		"message_id", evt.Info.ID,
 		"tenant_id", g.tenantFor(channelID),
-		"routing_key", amqp.InboundRoutingKey)
+		"routing_key", routingKey)
 }
 
 func (g *gateway) handleReceipt(channelID string, evt *events.Receipt) {

@@ -773,6 +773,84 @@ func TestBuildInboundSkipsBroadcast(t *testing.T) {
 	}
 }
 
+type staticGroupNamer string
+
+func (s staticGroupNamer) Name(_ context.Context, _ types.JID) string {
+	return string(s)
+}
+
+func privateMessageEvent() *events.Message {
+	return &events.Message{
+		Info:    baseInfo("wamid.private-1", "5511999999999"),
+		Message: &waE2E.Message{Conversation: proto.String("hello there")},
+	}
+}
+
+func groupMessageEvent(fromMe bool) *events.Message {
+	return &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     types.NewJID("120363000000000000", types.GroupServer),
+				Sender:   types.NewJID("5511888887777", types.DefaultUserServer),
+				IsFromMe: fromMe,
+				IsGroup:  true,
+			},
+			ID:        "GROUPMSG1",
+			PushName:  "João Silva",
+			Timestamp: time.Unix(1700000000, 0),
+		},
+		Message: &waE2E.Message{Conversation: proto.String("bom dia pessoal")},
+	}
+}
+
+func TestBuildInboundNamesTheGroupAsTheContact(t *testing.T) {
+	out, err := mapper.BuildInbound(context.Background(), mapper.InboundDeps{Groups: staticGroupNamer("Vendas Nordeste")}, groupMessageEvent(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Group == nil {
+		t.Fatal("expected a group block")
+	}
+	if out.Group.JID != "120363000000000000@g.us" {
+		t.Fatalf("group jid = %q", out.Group.JID)
+	}
+	if out.Group.Name != "Vendas Nordeste" {
+		t.Fatalf("group name = %q", out.Group.Name)
+	}
+	if out.From != "120363000000000000@g.us" {
+		t.Fatalf("from = %q, want the group", out.From)
+	}
+	if out.Group.Participant.JID != "5511888887777@s.whatsapp.net" {
+		t.Fatalf("participant jid = %q", out.Group.Participant.JID)
+	}
+	if out.Group.Participant.Name != "João Silva" {
+		t.Fatalf("participant name = %q", out.Group.Participant.Name)
+	}
+}
+
+func TestBuildInboundLeavesTheParticipantEmptyOnOurOwnGroupMessage(t *testing.T) {
+	out, err := mapper.BuildInbound(context.Background(), mapper.InboundDeps{Groups: staticGroupNamer("Vendas Nordeste")}, groupMessageEvent(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Group == nil {
+		t.Fatal("expected a group block")
+	}
+	if out.Group.Participant.JID != "" {
+		t.Fatalf("participant jid = %q, want empty on a message we sent", out.Group.Participant.JID)
+	}
+}
+
+func TestBuildInboundLeavesAPrivateMessageUntouched(t *testing.T) {
+	out, err := mapper.BuildInbound(context.Background(), mapper.InboundDeps{}, privateMessageEvent())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Group != nil {
+		t.Fatal("a private message must carry no group block")
+	}
+}
+
 func TestBuildInboundEphemeralWrappedTextIsUnwrapped(t *testing.T) {
 	evt := &events.Message{
 		Info: baseInfo("wamid.ephemeral-text-1", "5511999999999"),

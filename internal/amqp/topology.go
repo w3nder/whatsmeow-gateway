@@ -14,6 +14,8 @@ const (
 	CallRoutingKey          = "whatsapp.call.v1"
 	ChannelQRRoutingKey     = "channel.qr"
 	ChannelStatusRoutingKey = "channel.status"
+	GroupInboundRoutingKey  = "whatsapp.group.inbound.v1"
+	GroupStatusRoutingKey   = "whatsapp.group.status.v1"
 )
 
 const (

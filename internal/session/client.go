@@ -39,6 +39,7 @@ type WAClient interface {
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
 	PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error)
 	GetProfilePictureInfo(ctx context.Context, jid types.JID, params *whatsmeow.GetProfilePictureParams) (*types.ProfilePictureInfo, error)
+	GetGroupInfo(ctx context.Context, jid types.JID) (*types.GroupInfo, error)
 	AddEventHandler(handler func(any)) uint32
 	Calls() call.Caller
 	Disconnect()
@@ -141,6 +142,10 @@ func (w *waClient) PNForLID(ctx context.Context, lid types.JID) (types.JID, bool
 
 func (w *waClient) GetProfilePictureInfo(ctx context.Context, jid types.JID, params *whatsmeow.GetProfilePictureParams) (*types.ProfilePictureInfo, error) {
 	return w.client.GetProfilePictureInfo(ctx, jid, params)
+}
+
+func (w *waClient) GetGroupInfo(ctx context.Context, jid types.JID) (*types.GroupInfo, error) {
+	return w.client.GetGroupInfo(ctx, jid)
 }
 
 func (w *waClient) AddEventHandler(handler func(any)) uint32 {

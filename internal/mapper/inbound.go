@@ -62,6 +62,10 @@ type AvatarSource interface {
 	For(ctx context.Context, jid types.JID) *avatar.Picture
 }
 
+type GroupNamer interface {
+	Name(ctx context.Context, jid types.JID) string
+}
+
 // InboundDeps is everything BuildInbound reaches for beyond the event itself.
 // It is a struct rather than a parameter list because the list had already
 // grown past the point where a reader could tell the arguments apart at a
@@ -72,6 +76,7 @@ type InboundDeps struct {
 	Media      MediaStore
 	// Avatars is optional: nil publishes events without a profile picture.
 	Avatars   AvatarSource
+	Groups    GroupNamer
 	ChannelID string
 	TenantID  string
 }
@@ -212,6 +217,21 @@ type InboundRichContent struct {
 	Poll    *InboundRichPoll    `json:"poll,omitempty"`
 }
 
+type InboundGroupParticipant struct {
+	JID            string          `json:"jid,omitempty"`
+	Lid            string          `json:"lid,omitempty"`
+	Pn             string          `json:"pn,omitempty"`
+	Name           string          `json:"name,omitempty"`
+	ProfilePicture *avatar.Picture `json:"profilePicture,omitempty"`
+}
+
+type InboundGroup struct {
+	JID            string                  `json:"jid"`
+	Name           string                  `json:"name,omitempty"`
+	ProfilePicture *avatar.Picture         `json:"profilePicture,omitempty"`
+	Participant    InboundGroupParticipant `json:"participant"`
+}
+
 type InboundEvent struct {
 	PhoneNumberID     string              `json:"phoneNumberId"`
 	From              string              `json:"from"`
@@ -232,6 +252,7 @@ type InboundEvent struct {
 	Target            *InboundTarget      `json:"target,omitempty"`
 	RichContent       *InboundRichContent `json:"richContent,omitempty"`
 	ProfilePicture    *avatar.Picture     `json:"profilePicture,omitempty"`
+	Group             *InboundGroup       `json:"group,omitempty"`
 }
 
 type StatusError struct {
@@ -261,12 +282,46 @@ func BuildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		return InboundEvent{}, err
 	}
 
-	if deps.Avatars != nil && !evt.Info.IsFromMe {
-		jid, _ := identityJIDs(evt)
-		out.ProfilePicture = deps.Avatars.For(ctx, jid)
+	switch KindOf(evt.Info.Chat) {
+	case ChatGroup:
+		applyGroup(ctx, deps, evt, &out)
+	default:
+		if deps.Avatars != nil && !evt.Info.IsFromMe {
+			jid, _ := identityJIDs(evt)
+			out.ProfilePicture = deps.Avatars.For(ctx, jid)
+		}
 	}
 
 	return out, nil
+}
+
+func applyGroup(ctx context.Context, deps InboundDeps, evt *events.Message, out *InboundEvent) {
+	group := InboundGroup{JID: evt.Info.Chat.String()}
+
+	if deps.Groups != nil {
+		group.Name = deps.Groups.Name(ctx, evt.Info.Chat)
+	}
+	if deps.Avatars != nil {
+		group.ProfilePicture = deps.Avatars.For(ctx, evt.Info.Chat)
+	}
+
+	if !evt.Info.IsFromMe {
+		lid, pn := senderid.Resolve(ctx, deps.Resolver, evt.Info.Sender, evt.Info.SenderAlt)
+		group.Participant = InboundGroupParticipant{
+			JID:  evt.Info.Sender.ToNonAD().String(),
+			Lid:  lid,
+			Pn:   pn,
+			Name: evt.Info.PushName,
+		}
+		if deps.Avatars != nil {
+			group.Participant.ProfilePicture = deps.Avatars.For(ctx, evt.Info.Sender)
+		}
+	}
+
+	out.Group = &group
+	out.From = group.JID
+	out.SenderLid = ""
+	out.SenderPn = ""
 }
 
 // identityJIDs picks the pair naming the person an event is with: the sender
