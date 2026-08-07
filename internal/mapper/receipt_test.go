@@ -1,6 +1,8 @@
 package mapper_test
 
 import (
+	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -9,6 +11,8 @@ import (
 
 	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
 )
+
+var testGroupStatusDeps = mapper.GroupStatusDeps{ChannelID: "channel-1", TenantID: "tenant-1"}
 
 func TestBuildGroupStatusCarriesTheWholeBatchInOneEvent(t *testing.T) {
 	evt := &events.Receipt{
@@ -21,7 +25,7 @@ func TestBuildGroupStatusCarriesTheWholeBatchInOneEvent(t *testing.T) {
 		Timestamp:  time.Unix(1700000000, 0),
 	}
 
-	out := mapper.BuildGroupStatus(evt)
+	out := mapper.BuildGroupStatus(testGroupStatusDeps, evt)
 	if out == nil {
 		t.Fatal("expected an event")
 	}
@@ -34,6 +38,12 @@ func TestBuildGroupStatusCarriesTheWholeBatchInOneEvent(t *testing.T) {
 	if out.GroupJID != "120363000000000000@g.us" {
 		t.Fatalf("group jid = %q", out.GroupJID)
 	}
+	if out.TenantID != "tenant-1" {
+		t.Fatalf("tenant id = %q", out.TenantID)
+	}
+	if out.ChannelID != "channel-1" {
+		t.Fatalf("channel id = %q", out.ChannelID)
+	}
 }
 
 func TestBuildGroupStatusCollapsesTheDeviceSuffix(t *testing.T) {
@@ -41,11 +51,11 @@ func TestBuildGroupStatusCollapsesTheDeviceSuffix(t *testing.T) {
 	web := phone
 	web.Device = 12
 
-	fromPhone := mapper.BuildGroupStatus(&events.Receipt{
+	fromPhone := mapper.BuildGroupStatus(testGroupStatusDeps, &events.Receipt{
 		MessageSource: types.MessageSource{Chat: types.NewJID("120363000000000000", types.GroupServer), Sender: phone},
 		MessageIDs:    []string{"A"}, Type: types.ReceiptTypeRead, Timestamp: time.Unix(1700000000, 0),
 	})
-	fromWeb := mapper.BuildGroupStatus(&events.Receipt{
+	fromWeb := mapper.BuildGroupStatus(testGroupStatusDeps, &events.Receipt{
 		MessageSource: types.MessageSource{Chat: types.NewJID("120363000000000000", types.GroupServer), Sender: web},
 		MessageIDs:    []string{"A"}, Type: types.ReceiptTypeRead, Timestamp: time.Unix(1700000000, 0),
 	})
@@ -56,7 +66,7 @@ func TestBuildGroupStatusCollapsesTheDeviceSuffix(t *testing.T) {
 }
 
 func TestBuildGroupStatusIgnoresAPrivateReceiptAndAnUnknownType(t *testing.T) {
-	private := mapper.BuildGroupStatus(&events.Receipt{
+	private := mapper.BuildGroupStatus(testGroupStatusDeps, &events.Receipt{
 		MessageSource: types.MessageSource{Chat: types.NewJID("5511999998888", types.DefaultUserServer)},
 		MessageIDs:    []string{"A"}, Type: types.ReceiptTypeRead,
 	})
@@ -64,11 +74,56 @@ func TestBuildGroupStatusIgnoresAPrivateReceiptAndAnUnknownType(t *testing.T) {
 		t.Fatal("a private receipt must not become a group event")
 	}
 
-	unknown := mapper.BuildGroupStatus(&events.Receipt{
+	unknown := mapper.BuildGroupStatus(testGroupStatusDeps, &events.Receipt{
 		MessageSource: types.MessageSource{Chat: types.NewJID("120363000000000000", types.GroupServer)},
 		MessageIDs:    []string{"A"}, Type: types.ReceiptTypeSender,
 	})
 	if unknown != nil {
 		t.Fatal("a receipt with no delivered/read meaning must be dropped")
+	}
+}
+
+func TestBuildGroupStatusJSONIsTheWireContractIngestionParses(t *testing.T) {
+	deps := mapper.GroupStatusDeps{ChannelID: "22222222-2222-2222-2222-222222222222", TenantID: "11111111-1111-1111-1111-111111111111"}
+	evt := &events.Receipt{
+		MessageSource: types.MessageSource{
+			Chat:   types.NewJID("120363000000000000", types.GroupServer),
+			Sender: types.NewJID("5511888887777", types.DefaultUserServer),
+		},
+		MessageIDs: []string{"3EB0", "3EB1"},
+		Type:       types.ReceiptTypeRead,
+		Timestamp:  time.Unix(1700000000, 0),
+	}
+
+	out := mapper.BuildGroupStatus(deps, evt)
+	if out == nil {
+		t.Fatal("expected an event")
+	}
+
+	got, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	const wantJSON = `{
+		"tenantId": "11111111-1111-1111-1111-111111111111",
+		"channelId": "22222222-2222-2222-2222-222222222222",
+		"groupJid": "120363000000000000@g.us",
+		"participantJid": "5511888887777@s.whatsapp.net",
+		"messageIds": ["3EB0", "3EB1"],
+		"status": "read",
+		"timestamp": "1700000000"
+	}`
+
+	var gotObj, wantObj map[string]interface{}
+	if err := json.Unmarshal(got, &gotObj); err != nil {
+		t.Fatalf("unmarshal got: %v", err)
+	}
+	if err := json.Unmarshal([]byte(wantJSON), &wantObj); err != nil {
+		t.Fatalf("unmarshal want: %v", err)
+	}
+
+	if !reflect.DeepEqual(gotObj, wantObj) {
+		t.Fatalf("whatsapp.group.status.v1 wire contract mismatch:\n got  %s\n want %s", got, wantJSON)
 	}
 }

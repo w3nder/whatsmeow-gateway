@@ -7,6 +7,8 @@ import (
 )
 
 type GroupStatusEvent struct {
+	TenantID       string   `json:"tenantId"`
+	ChannelID      string   `json:"channelId"`
 	GroupJID       string   `json:"groupJid"`
 	ParticipantJID string   `json:"participantJid"`
 	MessageIDs     []string `json:"messageIds"`
@@ -14,7 +16,12 @@ type GroupStatusEvent struct {
 	Timestamp      string   `json:"timestamp"`
 }
 
-func BuildGroupStatus(evt *events.Receipt) *GroupStatusEvent {
+type GroupStatusDeps struct {
+	ChannelID string
+	TenantID  string
+}
+
+func BuildGroupStatus(deps GroupStatusDeps, evt *events.Receipt) *GroupStatusEvent {
 	if KindOf(evt.Chat) != ChatGroup {
 		return nil
 	}
@@ -29,6 +36,8 @@ func BuildGroupStatus(evt *events.Receipt) *GroupStatusEvent {
 	}
 
 	return &GroupStatusEvent{
+		TenantID:       deps.TenantID,
+		ChannelID:      deps.ChannelID,
 		GroupJID:       evt.Chat.String(),
 		ParticipantJID: evt.Sender.ToNonAD().String(),
 		MessageIDs:     evt.MessageIDs,
