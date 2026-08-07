@@ -270,7 +270,12 @@ func (c *Cache) entryFor(channelID string, jid types.JID) *entry {
 func (c *Cache) evictIdle() {
 	cutoff := c.now().Add(-idleBeforeEviction)
 	for key, e := range c.entries {
-		if e.expiresAt.Before(cutoff) {
+		if !e.mu.TryLock() {
+			continue
+		}
+		expired := e.expiresAt.Before(cutoff)
+		e.mu.Unlock()
+		if expired {
 			delete(c.entries, key)
 		}
 	}
