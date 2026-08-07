@@ -32,6 +32,7 @@ type GatewaySendCommand struct {
 	Kind                    string           `json:"kind,omitempty"`
 	TargetProviderMessageID string           `json:"targetProviderMessageId,omitempty"`
 	TargetFromMe            bool             `json:"targetFromMe,omitempty"`
+	TargetParticipantJID    string           `json:"targetParticipantJid,omitempty"`
 	Emoji                   string           `json:"emoji,omitempty"`
 	Forwarded               bool             `json:"forwarded,omitempty"`
 	Text                    string           `json:"text,omitempty"`

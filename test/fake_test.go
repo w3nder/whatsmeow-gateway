@@ -162,6 +162,10 @@ func (f *fakeWAClient) GetProfilePictureInfo(ctx context.Context, jid types.JID,
 	return nil, whatsmeow.ErrProfilePictureNotSet
 }
 
+func (f *fakeWAClient) GetGroupInfo(ctx context.Context, jid types.JID) (*types.GroupInfo, error) {
+	return nil, whatsmeow.ErrIQTimedOut
+}
+
 func (f *fakeWAClient) AddEventHandler(handler func(any)) uint32 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
