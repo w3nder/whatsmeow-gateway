@@ -120,6 +120,7 @@ type InboundContact struct {
 type InboundReaction struct {
 	MessageID string `json:"messageId,omitempty"`
 	Emoji     string `json:"emoji,omitempty"`
+	SenderJID string `json:"senderJid,omitempty"`
 }
 
 type InboundUnsupported struct {
@@ -403,7 +404,11 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 	case msg.GetReactionMessage() != nil:
 		r := msg.GetReactionMessage()
 		out.Type = "reaction"
-		out.Reaction = &InboundReaction{MessageID: r.GetKey().GetID(), Emoji: r.GetText()}
+		out.Reaction = &InboundReaction{
+			MessageID: r.GetKey().GetID(),
+			Emoji:     r.GetText(),
+			SenderJID: evt.Info.Sender.ToNonAD().String(),
+		}
 
 	case msg.GetImageMessage() != nil:
 		img := msg.GetImageMessage()

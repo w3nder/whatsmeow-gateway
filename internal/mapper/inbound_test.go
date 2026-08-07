@@ -2156,3 +2156,35 @@ func TestBuildStatusUnmappedTypeReturnsEmpty(t *testing.T) {
 		t.Fatalf("expected no status events for unmapped receipt type, got %+v", out)
 	}
 }
+
+func TestBuildInboundNamesTheReactorEvenOnOurOwnGroupReaction(t *testing.T) {
+	for _, fromMe := range []bool{false, true} {
+		evt := &events.Message{
+			Info: types.MessageInfo{
+				MessageSource: types.MessageSource{
+					Chat:     types.NewJID("120363000000000000", types.GroupServer),
+					Sender:   types.NewJID("173907587899617", types.HiddenUserServer),
+					IsFromMe: fromMe,
+					IsGroup:  true,
+				},
+				ID:        "REACT1",
+				Timestamp: time.Unix(1700000000, 0),
+			},
+			Message: &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{
+				Key:  &waCommon.MessageKey{ID: proto.String("TARGET1")},
+				Text: proto.String("🙏"),
+			}},
+		}
+
+		out, err := mapper.BuildInbound(context.Background(), mapper.InboundDeps{}, evt)
+		if err != nil {
+			t.Fatalf("fromMe=%v: %v", fromMe, err)
+		}
+		if out.Reaction == nil {
+			t.Fatalf("fromMe=%v: expected a reaction", fromMe)
+		}
+		if out.Reaction.SenderJID != "173907587899617@lid" {
+			t.Fatalf("fromMe=%v: senderJid = %q", fromMe, out.Reaction.SenderJID)
+		}
+	}
+}
