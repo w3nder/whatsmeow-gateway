@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
@@ -116,7 +117,7 @@ func (f *fakeWAClient) DeviceJID() *types.JID {
 	return f.deviceJID
 }
 
-func (f *fakeWAClient) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID) (whatsmeow.SendResponse, error) {
+func (f *fakeWAClient) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID, nodes []waBinary.Node) (whatsmeow.SendResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sendCalls++

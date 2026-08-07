@@ -223,7 +223,7 @@ func TestManagerSendReturnsIDAndTimestamp(t *testing.T) {
 	}
 
 	to := types.NewJID("15551234567", types.DefaultUserServer)
-	id, gotTS, err := mgr.Send(context.Background(), "channel-4", to, nil, "deterministic-id-1")
+	id, gotTS, err := mgr.Send(context.Background(), "channel-4", to, nil, "deterministic-id-1", nil)
 	if err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}

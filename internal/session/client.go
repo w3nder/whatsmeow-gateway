@@ -7,6 +7,7 @@ import (
 
 	"github.com/purpshell/meowcaller"
 	"go.mau.fi/whatsmeow"
+	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
@@ -31,7 +32,7 @@ type WAClient interface {
 	IsConnected() bool
 	WaitForConnection(timeout time.Duration) bool
 	DeviceJID() *types.JID
-	SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID) (whatsmeow.SendResponse, error)
+	SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID, nodes []waBinary.Node) (whatsmeow.SendResponse, error)
 	BuildEdit(chat types.JID, id types.MessageID, newContent *waE2E.Message) *waE2E.Message
 	BuildRevoke(chat, sender types.JID, id types.MessageID) *waE2E.Message
 	BuildReaction(chat, sender types.JID, id types.MessageID, reaction string) *waE2E.Message
@@ -108,8 +109,12 @@ func (w *waClient) DeviceJID() *types.JID {
 	return w.client.Store.ID
 }
 
-func (w *waClient) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID) (whatsmeow.SendResponse, error) {
-	return w.client.SendMessage(ctx, to, msg, whatsmeow.SendRequestExtra{ID: id})
+func (w *waClient) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID, nodes []waBinary.Node) (whatsmeow.SendResponse, error) {
+	extra := whatsmeow.SendRequestExtra{ID: id}
+	if len(nodes) > 0 {
+		extra.AdditionalNodes = &nodes
+	}
+	return w.client.SendMessage(ctx, to, msg, extra)
 }
 
 func (w *waClient) BuildEdit(chat types.JID, id types.MessageID, newContent *waE2E.Message) *waE2E.Message {

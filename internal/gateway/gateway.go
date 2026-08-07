@@ -523,7 +523,7 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 		return g.publishSendFailure(ctx, cmd, providerID, fmt.Errorf("gateway: build outbound %s: %w", cmd.MessageID, err))
 	}
 
-	id, ts, err := g.manager.Send(sendCtx, cmd.ChannelID, to, msg, providerID)
+	id, ts, err := g.manager.Send(sendCtx, cmd.ChannelID, to, msg, providerID, nil)
 	if err != nil {
 		return g.publishSendFailure(ctx, cmd, providerID, fmt.Errorf("gateway: send %s: %w", cmd.MessageID, err))
 	}

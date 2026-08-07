@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -142,12 +143,12 @@ func ensureUp(client WAClient) error {
 	return fmt.Errorf("session: socket still down after %s, auto-reconnect still running", connectWait)
 }
 
-func (m *Manager) Send(ctx context.Context, channelID string, to types.JID, msg *waE2E.Message, id string) (string, time.Time, error) {
+func (m *Manager) Send(ctx context.Context, channelID string, to types.JID, msg *waE2E.Message, id string, nodes []waBinary.Node) (string, time.Time, error) {
 	client, err := m.session(channelID)
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	resp, err := client.SendMessage(ctx, to, msg, id)
+	resp, err := client.SendMessage(ctx, to, msg, id, nodes)
 	if err != nil {
 		return "", time.Time{}, err
 	}
