@@ -3,6 +3,8 @@ package mapper
 import (
 	"strings"
 	"testing"
+
+	waBinary "go.mau.fi/whatsmeow/binary"
 )
 
 func TestBuildButtonsMarksEachButtonWithItsNativeFlowName(t *testing.T) {
@@ -40,8 +42,34 @@ func TestBuildButtonsMarksEachButtonWithItsNativeFlowName(t *testing.T) {
 		t.Fatalf("cta_url params = %q", buttons[1].GetButtonParamsJSON())
 	}
 
-	if len(nodes) == 0 || nodes[0].Tag != "biz" {
-		t.Fatalf("expected the biz node that makes whatsapp render it, got %+v", nodes)
+	if len(nodes) != 1 {
+		t.Fatalf("expected exactly one top-level node, got %+v", nodes)
+	}
+	biz := nodes[0]
+	if biz.Tag != "biz" {
+		t.Fatalf("outer tag = %q", biz.Tag)
+	}
+	bizContent, ok := biz.Content.([]waBinary.Node)
+	if !ok || len(bizContent) != 1 {
+		t.Fatalf("biz content = %+v", biz.Content)
+	}
+	interactive := bizContent[0]
+	if interactive.Tag != "interactive" {
+		t.Fatalf("interactive tag = %q", interactive.Tag)
+	}
+	if interactive.Attrs["type"] != "native_flow" || interactive.Attrs["v"] != "1" {
+		t.Fatalf("interactive attrs = %+v", interactive.Attrs)
+	}
+	interactiveContent, ok := interactive.Content.([]waBinary.Node)
+	if !ok || len(interactiveContent) != 1 {
+		t.Fatalf("interactive content = %+v", interactive.Content)
+	}
+	nativeFlow := interactiveContent[0]
+	if nativeFlow.Tag != "native_flow" {
+		t.Fatalf("native_flow tag = %q", nativeFlow.Tag)
+	}
+	if nativeFlow.Attrs["v"] != "9" || nativeFlow.Attrs["name"] != "mixed" {
+		t.Fatalf("native_flow attrs = %+v", nativeFlow.Attrs)
 	}
 }
 
