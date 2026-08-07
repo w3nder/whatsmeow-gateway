@@ -37,7 +37,7 @@ func TestGroupReactionContractLiteralBuildsParticipantScopedKey(t *testing.T) {
 	}
 
 	var cli *whatsmeow.Client
-	to, msg, err := mapper.BuildOutbound(context.Background(), cli, cmd, stubFetch(nil, nil))
+	to, msg, _, err := mapper.BuildOutbound(context.Background(), cli, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestGroupReactionWithoutParticipantFallsBackToChatJID(t *testing.T) {
 	}
 
 	var cli *whatsmeow.Client
-	_, msg, err := mapper.BuildOutbound(context.Background(), cli, cmd, stubFetch(nil, nil))
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), cli, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestReactionParticipantJIDMustParse(t *testing.T) {
 		Emoji:                   "❤️",
 	}
 
-	if _, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil)); err == nil {
+	if _, _, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil)); err == nil {
 		t.Fatalf("expected an error for an unparseable participant jid")
 	}
 }

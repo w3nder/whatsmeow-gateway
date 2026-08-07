@@ -54,7 +54,7 @@ func stubFetch(data []byte, err error) mapper.MediaFetcher {
 func TestBuildOutboundTextAddressesByPhoneJID(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Type: "text", Text: "hello"}
 
-	to, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	to, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestBuildOutboundTextAddressesByPhoneJID(t *testing.T) {
 func TestBuildOutboundTextAddressesByLIDJID(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{To: "173907587899617@lid", Type: "text", Text: "hello"}
 
-	to, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	to, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestBuildOutboundTextAddressesByLIDJID(t *testing.T) {
 func TestBuildOutboundRejectsBareNumberRecipient(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{To: "5511999999999", Type: "text", Text: "hello"}
 
-	_, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	_, _, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err == nil {
 		t.Fatal("expected error for bare number recipient without JID server")
 	}
@@ -101,7 +101,7 @@ func TestBuildOutboundTextReply(t *testing.T) {
 		},
 	}
 
-	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestBuildOutboundImage(t *testing.T) {
 		},
 	}
 
-	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{resp: stubUploadResponse}, cmd, stubFetch([]byte("bytes"), nil))
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{resp: stubUploadResponse}, cmd, stubFetch([]byte("bytes"), nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestBuildOutboundImageReply(t *testing.T) {
 		},
 	}
 
-	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{resp: stubUploadResponse}, cmd, stubFetch([]byte("bytes"), nil))
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{resp: stubUploadResponse}, cmd, stubFetch([]byte("bytes"), nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestBuildOutboundVideo(t *testing.T) {
 		},
 	}
 
-	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{resp: stubUploadResponse}, cmd, stubFetch([]byte("bytes"), nil))
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{resp: stubUploadResponse}, cmd, stubFetch([]byte("bytes"), nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestBuildOutboundAudio(t *testing.T) {
 		},
 	}
 
-	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{resp: stubUploadResponse}, cmd, stubFetch([]byte("bytes"), nil))
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{resp: stubUploadResponse}, cmd, stubFetch([]byte("bytes"), nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestBuildOutboundDocument(t *testing.T) {
 		},
 	}
 
-	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{resp: stubUploadResponse}, cmd, stubFetch([]byte("bytes"), nil))
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{resp: stubUploadResponse}, cmd, stubFetch([]byte("bytes"), nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestBuildOutboundMediaFetchError(t *testing.T) {
 	}
 
 	fetchErr := errors.New("boom")
-	_, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, fetchErr))
+	_, _, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, fetchErr))
 	if err == nil {
 		t.Fatal("expected error when media fetch fails")
 	}
@@ -305,7 +305,7 @@ func TestBuildOutboundMediaUploadError(t *testing.T) {
 	}
 
 	uploadErr := errors.New("upload failed")
-	_, _, err := mapper.BuildOutbound(context.Background(), stubUploader{err: uploadErr}, cmd, stubFetch([]byte("bytes"), nil))
+	_, _, _, err := mapper.BuildOutbound(context.Background(), stubUploader{err: uploadErr}, cmd, stubFetch([]byte("bytes"), nil))
 	if err == nil {
 		t.Fatal("expected error when upload fails")
 	}
@@ -314,7 +314,7 @@ func TestBuildOutboundMediaUploadError(t *testing.T) {
 func TestBuildOutboundMediaMissingPayload(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{To: "5511999999999@s.whatsapp.net", Type: "image"}
 
-	_, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	_, _, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err == nil {
 		t.Fatal("expected error when media payload is missing")
 	}
@@ -332,7 +332,7 @@ func TestBuildOutboundLocation(t *testing.T) {
 		},
 	}
 
-	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -359,7 +359,7 @@ func TestBuildOutboundLocationReply(t *testing.T) {
 		ReplyTo: &amqp.ReplyToPayload{ProviderMessageID: "wamid.quoted-location"},
 	}
 
-	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -375,7 +375,7 @@ func TestBuildOutboundLocationReply(t *testing.T) {
 func TestBuildOutboundLocationMissingPayload(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{To: "5511999999999@s.whatsapp.net", Type: "location"}
 
-	_, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	_, _, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err == nil {
 		t.Fatal("expected error when location payload is missing")
 	}
@@ -390,7 +390,7 @@ func TestBuildOutboundSingleContact(t *testing.T) {
 		},
 	}
 
-	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -416,7 +416,7 @@ func TestBuildOutboundMultipleContacts(t *testing.T) {
 		},
 	}
 
-	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -435,7 +435,7 @@ func TestBuildOutboundMultipleContacts(t *testing.T) {
 func TestBuildOutboundContactsMissingPayload(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{To: "5511999999999@s.whatsapp.net", Type: "contacts"}
 
-	_, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	_, _, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err == nil {
 		t.Fatal("expected error when contacts payload is missing")
 	}
@@ -444,7 +444,7 @@ func TestBuildOutboundContactsMissingPayload(t *testing.T) {
 func TestBuildOutboundUnknownType(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{To: "5511999999999@s.whatsapp.net", Type: "sticker"}
 
-	_, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	_, _, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err == nil {
 		t.Fatal("expected error for unknown type")
 	}
@@ -452,7 +452,7 @@ func TestBuildOutboundUnknownType(t *testing.T) {
 
 func TestBuildOutboundEditCallsBuildEdit(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Kind: "edit", TargetProviderMessageID: "3EB0ABC", Text: "corrigido"}
-	to, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	to, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -467,14 +467,14 @@ func TestBuildOutboundEditCallsBuildEdit(t *testing.T) {
 
 func TestBuildOutboundEditRequiresTarget(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Kind: "edit", Text: "x"}
-	if _, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil)); err == nil {
+	if _, _, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil)); err == nil {
 		t.Fatalf("expected error for edit without targetProviderMessageId")
 	}
 }
 
 func TestBuildOutboundRevokeCallsBuildRevoke(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Kind: "revoke", TargetProviderMessageID: "3EB0XYZ"}
-	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -486,7 +486,7 @@ func TestBuildOutboundRevokeCallsBuildRevoke(t *testing.T) {
 
 func TestBuildOutboundReactionToOwnMessageUsesEmptySender(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Kind: "reaction", TargetProviderMessageID: "3EB0OWN", TargetFromMe: true, Emoji: "👍"}
-	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -501,7 +501,7 @@ func TestBuildOutboundReactionToOwnMessageUsesEmptySender(t *testing.T) {
 
 func TestBuildOutboundReactionToContactMessageUsesChatSender(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Kind: "reaction", TargetProviderMessageID: "3EB0THEM", TargetFromMe: false, Emoji: "❤️"}
-	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -513,7 +513,7 @@ func TestBuildOutboundReactionToContactMessageUsesChatSender(t *testing.T) {
 
 func TestBuildOutboundReactionRequiresTarget(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Kind: "reaction", Emoji: "👍"}
-	_, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	_, _, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err == nil {
 		t.Fatalf("expected an error when reaction has no targetProviderMessageId")
 	}
@@ -521,7 +521,7 @@ func TestBuildOutboundReactionRequiresTarget(t *testing.T) {
 
 func TestBuildOutboundForwardedTextMarksContext(t *testing.T) {
 	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Type: "text", Text: "encaminhada", Forwarded: true}
-	_, msg, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
 	}
@@ -531,5 +531,60 @@ func TestBuildOutboundForwardedTextMarksContext(t *testing.T) {
 	}
 	if !ext.GetContextInfo().GetIsForwarded() {
 		t.Fatalf("expected IsForwarded=true")
+	}
+}
+
+func TestBuildOutboundRoutesButtonsAndList(t *testing.T) {
+	to, msg, nodes, err := mapper.BuildOutbound(context.Background(), stubUploader{}, amqp.GatewaySendCommand{
+		To:          "5511999998888@s.whatsapp.net",
+		Type:        "buttons",
+		Interactive: &amqp.InteractivePayload{Body: "oi", Buttons: []amqp.InteractiveButton{{Text: "sim"}}},
+	}, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if to.User != "5511999998888" {
+		t.Fatalf("to = %s", to)
+	}
+	if msg.GetInteractiveMessage() == nil {
+		t.Fatal("expected an interactive message")
+	}
+	if len(nodes) == 0 {
+		t.Fatal("buttons must carry their binary nodes")
+	}
+
+	_, listMsg, listNodes, err := mapper.BuildOutbound(context.Background(), stubUploader{}, amqp.GatewaySendCommand{
+		To:          "5511999998888@s.whatsapp.net",
+		Type:        "list",
+		Interactive: &amqp.InteractivePayload{Body: "oi", ButtonText: "abrir", Sections: []amqp.InteractiveSection{{Rows: []amqp.InteractiveRow{{Title: "a"}}}}},
+	}, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listMsg.GetDocumentWithCaptionMessage().GetMessage().GetListMessage() == nil {
+		t.Fatal("expected a list message")
+	}
+	if len(listNodes) == 0 {
+		t.Fatal("list must carry its binary nodes")
+	}
+}
+
+func TestBuildOutboundStillReturnsNoNodesForAPlainText(t *testing.T) {
+	_, _, nodes, err := mapper.BuildOutbound(context.Background(), stubUploader{}, amqp.GatewaySendCommand{
+		To: "5511999998888@s.whatsapp.net", Type: "text", Text: "oi",
+	}, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nodes != nil {
+		t.Fatalf("a plain text send must carry no nodes, got %+v", nodes)
+	}
+}
+
+func TestBuildOutboundRefusesAnInteractiveTypeWithNoPayload(t *testing.T) {
+	if _, _, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, amqp.GatewaySendCommand{
+		To: "5511999998888@s.whatsapp.net", Type: "buttons",
+	}, stubFetch(nil, nil)); err == nil {
+		t.Fatal("expected an error when the interactive payload is missing")
 	}
 }

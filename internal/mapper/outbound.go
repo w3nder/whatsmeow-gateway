@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"go.mau.fi/whatsmeow"
+	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
@@ -25,29 +26,29 @@ type MessageBuilder interface {
 
 type MediaFetcher func(ctx context.Context, url string) ([]byte, error)
 
-func BuildOutbound(ctx context.Context, cli MessageBuilder, cmd amqp.GatewaySendCommand, fetch MediaFetcher) (types.JID, *waE2E.Message, error) {
+func BuildOutbound(ctx context.Context, cli MessageBuilder, cmd amqp.GatewaySendCommand, fetch MediaFetcher) (types.JID, *waE2E.Message, []waBinary.Node, error) {
 	to, err := types.ParseJID(cmd.To)
 	if err != nil {
-		return types.JID{}, nil, fmt.Errorf("mapper: parse recipient jid %q: %w", cmd.To, err)
+		return types.JID{}, nil, nil, fmt.Errorf("mapper: parse recipient jid %q: %w", cmd.To, err)
 	}
 	if to.User == "" {
-		return types.JID{}, nil, fmt.Errorf("mapper: invalid recipient jid %q", cmd.To)
+		return types.JID{}, nil, nil, fmt.Errorf("mapper: invalid recipient jid %q", cmd.To)
 	}
 
 	switch cmd.Kind {
 	case "edit":
 		if cmd.TargetProviderMessageID == "" {
-			return types.JID{}, nil, fmt.Errorf("mapper: edit requires targetProviderMessageId")
+			return types.JID{}, nil, nil, fmt.Errorf("mapper: edit requires targetProviderMessageId")
 		}
-		return to, cli.BuildEdit(to, types.MessageID(cmd.TargetProviderMessageID), &waE2E.Message{Conversation: proto.String(cmd.Text)}), nil
+		return to, cli.BuildEdit(to, types.MessageID(cmd.TargetProviderMessageID), &waE2E.Message{Conversation: proto.String(cmd.Text)}), nil, nil
 	case "revoke":
 		if cmd.TargetProviderMessageID == "" {
-			return types.JID{}, nil, fmt.Errorf("mapper: revoke requires targetProviderMessageId")
+			return types.JID{}, nil, nil, fmt.Errorf("mapper: revoke requires targetProviderMessageId")
 		}
-		return to, cli.BuildRevoke(to, types.EmptyJID, types.MessageID(cmd.TargetProviderMessageID)), nil
+		return to, cli.BuildRevoke(to, types.EmptyJID, types.MessageID(cmd.TargetProviderMessageID)), nil, nil
 	case "reaction":
 		if cmd.TargetProviderMessageID == "" {
-			return types.JID{}, nil, fmt.Errorf("mapper: reaction requires targetProviderMessageId")
+			return types.JID{}, nil, nil, fmt.Errorf("mapper: reaction requires targetProviderMessageId")
 		}
 		sender := types.EmptyJID
 		if !cmd.TargetFromMe {
@@ -55,42 +56,58 @@ func BuildOutbound(ctx context.Context, cli MessageBuilder, cmd amqp.GatewaySend
 			if cmd.TargetParticipantJID != "" {
 				participant, err := types.ParseJID(cmd.TargetParticipantJID)
 				if err != nil {
-					return types.JID{}, nil, fmt.Errorf("mapper: parse reaction participant jid %q: %w", cmd.TargetParticipantJID, err)
+					return types.JID{}, nil, nil, fmt.Errorf("mapper: parse reaction participant jid %q: %w", cmd.TargetParticipantJID, err)
 				}
 				sender = participant
 			}
 		}
-		return to, cli.BuildReaction(to, sender, types.MessageID(cmd.TargetProviderMessageID), cmd.Emoji), nil
+		return to, cli.BuildReaction(to, sender, types.MessageID(cmd.TargetProviderMessageID), cmd.Emoji), nil, nil
 	}
 
-	msg, err := buildByType(ctx, cli, cmd, fetch)
+	msg, nodes, err := buildByType(ctx, cli, cmd, fetch)
 	if err != nil {
-		return types.JID{}, nil, err
+		return types.JID{}, nil, nil, err
 	}
 	if cmd.Forwarded {
 		msg = markForwarded(msg)
 	}
-	return to, msg, nil
+	return to, msg, nodes, nil
 }
 
-func buildByType(ctx context.Context, up Uploader, cmd amqp.GatewaySendCommand, fetch MediaFetcher) (*waE2E.Message, error) {
+func buildByType(ctx context.Context, up Uploader, cmd amqp.GatewaySendCommand, fetch MediaFetcher) (*waE2E.Message, []waBinary.Node, error) {
 	switch cmd.Type {
 	case "text":
-		return buildText(cmd), nil
+		return buildText(cmd), nil, nil
 	case "image":
-		return buildMedia(ctx, up, fetch, cmd, whatsmeow.MediaImage)
+		msg, err := buildMedia(ctx, up, fetch, cmd, whatsmeow.MediaImage)
+		return msg, nil, err
 	case "video":
-		return buildMedia(ctx, up, fetch, cmd, whatsmeow.MediaVideo)
+		msg, err := buildMedia(ctx, up, fetch, cmd, whatsmeow.MediaVideo)
+		return msg, nil, err
 	case "audio":
-		return buildMedia(ctx, up, fetch, cmd, whatsmeow.MediaAudio)
+		msg, err := buildMedia(ctx, up, fetch, cmd, whatsmeow.MediaAudio)
+		return msg, nil, err
 	case "document":
-		return buildMedia(ctx, up, fetch, cmd, whatsmeow.MediaDocument)
+		msg, err := buildMedia(ctx, up, fetch, cmd, whatsmeow.MediaDocument)
+		return msg, nil, err
 	case "location":
-		return buildLocation(cmd)
+		msg, err := buildLocation(cmd)
+		return msg, nil, err
 	case "contacts":
-		return buildContacts(cmd)
+		msg, err := buildContacts(cmd)
+		return msg, nil, err
+	case "buttons":
+		if cmd.Interactive == nil {
+			return nil, nil, fmt.Errorf("mapper: type %q requires an interactive payload", cmd.Type)
+		}
+		return BuildButtons(*cmd.Interactive)
+	case "list":
+		if cmd.Interactive == nil {
+			return nil, nil, fmt.Errorf("mapper: type %q requires an interactive payload", cmd.Type)
+		}
+		return BuildList(*cmd.Interactive)
 	default:
-		return nil, fmt.Errorf("mapper: unsupported message type %q", cmd.Type)
+		return nil, nil, fmt.Errorf("mapper: unsupported message type %q", cmd.Type)
 	}
 }
 
