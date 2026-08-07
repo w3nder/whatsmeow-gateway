@@ -234,26 +234,27 @@ type InboundGroup struct {
 }
 
 type InboundEvent struct {
-	PhoneNumberID     string              `json:"phoneNumberId"`
-	From              string              `json:"from"`
-	SenderLid         string              `json:"senderLid,omitempty"`
-	SenderPn          string              `json:"senderPn,omitempty"`
-	FromMe            bool                `json:"fromMe,omitempty"`
-	ProfileName       string              `json:"profileName,omitempty"`
-	ProviderMessageID string              `json:"providerMessageId"`
-	Timestamp         string              `json:"timestamp"`
-	Type              string              `json:"type"`
-	Text              *InboundText        `json:"text,omitempty"`
-	Media             *InboundMedia       `json:"media,omitempty"`
-	Location          *InboundLocation    `json:"location,omitempty"`
-	Contacts          []InboundContact    `json:"contacts,omitempty"`
-	ContextMessageID  string              `json:"contextMessageId,omitempty"`
-	Reaction          *InboundReaction    `json:"reaction,omitempty"`
-	Unsupported       *InboundUnsupported `json:"unsupported,omitempty"`
-	Target            *InboundTarget      `json:"target,omitempty"`
-	RichContent       *InboundRichContent `json:"richContent,omitempty"`
-	ProfilePicture    *avatar.Picture     `json:"profilePicture,omitempty"`
-	Group             *InboundGroup       `json:"group,omitempty"`
+	PhoneNumberID      string              `json:"phoneNumberId"`
+	From               string              `json:"from"`
+	SenderLid          string              `json:"senderLid,omitempty"`
+	SenderPn           string              `json:"senderPn,omitempty"`
+	FromMe             bool                `json:"fromMe,omitempty"`
+	ProfileName        string              `json:"profileName,omitempty"`
+	ProviderMessageID  string              `json:"providerMessageId"`
+	Timestamp          string              `json:"timestamp"`
+	Type               string              `json:"type"`
+	Text               *InboundText        `json:"text,omitempty"`
+	Media              *InboundMedia       `json:"media,omitempty"`
+	Location           *InboundLocation    `json:"location,omitempty"`
+	Contacts           []InboundContact    `json:"contacts,omitempty"`
+	ContextMessageID   string              `json:"contextMessageId,omitempty"`
+	Reaction           *InboundReaction    `json:"reaction,omitempty"`
+	Unsupported        *InboundUnsupported `json:"unsupported,omitempty"`
+	Target             *InboundTarget      `json:"target,omitempty"`
+	RichContent        *InboundRichContent `json:"richContent,omitempty"`
+	ProfilePicture     *avatar.Picture     `json:"profilePicture,omitempty"`
+	Group              *InboundGroup       `json:"group,omitempty"`
+	InteractiveReplyID string              `json:"interactiveReplyId,omitempty"`
 }
 
 type StatusError struct {
@@ -525,6 +526,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		}
 		out.Type = "text"
 		out.Text = &InboundText{Body: body}
+		out.InteractiveReplyID = resp.GetSelectedButtonID()
 		out.ContextMessageID = resp.GetContextInfo().GetStanzaID()
 
 	case msg.GetListResponseMessage() != nil:
@@ -535,6 +537,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		}
 		out.Type = "text"
 		out.Text = &InboundText{Body: body}
+		out.InteractiveReplyID = resp.GetSingleSelectReply().GetSelectedRowID()
 		out.ContextMessageID = resp.GetContextInfo().GetStanzaID()
 
 	case msg.GetTemplateButtonReplyMessage() != nil:
@@ -545,6 +548,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		}
 		out.Type = "text"
 		out.Text = &InboundText{Body: body}
+		out.InteractiveReplyID = resp.GetSelectedID()
 		out.ContextMessageID = resp.GetContextInfo().GetStanzaID()
 
 	case msg.GetInteractiveResponseMessage() != nil:
@@ -558,6 +562,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		}
 		out.Type = "text"
 		out.Text = &InboundText{Body: body}
+		out.InteractiveReplyID = resp.GetNativeFlowResponseMessage().GetName()
 		out.ContextMessageID = resp.GetContextInfo().GetStanzaID()
 
 	case msg.GetPollCreationMessage() != nil, msg.GetPollCreationMessageV2() != nil, msg.GetPollCreationMessageV3() != nil:

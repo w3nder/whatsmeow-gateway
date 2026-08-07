@@ -1236,6 +1236,62 @@ func TestBuildInboundButtonsResponseFallsBackToSelectedButtonID(t *testing.T) {
 	}
 }
 
+func TestButtonReplyKeepsTheSelectedIDAlongsideTheText(t *testing.T) {
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:   types.NewJID("5511999998888", types.DefaultUserServer),
+				Sender: types.NewJID("5511999998888", types.DefaultUserServer),
+			},
+			ID: "REPLY1",
+		},
+		Message: &waE2E.Message{ButtonsResponseMessage: &waE2E.ButtonsResponseMessage{
+			SelectedButtonID: proto.String("opt-2"),
+			Response: &waE2E.ButtonsResponseMessage_SelectedDisplayText{
+				SelectedDisplayText: "Quero saber mais",
+			},
+		}},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), mapper.InboundDeps{}, evt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Text.Body != "Quero saber mais" {
+		t.Fatalf("text = %q, want today's behaviour unchanged", out.Text.Body)
+	}
+	if out.InteractiveReplyID != "opt-2" {
+		t.Fatalf("interactiveReplyId = %q", out.InteractiveReplyID)
+	}
+}
+
+func TestListReplyKeepsTheSelectedRowID(t *testing.T) {
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:   types.NewJID("5511999998888", types.DefaultUserServer),
+				Sender: types.NewJID("5511999998888", types.DefaultUserServer),
+			},
+			ID: "REPLY2",
+		},
+		Message: &waE2E.Message{ListResponseMessage: &waE2E.ListResponseMessage{
+			Title:             proto.String("09:00"),
+			SingleSelectReply: &waE2E.ListResponseMessage_SingleSelectReply{SelectedRowID: proto.String("m1")},
+		}},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), mapper.InboundDeps{}, evt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Text.Body != "09:00" {
+		t.Fatalf("text = %q", out.Text.Body)
+	}
+	if out.InteractiveReplyID != "m1" {
+		t.Fatalf("interactiveReplyId = %q", out.InteractiveReplyID)
+	}
+}
+
 func TestBuildInboundListResponse(t *testing.T) {
 	evt := &events.Message{
 		Info: baseInfo("wamid.list-1", "5511999999999"),
