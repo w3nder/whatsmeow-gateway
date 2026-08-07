@@ -52,6 +52,13 @@ func BuildOutbound(ctx context.Context, cli MessageBuilder, cmd amqp.GatewaySend
 		sender := types.EmptyJID
 		if !cmd.TargetFromMe {
 			sender = to
+			if cmd.TargetParticipantJID != "" {
+				participant, err := types.ParseJID(cmd.TargetParticipantJID)
+				if err != nil {
+					return types.JID{}, nil, fmt.Errorf("mapper: parse reaction participant jid %q: %w", cmd.TargetParticipantJID, err)
+				}
+				sender = participant
+			}
 		}
 		return to, cli.BuildReaction(to, sender, types.MessageID(cmd.TargetProviderMessageID), cmd.Emoji), nil
 	}
