@@ -110,11 +110,15 @@ func (w *waClient) DeviceJID() *types.JID {
 }
 
 func (w *waClient) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID, nodes []waBinary.Node) (whatsmeow.SendResponse, error) {
+	return w.client.SendMessage(ctx, to, msg, sendExtra(id, nodes))
+}
+
+func sendExtra(id types.MessageID, nodes []waBinary.Node) whatsmeow.SendRequestExtra {
 	extra := whatsmeow.SendRequestExtra{ID: id}
 	if len(nodes) > 0 {
 		extra.AdditionalNodes = &nodes
 	}
-	return w.client.SendMessage(ctx, to, msg, extra)
+	return extra
 }
 
 func (w *waClient) BuildEdit(chat types.JID, id types.MessageID, newContent *waE2E.Message) *waE2E.Message {

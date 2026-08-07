@@ -41,6 +41,7 @@ type fakeWAClient struct {
 	lastTo    types.JID
 	lastMsg   *waE2E.Message
 	lastID    types.MessageID
+	lastNodes []waBinary.Node
 
 	disconnectCalls int
 
@@ -124,6 +125,7 @@ func (f *fakeWAClient) SendMessage(ctx context.Context, to types.JID, msg *waE2E
 	f.lastTo = to
 	f.lastMsg = msg
 	f.lastID = id
+	f.lastNodes = nodes
 	return f.sendResp, f.sendErr
 }
 
