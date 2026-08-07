@@ -6,6 +6,8 @@ import (
 
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+
+	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
 )
 
 func TestBuildButtonsMarksEachButtonWithItsNativeFlowName(t *testing.T) {
@@ -16,7 +18,7 @@ func TestBuildButtonsMarksEachButtonWithItsNativeFlowName(t *testing.T) {
 			{ID: "b1", Text: "Quero saber mais"},
 			{Text: "Ver catálogo", URL: "https://exemplo.com/cat"},
 		},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,18 +77,39 @@ func TestBuildButtonsMarksEachButtonWithItsNativeFlowName(t *testing.T) {
 }
 
 func TestBuildButtonsRefusesAnEmptyOrOversizedSet(t *testing.T) {
-	if _, _, err := BuildButtons(InteractivePayload{Body: "oi"}); err == nil {
+	if _, _, err := BuildButtons(InteractivePayload{Body: "oi"}, nil); err == nil {
 		t.Fatal("expected an error with no buttons")
 	}
 	four := []InteractiveButton{{Text: "a"}, {Text: "b"}, {Text: "c"}, {Text: "d"}}
-	if _, _, err := BuildButtons(InteractivePayload{Body: "oi", Buttons: four}); err == nil {
+	if _, _, err := BuildButtons(InteractivePayload{Body: "oi", Buttons: four}, nil); err == nil {
 		t.Fatalf("expected an error above %d buttons", maxButtons)
 	}
 }
 
 func TestBuildButtonsRefusesABodylessMessage(t *testing.T) {
-	if _, _, err := BuildButtons(InteractivePayload{Buttons: []InteractiveButton{{Text: "a"}}}); err == nil {
+	if _, _, err := BuildButtons(InteractivePayload{Buttons: []InteractiveButton{{Text: "a"}}}, nil); err == nil {
 		t.Fatal("expected an error with no body")
+	}
+}
+
+func TestBuildButtonsFallsBackToTheDisplayTextWhenAButtonHasNoID(t *testing.T) {
+	msg, _, err := BuildButtons(InteractivePayload{
+		Body:    "Confirma?",
+		Buttons: []InteractiveButton{{Text: "Sim"}, {Text: "Não"}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	buttons := msg.GetInteractiveMessage().GetNativeFlowMessage().GetButtons()
+	if len(buttons) != 2 {
+		t.Fatalf("expected 2 buttons, got %d", len(buttons))
+	}
+	if !strings.Contains(buttons[0].GetButtonParamsJSON(), `"id":"Sim"`) {
+		t.Fatalf("button 0 params = %q", buttons[0].GetButtonParamsJSON())
+	}
+	if !strings.Contains(buttons[1].GetButtonParamsJSON(), `"id":"Não"`) {
+		t.Fatalf("button 1 params = %q", buttons[1].GetButtonParamsJSON())
 	}
 }
 
@@ -95,11 +118,11 @@ func TestBuildListKeepsSectionsAndRowsInOrder(t *testing.T) {
 		Body:       "Escolha um horário",
 		Footer:     "Atendimento",
 		ButtonText: "Ver horários",
-		Sections: []InteractiveSection{
-			{Title: "Manhã", Rows: []InteractiveRow{{ID: "m1", Title: "09:00"}, {ID: "m2", Title: "10:00", Description: "última vaga"}}},
-			{Title: "Tarde", Rows: []InteractiveRow{{ID: "t1", Title: "14:00"}}},
+		Sections: []amqp.InteractiveSection{
+			{Title: "Manhã", Rows: []amqp.InteractiveRow{{ID: "m1", Title: "09:00"}, {ID: "m2", Title: "10:00", Description: "última vaga"}}},
+			{Title: "Tarde", Rows: []amqp.InteractiveRow{{ID: "t1", Title: "14:00"}}},
 		},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,44 +164,53 @@ func TestBuildListKeepsSectionsAndRowsInOrder(t *testing.T) {
 }
 
 func TestBuildListRefusesMoreRowsThanWhatsappAccepts(t *testing.T) {
-	rows := make([]InteractiveRow, maxListRows+1)
+	rows := make([]amqp.InteractiveRow, maxListRows+1)
 	for i := range rows {
-		rows[i] = InteractiveRow{Title: "linha"}
+		rows[i] = amqp.InteractiveRow{Title: "linha"}
 	}
 	if _, _, err := BuildList(InteractivePayload{
 		Body:       "oi",
 		ButtonText: "abrir",
-		Sections:   []InteractiveSection{{Rows: rows}},
-	}); err == nil {
+		Sections:   []amqp.InteractiveSection{{Rows: rows}},
+	}, nil); err == nil {
 		t.Fatalf("expected an error above %d rows", maxListRows)
 	}
 }
 
 func TestBuildListCountsRowsAcrossAllSections(t *testing.T) {
-	firstSectionRows := make([]InteractiveRow, maxListRows)
+	firstSectionRows := make([]amqp.InteractiveRow, maxListRows)
 	for i := range firstSectionRows {
-		firstSectionRows[i] = InteractiveRow{Title: "linha"}
+		firstSectionRows[i] = amqp.InteractiveRow{Title: "linha"}
 	}
 	if _, _, err := BuildList(InteractivePayload{
 		Body:       "oi",
 		ButtonText: "abrir",
-		Sections: []InteractiveSection{
+		Sections: []amqp.InteractiveSection{
 			{Title: "A", Rows: firstSectionRows},
-			{Title: "B", Rows: []InteractiveRow{{Title: "extra"}}},
+			{Title: "B", Rows: []amqp.InteractiveRow{{Title: "extra"}}},
 		},
-	}); err == nil {
+	}, nil); err == nil {
 		t.Fatalf("expected an error when the sum across sections exceeds %d rows, each section individually staying under the limit", maxListRows)
 	}
 }
 
 func TestBuildListRefusesAnEmptyListOrAMissingButtonText(t *testing.T) {
-	if _, _, err := BuildList(InteractivePayload{Body: "oi", ButtonText: "abrir"}); err == nil {
+	if _, _, err := BuildList(InteractivePayload{Body: "oi", ButtonText: "abrir"}, nil); err == nil {
 		t.Fatal("expected an error with no sections")
 	}
 	if _, _, err := BuildList(InteractivePayload{
 		Body:     "oi",
-		Sections: []InteractiveSection{{Rows: []InteractiveRow{{Title: "a"}}}},
-	}); err == nil {
+		Sections: []amqp.InteractiveSection{{Rows: []amqp.InteractiveRow{{Title: "a"}}}},
+	}, nil); err == nil {
 		t.Fatal("expected an error with no button text")
+	}
+}
+
+func TestBuildListRefusesABodylessMessage(t *testing.T) {
+	if _, _, err := BuildList(InteractivePayload{
+		ButtonText: "abrir",
+		Sections:   []amqp.InteractiveSection{{Rows: []amqp.InteractiveRow{{Title: "a"}}}},
+	}, nil); err == nil {
+		t.Fatal("expected an error with no body")
 	}
 }

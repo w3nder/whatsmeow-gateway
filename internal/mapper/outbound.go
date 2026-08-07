@@ -100,12 +100,12 @@ func buildByType(ctx context.Context, up Uploader, cmd amqp.GatewaySendCommand, 
 		if cmd.Interactive == nil {
 			return nil, nil, fmt.Errorf("mapper: type %q requires an interactive payload", cmd.Type)
 		}
-		return BuildButtons(*cmd.Interactive)
+		return BuildButtons(*cmd.Interactive, contextInfoFor(cmd.ReplyTo))
 	case "list":
 		if cmd.Interactive == nil {
 			return nil, nil, fmt.Errorf("mapper: type %q requires an interactive payload", cmd.Type)
 		}
-		return BuildList(*cmd.Interactive)
+		return BuildList(*cmd.Interactive, contextInfoFor(cmd.ReplyTo))
 	default:
 		return nil, nil, fmt.Errorf("mapper: unsupported message type %q", cmd.Type)
 	}

@@ -15,10 +15,6 @@ type InteractiveButton = amqp.InteractiveButton
 
 type InteractivePayload = amqp.InteractivePayload
 
-type InteractiveRow = amqp.InteractiveRow
-
-type InteractiveSection = amqp.InteractiveSection
-
 const (
 	maxButtons        = 3
 	maxButtonTitleLen = 20
@@ -29,7 +25,7 @@ const (
 	maxListDescLen    = 72
 )
 
-func BuildButtons(p InteractivePayload) (*waE2E.Message, []waBinary.Node, error) {
+func BuildButtons(p InteractivePayload, ctxInfo *waE2E.ContextInfo) (*waE2E.Message, []waBinary.Node, error) {
 	if p.Body == "" {
 		return nil, nil, fmt.Errorf("mapper: buttons message requires a body")
 	}
@@ -56,6 +52,7 @@ func BuildButtons(p InteractivePayload) (*waE2E.Message, []waBinary.Node, error)
 		Body: &waE2E.InteractiveMessage_Body{
 			Text: proto.String(truncateRunes(p.Body, maxBodyLen)),
 		},
+		ContextInfo: ctxInfo,
 		InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
 			NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
 				Buttons:           nfButtons,
@@ -89,7 +86,10 @@ func BuildButtons(p InteractivePayload) (*waE2E.Message, []waBinary.Node, error)
 	return message, nodes, nil
 }
 
-func BuildList(p InteractivePayload) (*waE2E.Message, []waBinary.Node, error) {
+func BuildList(p InteractivePayload, ctxInfo *waE2E.ContextInfo) (*waE2E.Message, []waBinary.Node, error) {
+	if p.Body == "" {
+		return nil, nil, fmt.Errorf("mapper: list message requires a body")
+	}
 	if p.ButtonText == "" {
 		return nil, nil, fmt.Errorf("mapper: list message requires a button text")
 	}
@@ -135,6 +135,7 @@ func BuildList(p InteractivePayload) (*waE2E.Message, []waBinary.Node, error) {
 		ButtonText:  proto.String(truncateRunes(p.ButtonText, maxButtonTitleLen)),
 		ListType:    waE2E.ListMessage_SINGLE_SELECT.Enum(),
 		Sections:    waSections,
+		ContextInfo: ctxInfo,
 	}
 	if p.Footer != "" {
 		listMessage.FooterText = proto.String(truncateRunes(p.Footer, maxFooterLen))
@@ -172,10 +173,14 @@ func buildNativeFlowButtonParams(button InteractiveButton) (string, []byte, erro
 		return "cta_url", paramsJSON, err
 	}
 
+	buttonID := button.ID
+	if buttonID == "" {
+		buttonID = button.Text
+	}
 	paramsJSON, err := json.Marshal(struct {
 		DisplayText string `json:"display_text"`
 		ID          string `json:"id"`
-	}{displayText, button.ID})
+	}{displayText, buttonID})
 	return "quick_reply", paramsJSON, err
 }
 

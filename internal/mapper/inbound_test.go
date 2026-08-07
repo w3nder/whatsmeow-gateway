@@ -1389,8 +1389,38 @@ func TestBuildInboundInteractiveResponse(t *testing.T) {
 	if out.Text == nil || out.Text.Body != `{"id":"opt-1"}` {
 		t.Fatalf("expected Text.Body='{\"id\":\"opt-1\"}', got %+v", out.Text)
 	}
-	if out.InteractiveReplyID != "quick_reply" {
-		t.Fatalf("expected InteractiveReplyID='quick_reply', got %q", out.InteractiveReplyID)
+	if out.InteractiveReplyID != "opt-1" {
+		t.Fatalf("expected InteractiveReplyID='opt-1', got %q", out.InteractiveReplyID)
+	}
+}
+
+func TestBuildInboundInteractiveResponseWithoutAnIDLeavesTheReplyIDEmpty(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.interactive-2", "5511999999999"),
+		Message: &waE2E.Message{
+			InteractiveResponseMessage: &waE2E.InteractiveResponseMessage{
+				InteractiveResponseMessage: &waE2E.InteractiveResponseMessage_NativeFlowResponseMessage_{
+					NativeFlowResponseMessage: &waE2E.InteractiveResponseMessage_NativeFlowResponseMessage{
+						Name:       proto.String("flow"),
+						ParamsJSON: proto.String(`{"screen":"SURVEY"}`),
+					},
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), testDeps(fakeDownloader{}, nil, &fakeMediaStore{}), evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "text" {
+		t.Fatalf("expected Type=text, got %q", out.Type)
+	}
+	if out.Text == nil || out.Text.Body != `{"screen":"SURVEY"}` {
+		t.Fatalf("expected the params json as the body, got %+v", out.Text)
+	}
+	if out.InteractiveReplyID != "" {
+		t.Fatalf("expected an empty InteractiveReplyID, got %q", out.InteractiveReplyID)
 	}
 }
 

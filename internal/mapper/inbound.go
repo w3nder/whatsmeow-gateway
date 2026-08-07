@@ -562,7 +562,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		}
 		out.Type = "text"
 		out.Text = &InboundText{Body: body}
-		out.InteractiveReplyID = resp.GetNativeFlowResponseMessage().GetName()
+		out.InteractiveReplyID = parseNativeFlowButtonParams(resp.GetNativeFlowResponseMessage().GetParamsJSON()).ID
 		out.ContextMessageID = resp.GetContextInfo().GetStanzaID()
 
 	case msg.GetPollCreationMessage() != nil, msg.GetPollCreationMessageV2() != nil, msg.GetPollCreationMessageV3() != nil:

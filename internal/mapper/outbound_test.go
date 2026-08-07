@@ -569,6 +569,47 @@ func TestBuildOutboundRoutesButtonsAndList(t *testing.T) {
 	}
 }
 
+func TestBuildOutboundButtonsReply(t *testing.T) {
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, amqp.GatewaySendCommand{
+		To:          "5511999998888@s.whatsapp.net",
+		Type:        "buttons",
+		Interactive: &amqp.InteractivePayload{Body: "oi", Buttons: []amqp.InteractiveButton{{ID: "b1", Text: "sim"}}},
+		ReplyTo: &amqp.ReplyToPayload{
+			ProviderMessageID: "wamid.quoted-buttons",
+			ParticipantJID:    "5511888888888@s.whatsapp.net",
+		},
+	}, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctxInfo := msg.GetInteractiveMessage().GetContextInfo()
+	if ctxInfo.GetStanzaID() != "wamid.quoted-buttons" {
+		t.Fatalf("expected ContextInfo.StanzaID=wamid.quoted-buttons, got %q", ctxInfo.GetStanzaID())
+	}
+	if ctxInfo.GetParticipant() != "5511888888888@s.whatsapp.net" {
+		t.Fatalf("expected Participant, got %q", ctxInfo.GetParticipant())
+	}
+}
+
+func TestBuildOutboundListReply(t *testing.T) {
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, amqp.GatewaySendCommand{
+		To:          "5511999998888@s.whatsapp.net",
+		Type:        "list",
+		Interactive: &amqp.InteractivePayload{Body: "oi", ButtonText: "abrir", Sections: []amqp.InteractiveSection{{Rows: []amqp.InteractiveRow{{Title: "a"}}}}},
+		ReplyTo:     &amqp.ReplyToPayload{ProviderMessageID: "wamid.quoted-list"},
+	}, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := msg.GetDocumentWithCaptionMessage().GetMessage().GetListMessage()
+	if list == nil {
+		t.Fatalf("expected a list message, got %+v", msg)
+	}
+	if list.GetContextInfo().GetStanzaID() != "wamid.quoted-list" {
+		t.Fatalf("expected ContextInfo.StanzaID=wamid.quoted-list, got %q", list.GetContextInfo().GetStanzaID())
+	}
+}
+
 func TestBuildOutboundStillReturnsNoNodesForAPlainText(t *testing.T) {
 	_, _, nodes, err := mapper.BuildOutbound(context.Background(), stubUploader{}, amqp.GatewaySendCommand{
 		To: "5511999998888@s.whatsapp.net", Type: "text", Text: "oi",
