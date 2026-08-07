@@ -29,10 +29,23 @@ type InteractiveButton struct {
 	URL  string `json:"url,omitempty"`
 }
 
+type InteractiveRow struct {
+	ID          string `json:"id,omitempty"`
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+}
+
+type InteractiveSection struct {
+	Title string           `json:"title,omitempty"`
+	Rows  []InteractiveRow `json:"rows"`
+}
+
 type InteractivePayload struct {
-	Body    string              `json:"body"`
-	Footer  string              `json:"footer,omitempty"`
-	Buttons []InteractiveButton `json:"buttons,omitempty"`
+	Body       string               `json:"body"`
+	Footer     string               `json:"footer,omitempty"`
+	Buttons    []InteractiveButton  `json:"buttons,omitempty"`
+	ButtonText string               `json:"buttonText,omitempty"`
+	Sections   []InteractiveSection `json:"sections,omitempty"`
 }
 
 type GatewaySendCommand struct {
