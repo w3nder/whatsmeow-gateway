@@ -23,23 +23,36 @@ type ReplyToPayload struct {
 	ParticipantJID    string `json:"participantJid,omitempty"`
 }
 
+type InteractiveButton struct {
+	ID   string `json:"id,omitempty"`
+	Text string `json:"text"`
+	URL  string `json:"url,omitempty"`
+}
+
+type InteractivePayload struct {
+	Body    string              `json:"body"`
+	Footer  string              `json:"footer,omitempty"`
+	Buttons []InteractiveButton `json:"buttons,omitempty"`
+}
+
 type GatewaySendCommand struct {
-	TenantID                string           `json:"tenantId"`
-	ChannelID               string           `json:"channelId"`
-	MessageID               string           `json:"messageId"`
-	To                      string           `json:"to"`
-	Type                    string           `json:"type"`
-	Kind                    string           `json:"kind,omitempty"`
-	TargetProviderMessageID string           `json:"targetProviderMessageId,omitempty"`
-	TargetFromMe            bool             `json:"targetFromMe,omitempty"`
-	TargetParticipantJID    string           `json:"targetParticipantJid,omitempty"`
-	Emoji                   string           `json:"emoji,omitempty"`
-	Forwarded               bool             `json:"forwarded,omitempty"`
-	Text                    string           `json:"text,omitempty"`
-	Media                   *MediaPayload    `json:"media,omitempty"`
-	Location                *LocationPayload `json:"location,omitempty"`
-	Contacts                []ContactPayload `json:"contacts,omitempty"`
-	ReplyTo                 *ReplyToPayload  `json:"replyTo,omitempty"`
+	TenantID                string              `json:"tenantId"`
+	ChannelID               string              `json:"channelId"`
+	MessageID               string              `json:"messageId"`
+	To                      string              `json:"to"`
+	Type                    string              `json:"type"`
+	Kind                    string              `json:"kind,omitempty"`
+	TargetProviderMessageID string              `json:"targetProviderMessageId,omitempty"`
+	TargetFromMe            bool                `json:"targetFromMe,omitempty"`
+	TargetParticipantJID    string              `json:"targetParticipantJid,omitempty"`
+	Emoji                   string              `json:"emoji,omitempty"`
+	Forwarded               bool                `json:"forwarded,omitempty"`
+	Text                    string              `json:"text,omitempty"`
+	Media                   *MediaPayload       `json:"media,omitempty"`
+	Location                *LocationPayload    `json:"location,omitempty"`
+	Contacts                []ContactPayload    `json:"contacts,omitempty"`
+	ReplyTo                 *ReplyToPayload     `json:"replyTo,omitempty"`
+	Interactive             *InteractivePayload `json:"interactive,omitempty"`
 }
 
 // GatewayCallCommand drives one action on the calling stack. Unlike a send
