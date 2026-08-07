@@ -1359,6 +1359,9 @@ func TestBuildInboundTemplateButtonReply(t *testing.T) {
 	if out.Text == nil || out.Text.Body != "Confirm" {
 		t.Fatalf("expected Text.Body='Confirm', got %+v", out.Text)
 	}
+	if out.InteractiveReplyID != "tmpl-1" {
+		t.Fatalf("expected InteractiveReplyID='tmpl-1', got %q", out.InteractiveReplyID)
+	}
 }
 
 func TestBuildInboundInteractiveResponse(t *testing.T) {
@@ -1385,6 +1388,9 @@ func TestBuildInboundInteractiveResponse(t *testing.T) {
 	}
 	if out.Text == nil || out.Text.Body != `{"id":"opt-1"}` {
 		t.Fatalf("expected Text.Body='{\"id\":\"opt-1\"}', got %+v", out.Text)
+	}
+	if out.InteractiveReplyID != "quick_reply" {
+		t.Fatalf("expected InteractiveReplyID='quick_reply', got %q", out.InteractiveReplyID)
 	}
 }
 
