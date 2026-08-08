@@ -9,47 +9,35 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 )
 
-func decryptEnvelopes(ctx context.Context, deps InboundDeps, evt *events.Message, msg *waE2E.Message) (*waE2E.Message, error) {
+func decryptEnvelopes(ctx context.Context, deps InboundDeps, evt *events.Message, msg *waE2E.Message, out *InboundEvent) (*waE2E.Message, bool, error) {
 	if deps.Secrets == nil {
-		return msg, nil
+		return msg, false, nil
 	}
 	if sec := msg.GetSecretEncryptedMessage(); sec != nil {
-		return editFromSecret(ctx, deps, evt, sec)
+		edited, err := editFromSecret(ctx, deps, evt, sec)
+		return edited, false, err
 	}
 	if poll := msg.GetPollUpdateMessage(); poll != nil {
-		logPollVote(ctx, deps, evt, poll)
-		return nil, ErrSkip
+		pollID := poll.GetPollCreationMessageKey().GetID()
+		if pollID == "" {
+			slog.Default().Error("mapper: poll vote without a poll creation key", "providerMessageId", evt.Info.ID)
+			return nil, false, ErrSkip
+		}
+		vote, err := deps.Secrets.DecryptPollVote(ctx, evt)
+		if err != nil || vote == nil {
+			slog.Default().Error("mapper: decrypt poll vote", "providerMessageId", evt.Info.ID, "error", err)
+			return nil, false, ErrSkip
+		}
+		hashes := make([]string, 0, len(vote.GetSelectedOptions()))
+		for _, option := range vote.GetSelectedOptions() {
+			hashes = append(hashes, hex.EncodeToString(option))
+		}
+		out.Type = "poll_vote"
+		out.Target = &InboundTarget{ProviderMessageID: pollID}
+		out.PollVote = &InboundPollVote{SelectedOptionHashes: hashes}
+		return nil, true, nil
 	}
-	return msg, nil
-}
-
-func logPollVote(ctx context.Context, deps InboundDeps, evt *events.Message, poll *waE2E.PollUpdateMessage) {
-	if !rawDebugEnabled() {
-		return
-	}
-
-	vote, err := deps.Secrets.DecryptPollVote(ctx, evt)
-	if err != nil || vote == nil {
-		slog.Default().Error("mapper: decrypt poll vote", "providerMessageId", evt.Info.ID, "error", err)
-		return
-	}
-
-	selected := make([]string, 0, len(vote.GetSelectedOptions()))
-	for _, option := range vote.GetSelectedOptions() {
-		selected = append(selected, hex.EncodeToString(option))
-	}
-
-	key := poll.GetPollCreationMessageKey()
-	slog.Default().Info("mapper: poll vote dump",
-		"providerMessageId", evt.Info.ID,
-		"pollMessageId", key.GetID(),
-		"pollRemoteJid", key.GetRemoteJID(),
-		"pollFromMe", key.GetFromMe(),
-		"voterJid", evt.Info.Sender.String(),
-		"voterJidNonAD", evt.Info.Sender.ToNonAD().String(),
-		"voterFromMe", evt.Info.IsFromMe,
-		"pushName", evt.Info.PushName,
-		"selectedOptionHashes", selected)
+	return msg, false, nil
 }
 
 func editFromSecret(ctx context.Context, deps InboundDeps, evt *events.Message, sec *waE2E.SecretEncryptedMessage) (*waE2E.Message, error) {

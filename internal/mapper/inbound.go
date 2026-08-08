@@ -137,6 +137,10 @@ type InboundTarget struct {
 	ProviderMessageID string `json:"providerMessageId"`
 }
 
+type InboundPollVote struct {
+	SelectedOptionHashes []string `json:"selectedOptionHashes"`
+}
+
 type InboundRichButton struct {
 	ID   string `json:"id,omitempty"`
 	Text string `json:"text"`
@@ -257,6 +261,7 @@ type InboundEvent struct {
 	Reaction           *InboundReaction    `json:"reaction,omitempty"`
 	Unsupported        *InboundUnsupported `json:"unsupported,omitempty"`
 	Target             *InboundTarget      `json:"target,omitempty"`
+	PollVote           *InboundPollVote    `json:"pollVote,omitempty"`
 	RichContent        *InboundRichContent `json:"richContent,omitempty"`
 	ProfilePicture     *avatar.Picture     `json:"profilePicture,omitempty"`
 	Group              *InboundGroup       `json:"group,omitempty"`
@@ -380,9 +385,12 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		logRawMessage(evt.Info.ID, msg)
 	}
 
-	msg, err := decryptEnvelopes(ctx, deps, evt, msg)
+	msg, done, err := decryptEnvelopes(ctx, deps, evt, msg, &out)
 	if err != nil {
 		return InboundEvent{}, err
+	}
+	if done {
+		return out, nil
 	}
 
 	if pm := msg.GetProtocolMessage(); pm != nil {

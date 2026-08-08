@@ -156,12 +156,51 @@ func pollUpdateEvent() *events.Message {
 	}
 }
 
-func TestBuildInboundPollUpdateIsSkipped(t *testing.T) {
-	_, err := mapper.BuildInbound(context.Background(), depsWithSecrets(fakeSecrets{
-		vote: &waE2E.PollVoteMessage{SelectedOptions: [][]byte{{0xde, 0xad}}},
+func TestBuildInboundPollUpdateBecomesAPollVote(t *testing.T) {
+	out, err := mapper.BuildInbound(context.Background(), depsWithSecrets(fakeSecrets{
+		vote: &waE2E.PollVoteMessage{SelectedOptions: [][]byte{{0xc1, 0x64}, {0x5b, 0x19}}},
 	}), pollUpdateEvent())
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "poll_vote" {
+		t.Fatalf("expected Type=poll_vote, got %q", out.Type)
+	}
+	if out.Target == nil || out.Target.ProviderMessageID != "POLL123" {
+		t.Fatalf("expected the poll creation id in Target, got %+v", out.Target)
+	}
+	if out.PollVote == nil {
+		t.Fatalf("expected a PollVote payload, got nil")
+	}
+	if got := out.PollVote.SelectedOptionHashes; len(got) != 2 || got[0] != "c164" || got[1] != "5b19" {
+		t.Fatalf("expected the hashes in lowercase hex, got %+v", got)
+	}
+}
+
+func TestBuildInboundPollVoteWithNoSelectionIsAnEmptyList(t *testing.T) {
+	out, err := mapper.BuildInbound(context.Background(), depsWithSecrets(fakeSecrets{
+		vote: &waE2E.PollVoteMessage{},
+	}), pollUpdateEvent())
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.PollVote == nil || out.PollVote.SelectedOptionHashes == nil {
+		t.Fatalf("a withdrawn vote must carry an empty list, not nil: %+v", out.PollVote)
+	}
+	if len(out.PollVote.SelectedOptionHashes) != 0 {
+		t.Fatalf("expected no hashes, got %+v", out.PollVote.SelectedOptionHashes)
+	}
+}
+
+func TestBuildInboundPollVoteWithoutAPollKeyIsSkipped(t *testing.T) {
+	evt := pollUpdateEvent()
+	evt.Message.PollUpdateMessage.PollCreationMessageKey = nil
+
+	_, err := mapper.BuildInbound(context.Background(), depsWithSecrets(fakeSecrets{
+		vote: &waE2E.PollVoteMessage{SelectedOptions: [][]byte{{0xc1, 0x64}}},
+	}), evt)
 	if !errors.Is(err, mapper.ErrSkip) {
-		t.Fatalf("expected mapper.ErrSkip for a poll vote, got %v", err)
+		t.Fatalf("expected mapper.ErrSkip for a vote with no poll key, got %v", err)
 	}
 }
 
