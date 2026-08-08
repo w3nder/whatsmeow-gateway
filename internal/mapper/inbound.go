@@ -66,6 +66,11 @@ type GroupNamer interface {
 	Name(ctx context.Context, jid types.JID) string
 }
 
+type MessageSecrets interface {
+	DecryptSecretEncryptedMessage(ctx context.Context, evt *events.Message) (*waE2E.Message, error)
+	DecryptPollVote(ctx context.Context, evt *events.Message) (*waE2E.PollVoteMessage, error)
+}
+
 // InboundDeps is everything BuildInbound reaches for beyond the event itself.
 // It is a struct rather than a parameter list because the list had already
 // grown past the point where a reader could tell the arguments apart at a
@@ -77,6 +82,7 @@ type InboundDeps struct {
 	// Avatars is optional: nil publishes events without a profile picture.
 	Avatars   AvatarSource
 	Groups    GroupNamer
+	Secrets   MessageSecrets
 	ChannelID string
 	TenantID  string
 }
@@ -372,6 +378,11 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 
 	if rawDebugEnabled() {
 		logRawMessage(evt.Info.ID, msg)
+	}
+
+	msg, err := decryptEnvelopes(ctx, deps, evt, msg)
+	if err != nil {
+		return InboundEvent{}, err
 	}
 
 	if pm := msg.GetProtocolMessage(); pm != nil {

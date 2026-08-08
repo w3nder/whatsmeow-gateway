@@ -771,6 +771,7 @@ func (g *gateway) handleInboundMessage(channelID string, evt *events.Message) {
 		Media:      g.mediaStore,
 		Avatars:    g.channelAvatars(channelID),
 		Groups:     g.channelGroups(channelID),
+		Secrets:    client,
 		ChannelID:  channelID,
 		TenantID:   g.tenantFor(channelID),
 	}, evt)

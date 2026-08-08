@@ -10,6 +10,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/call"
@@ -156,6 +157,14 @@ func (f *fakeWAClient) Download(ctx context.Context, msg whatsmeow.DownloadableM
 
 func (f *fakeWAClient) PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error) {
 	return types.JID{}, false, nil
+}
+
+func (f *fakeWAClient) DecryptSecretEncryptedMessage(ctx context.Context, evt *events.Message) (*waE2E.Message, error) {
+	return nil, nil
+}
+
+func (f *fakeWAClient) DecryptPollVote(ctx context.Context, evt *events.Message) (*waE2E.PollVoteMessage, error) {
+	return nil, nil
 }
 
 // GetProfilePictureInfo answers as a contact with no photo does. These

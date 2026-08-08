@@ -1,0 +1,138 @@
+package mapper_test
+
+import (
+	"context"
+	"errors"
+	"reflect"
+	"testing"
+
+	"go.mau.fi/whatsmeow/proto/waCommon"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
+)
+
+type fakeSecrets struct {
+	decrypted *waE2E.Message
+	vote      *waE2E.PollVoteMessage
+	err       error
+}
+
+func (f fakeSecrets) DecryptSecretEncryptedMessage(ctx context.Context, evt *events.Message) (*waE2E.Message, error) {
+	return f.decrypted, f.err
+}
+
+func (f fakeSecrets) DecryptPollVote(ctx context.Context, evt *events.Message) (*waE2E.PollVoteMessage, error) {
+	return f.vote, f.err
+}
+
+func depsWithSecrets(s mapper.MessageSecrets) mapper.InboundDeps {
+	deps := testDeps(fakeDownloader{}, nil, &fakeMediaStore{})
+	deps.Secrets = s
+	return deps
+}
+
+func secretEditEvent() *events.Message {
+	return &events.Message{
+		Info: baseInfo("wamid.secret-edit-1", "5511999999999"),
+		Message: &waE2E.Message{
+			SecretEncryptedMessage: &waE2E.SecretEncryptedMessage{
+				TargetMessageKey: &waCommon.MessageKey{ID: proto.String("TARGET123")},
+				SecretEncType:    waE2E.SecretEncryptedMessage_MESSAGE_EDIT.Enum(),
+			},
+		},
+	}
+}
+
+func TestBuildInboundSecretEncryptedEditMatchesThePlainEdit(t *testing.T) {
+	secret := secretEditEvent()
+	secretOut, err := mapper.BuildInbound(context.Background(), depsWithSecrets(fakeSecrets{
+		decrypted: &waE2E.Message{Conversation: proto.String("novo texto")},
+	}), secret)
+	if err != nil {
+		t.Fatalf("BuildInbound on the secret edit: %v", err)
+	}
+
+	plain := &events.Message{
+		Info: baseInfo("wamid.secret-edit-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ProtocolMessage: &waE2E.ProtocolMessage{
+				Type:          waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(),
+				Key:           &waCommon.MessageKey{ID: proto.String("TARGET123")},
+				EditedMessage: &waE2E.Message{Conversation: proto.String("novo texto")},
+			},
+		},
+	}
+	plainOut, err := mapper.BuildInbound(context.Background(), depsWithSecrets(fakeSecrets{}), plain)
+	if err != nil {
+		t.Fatalf("BuildInbound on the plain edit: %v", err)
+	}
+
+	if !reflect.DeepEqual(secretOut, plainOut) {
+		t.Fatalf("the encrypted edit must produce the same event as the plain one\n secret: %+v\n plain:  %+v", secretOut, plainOut)
+	}
+	if secretOut.Type != "edit" {
+		t.Fatalf("expected Type=edit, got %q", secretOut.Type)
+	}
+}
+
+func TestBuildInboundSecretEncryptedEditUnwrapsANestedProtocolMessage(t *testing.T) {
+	out, err := mapper.BuildInbound(context.Background(), depsWithSecrets(fakeSecrets{
+		decrypted: &waE2E.Message{
+			ProtocolMessage: &waE2E.ProtocolMessage{
+				Type:          waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(),
+				Key:           &waCommon.MessageKey{ID: proto.String("TARGET123")},
+				EditedMessage: &waE2E.Message{Conversation: proto.String("texto de dentro")},
+			},
+		},
+	}), secretEditEvent())
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Text == nil || out.Text.Body != "texto de dentro" {
+		t.Fatalf("expected the nested edited message to be unwrapped, got %+v", out.Text)
+	}
+}
+
+func TestBuildInboundSecretEncryptedNonEditIsSkipped(t *testing.T) {
+	evt := secretEditEvent()
+	evt.Message.SecretEncryptedMessage.SecretEncType = waE2E.SecretEncryptedMessage_UNKNOWN.Enum()
+
+	_, err := mapper.BuildInbound(context.Background(), depsWithSecrets(fakeSecrets{}), evt)
+	if !errors.Is(err, mapper.ErrSkip) {
+		t.Fatalf("expected mapper.ErrSkip for a non-edit secret enc type, got %v", err)
+	}
+}
+
+func TestBuildInboundSecretEncryptedEditWithoutTargetIsSkipped(t *testing.T) {
+	evt := secretEditEvent()
+	evt.Message.SecretEncryptedMessage.TargetMessageKey = nil
+
+	_, err := mapper.BuildInbound(context.Background(), depsWithSecrets(fakeSecrets{
+		decrypted: &waE2E.Message{Conversation: proto.String("novo texto")},
+	}), evt)
+	if !errors.Is(err, mapper.ErrSkip) {
+		t.Fatalf("expected mapper.ErrSkip for a secret edit with no target key, got %v", err)
+	}
+}
+
+func TestBuildInboundSecretEncryptedEditThatFailsToDecryptIsSkipped(t *testing.T) {
+	_, err := mapper.BuildInbound(context.Background(), depsWithSecrets(fakeSecrets{
+		err: errors.New("no message secret"),
+	}), secretEditEvent())
+	if !errors.Is(err, mapper.ErrSkip) {
+		t.Fatalf("expected mapper.ErrSkip when decryption fails, got %v", err)
+	}
+}
+
+func TestBuildInboundSecretEncryptedWithoutSecretsBehavesAsBefore(t *testing.T) {
+	out, err := mapper.BuildInbound(context.Background(), testDeps(fakeDownloader{}, nil, &fakeMediaStore{}), secretEditEvent())
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "unsupported" {
+		t.Fatalf("expected Type=unsupported with no MessageSecrets, got %q", out.Type)
+	}
+}

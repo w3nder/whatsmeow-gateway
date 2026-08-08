@@ -11,6 +11,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/call"
@@ -39,6 +40,8 @@ type WAClient interface {
 	Upload(ctx context.Context, data []byte, mt whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
 	PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error)
+	DecryptSecretEncryptedMessage(ctx context.Context, evt *events.Message) (*waE2E.Message, error)
+	DecryptPollVote(ctx context.Context, evt *events.Message) (*waE2E.PollVoteMessage, error)
 	GetProfilePictureInfo(ctx context.Context, jid types.JID, params *whatsmeow.GetProfilePictureParams) (*types.ProfilePictureInfo, error)
 	GetGroupInfo(ctx context.Context, jid types.JID) (*types.GroupInfo, error)
 	AddEventHandler(handler func(any)) uint32
@@ -147,6 +150,14 @@ func (w *waClient) PNForLID(ctx context.Context, lid types.JID) (types.JID, bool
 		return types.JID{}, false, err
 	}
 	return pn, !pn.IsEmpty(), nil
+}
+
+func (w *waClient) DecryptSecretEncryptedMessage(ctx context.Context, evt *events.Message) (*waE2E.Message, error) {
+	return w.client.DecryptSecretEncryptedMessage(ctx, evt)
+}
+
+func (w *waClient) DecryptPollVote(ctx context.Context, evt *events.Message) (*waE2E.PollVoteMessage, error) {
+	return w.client.DecryptPollVote(ctx, evt)
 }
 
 func (w *waClient) GetProfilePictureInfo(ctx context.Context, jid types.JID, params *whatsmeow.GetProfilePictureParams) (*types.ProfilePictureInfo, error) {

@@ -9,6 +9,7 @@ import (
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/call"
 )
@@ -68,6 +69,14 @@ func (f *recordingClient) Download(ctx context.Context, msg whatsmeow.Downloadab
 
 func (f *recordingClient) PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error) {
 	return types.JID{}, false, nil
+}
+
+func (f *recordingClient) DecryptSecretEncryptedMessage(ctx context.Context, evt *events.Message) (*waE2E.Message, error) {
+	return nil, nil
+}
+
+func (f *recordingClient) DecryptPollVote(ctx context.Context, evt *events.Message) (*waE2E.PollVoteMessage, error) {
+	return nil, nil
 }
 
 func (f *recordingClient) GetProfilePictureInfo(ctx context.Context, jid types.JID, params *whatsmeow.GetProfilePictureParams) (*types.ProfilePictureInfo, error) {
