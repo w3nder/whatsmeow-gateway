@@ -136,3 +136,50 @@ func TestBuildInboundSecretEncryptedWithoutSecretsBehavesAsBefore(t *testing.T) 
 		t.Fatalf("expected Type=unsupported with no MessageSecrets, got %q", out.Type)
 	}
 }
+
+func pollUpdateEvent() *events.Message {
+	return &events.Message{
+		Info: baseInfo("wamid.poll-vote-1", "5511999999999"),
+		Message: &waE2E.Message{
+			PollUpdateMessage: &waE2E.PollUpdateMessage{
+				PollCreationMessageKey: &waCommon.MessageKey{
+					ID:        proto.String("POLL123"),
+					FromMe:    proto.Bool(true),
+					RemoteJID: proto.String("2002125877314@lid"),
+				},
+				Vote: &waE2E.PollEncValue{
+					EncPayload: []byte("cifrado"),
+					EncIV:      []byte("iv"),
+				},
+			},
+		},
+	}
+}
+
+func TestBuildInboundPollUpdateIsSkipped(t *testing.T) {
+	_, err := mapper.BuildInbound(context.Background(), depsWithSecrets(fakeSecrets{
+		vote: &waE2E.PollVoteMessage{SelectedOptions: [][]byte{{0xde, 0xad}}},
+	}), pollUpdateEvent())
+	if !errors.Is(err, mapper.ErrSkip) {
+		t.Fatalf("expected mapper.ErrSkip for a poll vote, got %v", err)
+	}
+}
+
+func TestBuildInboundPollUpdateThatFailsToDecryptIsSkipped(t *testing.T) {
+	_, err := mapper.BuildInbound(context.Background(), depsWithSecrets(fakeSecrets{
+		err: errors.New("no message secret"),
+	}), pollUpdateEvent())
+	if !errors.Is(err, mapper.ErrSkip) {
+		t.Fatalf("expected mapper.ErrSkip when the vote cannot be decrypted, got %v", err)
+	}
+}
+
+func TestBuildInboundPollUpdateWithoutSecretsBehavesAsBefore(t *testing.T) {
+	out, err := mapper.BuildInbound(context.Background(), testDeps(fakeDownloader{}, nil, &fakeMediaStore{}), pollUpdateEvent())
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "unsupported" {
+		t.Fatalf("expected Type=unsupported with no MessageSecrets, got %q", out.Type)
+	}
+}
