@@ -92,3 +92,41 @@ func TestGroupInboundWireContractOmitsParticipantOnOurOwnMessage(t *testing.T) {
 		t.Fatalf("whatsapp.group.inbound.v1 fromMe wire contract drifted\n got: %s\nwant: %s", raw, groupInboundFromMeWireContract)
 	}
 }
+
+const pollVoteWithdrawnWireContract = `{"phoneNumberId":"channel-1","from":"5511999999999","senderPn":"5511999999999","profileName":"Jane Doe","providerMessageId":"wamid.poll-vote-1","timestamp":"1700000000","type":"poll_vote","target":{"providerMessageId":"POLL123"},"pollVote":{"selectedOptionHashes":[]}}`
+
+const pollVoteWithSelectionsWireContract = `{"phoneNumberId":"channel-1","from":"5511999999999","senderPn":"5511999999999","profileName":"Jane Doe","providerMessageId":"wamid.poll-vote-1","timestamp":"1700000000","type":"poll_vote","target":{"providerMessageId":"POLL123"},"pollVote":{"selectedOptionHashes":["c164","5b19"]}}`
+
+func TestPollVoteWireContractWithdrawnKeepsAnEmptyArray(t *testing.T) {
+	out, err := mapper.BuildInbound(context.Background(), depsWithSecrets(fakeSecrets{
+		vote: &waE2E.PollVoteMessage{},
+	}), pollUpdateEvent())
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal poll_vote event: %v", err)
+	}
+	if string(raw) != pollVoteWithdrawnWireContract {
+		t.Fatalf("withdrawn poll_vote wire contract drifted\n got: %s\nwant: %s", raw, pollVoteWithdrawnWireContract)
+	}
+}
+
+func TestPollVoteWireContractWithSelectionsEncodesLowercaseHex(t *testing.T) {
+	out, err := mapper.BuildInbound(context.Background(), depsWithSecrets(fakeSecrets{
+		vote: &waE2E.PollVoteMessage{SelectedOptions: [][]byte{{0xc1, 0x64}, {0x5b, 0x19}}},
+	}), pollUpdateEvent())
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal poll_vote event: %v", err)
+	}
+	if string(raw) != pollVoteWithSelectionsWireContract {
+		t.Fatalf("poll_vote with selections wire contract drifted\n got: %s\nwant: %s", raw, pollVoteWithSelectionsWireContract)
+	}
+}
