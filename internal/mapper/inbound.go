@@ -173,6 +173,16 @@ type InboundRichProduct struct {
 	URL         string `json:"url,omitempty"`
 }
 
+type InboundRichOrder struct {
+	OrderID    string `json:"orderId"`
+	Title      string `json:"title,omitempty"`
+	ItemCount  int    `json:"itemCount"`
+	Status     string `json:"status,omitempty"`
+	AmountText string `json:"amountText,omitempty"`
+	Currency   string `json:"currency,omitempty"`
+	SellerJID  string `json:"sellerJid,omitempty"`
+}
+
 type InboundRichPaymentItem struct {
 	Name       string `json:"name,omitempty"`
 	Quantity   int    `json:"quantity,omitempty"`
@@ -223,6 +233,7 @@ type InboundRichContent struct {
 	Buttons []InboundRichButton `json:"buttons,omitempty"`
 	List    *InboundRichList    `json:"list,omitempty"`
 	Product *InboundRichProduct `json:"product,omitempty"`
+	Order   *InboundRichOrder   `json:"order,omitempty"`
 	Event   *InboundRichEvent   `json:"event,omitempty"`
 	Payment *InboundRichPayment `json:"payment,omitempty"`
 	Poll    *InboundRichPoll    `json:"poll,omitempty"`
@@ -632,6 +643,19 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 				if media, err := downloadAndStore(ctx, dl, s3, tenantID, evt.Info.ID, productImage.GetMimetype(), productImage); err == nil {
 					out.Media = media
 				}
+			}
+		}
+
+	case msg.GetOrderMessage() != nil:
+		order := msg.GetOrderMessage()
+		if err := applyRichOrFallback(&out, msg, buildOrderRich(order)); err != nil {
+			return InboundEvent{}, err
+		}
+		out.ContextMessageID = order.GetContextInfo().GetStanzaID()
+		if out.RichContent != nil && len(order.GetThumbnail()) > 0 {
+			key := fmt.Sprintf("inbound-media/%s/%s", tenantID, evt.Info.ID)
+			if err := s3.Put(ctx, key, "image/jpeg", order.GetThumbnail()); err == nil {
+				out.Media = &InboundMedia{Key: key, MimeType: "image/jpeg"}
 			}
 		}
 
@@ -1117,6 +1141,26 @@ func buildProductRich(pm *waE2E.ProductMessage) *InboundRichContent {
 			Currency:    snap.GetCurrencyCode(),
 			RetailerID:  snap.GetRetailerID(),
 			URL:         snap.GetURL(),
+		},
+	}
+}
+
+func buildOrderRich(om *waE2E.OrderMessage) *InboundRichContent {
+	orderID := om.GetOrderID()
+	if orderID == "" {
+		return nil
+	}
+
+	return &InboundRichContent{
+		Kind: "order",
+		Order: &InboundRichOrder{
+			OrderID:    orderID,
+			Title:      om.GetOrderTitle(),
+			ItemCount:  int(om.GetItemCount()),
+			Status:     om.GetStatus().String(),
+			AmountText: formatProductPriceText(om.GetTotalAmount1000(), om.GetTotalCurrencyCode()),
+			Currency:   om.GetTotalCurrencyCode(),
+			SellerJID:  om.GetSellerJID(),
 		},
 	}
 }

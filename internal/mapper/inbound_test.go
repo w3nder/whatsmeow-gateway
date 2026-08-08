@@ -2068,6 +2068,117 @@ func TestBuildInboundProductMessageWithoutTitleFallsBackToUnsupported(t *testing
 	}
 }
 
+func orderEvent(thumbnail []byte) *events.Message {
+	return &events.Message{
+		Info: baseInfo("wamid.order-1", "5511999999999"),
+		Message: &waE2E.Message{
+			OrderMessage: &waE2E.OrderMessage{
+				OrderID:           proto.String("2286705342067430"),
+				ItemCount:         proto.Int32(1),
+				Status:            waE2E.OrderMessage_INQUIRY.Enum(),
+				OrderTitle:        proto.String(""),
+				SellerJID:         proto.String("556484338175@s.whatsapp.net"),
+				TotalAmount1000:   proto.Int64(11111000),
+				TotalCurrencyCode: proto.String("BRL"),
+				Thumbnail:         thumbnail,
+			},
+		},
+	}
+}
+
+func TestBuildInboundOrder(t *testing.T) {
+	out, err := mapper.BuildInbound(context.Background(), testDeps(fakeDownloader{}, nil, &fakeMediaStore{}), orderEvent(nil))
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "order" {
+		t.Fatalf("expected Type=order, got %q", out.Type)
+	}
+	if out.RichContent == nil || out.RichContent.Kind != "order" {
+		t.Fatalf("expected RichContent.Kind=order, got %+v", out.RichContent)
+	}
+	order := out.RichContent.Order
+	if order == nil || order.OrderID != "2286705342067430" {
+		t.Fatalf("expected Order.OrderID=2286705342067430, got %+v", order)
+	}
+	if order.ItemCount != 1 {
+		t.Fatalf("expected Order.ItemCount=1, got %d", order.ItemCount)
+	}
+	if order.Status != "INQUIRY" {
+		t.Fatalf("expected Order.Status=INQUIRY, got %q", order.Status)
+	}
+	if order.SellerJID != "556484338175@s.whatsapp.net" {
+		t.Fatalf("unexpected Order.SellerJID: %q", order.SellerJID)
+	}
+	if order.Currency != "BRL" {
+		t.Fatalf("expected Order.Currency=BRL, got %q", order.Currency)
+	}
+	if order.AmountText != "R$ 11.111,00" {
+		t.Fatalf("expected Order.AmountText='R$ 11.111,00', got %q", order.AmountText)
+	}
+}
+
+func TestBuildInboundOrderStoresTheThumbnail(t *testing.T) {
+	store := &fakeMediaStore{}
+
+	out, err := mapper.BuildInbound(context.Background(), testDeps(fakeDownloader{}, nil, store), orderEvent([]byte("jpeg-bytes")))
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Media == nil {
+		t.Fatalf("expected Media for an order with a thumbnail, got nil")
+	}
+	if out.Media.Key != "inbound-media/tenant-1/wamid.order-1" {
+		t.Fatalf("expected Media.Key=inbound-media/tenant-1/wamid.order-1, got %q", out.Media.Key)
+	}
+	if out.Media.MimeType != "image/jpeg" {
+		t.Fatalf("expected MimeType=image/jpeg, got %q", out.Media.MimeType)
+	}
+	if len(store.puts) != 1 {
+		t.Fatalf("expected one stored object, got %d", len(store.puts))
+	}
+	if store.puts[0].key != out.Media.Key || store.puts[0].mime != "image/jpeg" {
+		t.Fatalf("unexpected stored object: %+v", store.puts[0])
+	}
+	if string(store.puts[0].data) != "jpeg-bytes" {
+		t.Fatalf("expected the thumbnail bytes stored, got %q", store.puts[0].data)
+	}
+}
+
+func TestBuildInboundOrderWithoutThumbnailHasNoMedia(t *testing.T) {
+	store := &fakeMediaStore{}
+
+	out, err := mapper.BuildInbound(context.Background(), testDeps(fakeDownloader{}, nil, store), orderEvent(nil))
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Media != nil {
+		t.Fatalf("expected no Media for an order without a thumbnail, got %+v", out.Media)
+	}
+	if len(store.puts) != 0 {
+		t.Fatalf("expected no store.Put calls, got %d", len(store.puts))
+	}
+}
+
+func TestBuildInboundOrderWithoutAnIDIsUnsupported(t *testing.T) {
+	evt := orderEvent(nil)
+	evt.Message.OrderMessage.OrderID = nil
+
+	out, err := mapper.BuildInbound(context.Background(), testDeps(fakeDownloader{}, nil, &fakeMediaStore{}), evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "unsupported" {
+		t.Fatalf("expected Type=unsupported, got %q", out.Type)
+	}
+	if out.RichContent != nil {
+		t.Fatalf("expected no RichContent for an OrderMessage without an ID, got %+v", out.RichContent)
+	}
+	if out.Unsupported == nil || out.Unsupported.Type != "orderMessage" {
+		t.Fatalf("expected Unsupported.Type=orderMessage, got %+v", out.Unsupported)
+	}
+}
+
 func TestBuildInboundEventMessage(t *testing.T) {
 	evt := &events.Message{
 		Info: baseInfo("wamid.event-1", "5511999999999"),
