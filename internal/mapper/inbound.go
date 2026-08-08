@@ -1145,6 +1145,17 @@ func buildProductRich(pm *waE2E.ProductMessage) *InboundRichContent {
 	}
 }
 
+func orderStatusName(om *waE2E.OrderMessage) string {
+	if om.Status == nil {
+		return ""
+	}
+	name, ok := waE2E.OrderMessage_OrderStatus_name[int32(om.GetStatus())]
+	if !ok {
+		return ""
+	}
+	return name
+}
+
 func buildOrderRich(om *waE2E.OrderMessage) *InboundRichContent {
 	orderID := om.GetOrderID()
 	if orderID == "" {
@@ -1157,7 +1168,7 @@ func buildOrderRich(om *waE2E.OrderMessage) *InboundRichContent {
 			OrderID:    orderID,
 			Title:      om.GetOrderTitle(),
 			ItemCount:  int(om.GetItemCount()),
-			Status:     om.GetStatus().String(),
+			Status:     orderStatusName(om),
 			AmountText: formatProductPriceText(om.GetTotalAmount1000(), om.GetTotalCurrencyCode()),
 			Currency:   om.GetTotalCurrencyCode(),
 			SellerJID:  om.GetSellerJID(),

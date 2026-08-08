@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -2389,5 +2390,29 @@ func TestBuildInboundNamesTheReactorEvenOnOurOwnGroupReaction(t *testing.T) {
 		if out.Reaction.SenderJID != "173907587899617@lid" {
 			t.Fatalf("fromMe=%v: senderJid = %q", fromMe, out.Reaction.SenderJID)
 		}
+	}
+}
+
+func TestBuildInboundOrderWithoutAStatusOmitsIt(t *testing.T) {
+	evt := orderEvent(nil)
+	evt.Message.OrderMessage.Status = nil
+
+	out, err := mapper.BuildInbound(context.Background(), testDeps(fakeDownloader{}, nil, &fakeMediaStore{}), evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.RichContent == nil || out.RichContent.Order == nil {
+		t.Fatalf("expected an order rich content, got %+v", out.RichContent)
+	}
+	if got := out.RichContent.Order.Status; got != "" {
+		t.Fatalf("expected no status when the field is absent, got %q", got)
+	}
+
+	raw, err := json.Marshal(out.RichContent.Order)
+	if err != nil {
+		t.Fatalf("marshal order: %v", err)
+	}
+	if strings.Contains(string(raw), `"status"`) {
+		t.Fatalf("expected the status key to be absent from the wire payload, got %s", raw)
 	}
 }
