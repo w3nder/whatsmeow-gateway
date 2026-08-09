@@ -24,7 +24,8 @@ func TestConsumerReportsFailureWhenBrokerConnectionDies(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StartSend failed: %v", err)
 	}
-	if err := consumer.StartPair(context.Background(), func(_ context.Context, _ gatewayamqp.PairCommand) error {
+	if err := consumer.StartPair(context.Background(), func(_ context.Context, _ gatewayamqp.PairCommand, accept func()) error {
+		accept()
 		return nil
 	}); err != nil {
 		t.Fatalf("StartPair failed: %v", err)

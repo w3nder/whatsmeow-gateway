@@ -2,10 +2,10 @@ package avatar_test
 
 import (
 	"context"
-	"strings"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
