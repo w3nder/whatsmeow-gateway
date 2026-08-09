@@ -32,11 +32,33 @@ type PairUpdate struct {
 
 type ClientFactory func(channelID string, jid *types.JID) (WAClient, error)
 
+// pairing is one channel's live QR loop, from the moment Pair opens the QR channel
+// until that loop ends. It carries the code whatsmeow emitted last so a pair command
+// that arrives mid-flight can be answered with the code that is on the operator's
+// screen right now instead of the one twenty seconds away.
+type pairing struct {
+	qr        string
+	qrExpires time.Time
+}
+
+// validQR returns the retained code only while the phone would still accept it.
+// Replaying an expired code is worse than replaying nothing: the operator scans it,
+// WhatsApp refuses it, and nothing on screen explains why.
+func (p *pairing) validQR(now time.Time) (string, bool) {
+	if p.qr == "" || !now.Before(p.qrExpires) {
+		return "", false
+	}
+	return p.qr, true
+}
+
 type Manager struct {
 	factory ClientFactory
 
 	mu       sync.Mutex
 	sessions map[string]WAClient
+	// pairings holds only the channels currently pairing, so a retained code dies
+	// with its loop and can never be replayed to another channel or another tenant.
+	pairings map[string]*pairing
 
 	handlersMu sync.RWMutex
 	handlers   []func(channelID string, evt any)
@@ -46,6 +68,7 @@ func NewManager(factory ClientFactory) *Manager {
 	return &Manager{
 		factory:  factory,
 		sessions: make(map[string]WAClient),
+		pairings: make(map[string]*pairing),
 	}
 }
 
@@ -55,6 +78,17 @@ func (m *Manager) OnEvent(handler func(channelID string, evt any)) {
 	m.handlers = append(m.handlers[:len(m.handlers):len(m.handlers)], handler)
 }
 
+// Pair drives a channel through the QR flow, reporting every step on the returned
+// channel, which closes once the pairing ends.
+//
+// Exactly one QR loop ever runs per channel. whatsmeow refuses to hand out a second
+// QR channel for a client whose socket is up (ErrQRAlreadyConnected), so a second pair
+// command -- the operator closing the pairing dialog and opening it again -- could not
+// run its own loop even if we let it. It joins the live one instead: it is handed the
+// retained code immediately when that code is still valid and then closes, leaving the
+// running loop as the only publisher of the rotations and of the outcome. Nothing is
+// published twice, and the operator stops staring at an empty box until the next
+// rotation twenty seconds later.
 func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate, error) {
 	client, err := m.client(channelID)
 	if err != nil {
@@ -71,17 +105,28 @@ func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate
 		return updates, nil
 	}
 
+	p, joined := m.beginPairing(channelID)
+	if joined != nil {
+		return joined, nil
+	}
+
 	qr, err := client.QRChannel(ctx)
 	if err != nil {
-		return nil, err
+		m.endPairing(channelID, p, client)
+		return nil, fmt.Errorf("session: open qr channel for %s: %w", channelID, err)
 	}
 	if err := client.Connect(); err != nil {
-		return nil, err
+		m.endPairing(channelID, p, client)
+		return nil, fmt.Errorf("session: connect for pairing %s: %w", channelID, err)
 	}
 
 	updates := make(chan PairUpdate)
 	go func() {
 		defer close(updates)
+		// One cleanup for every way this loop ends -- a terminal event, whatsmeow
+		// closing the channel, or the caller's context going away.
+		defer m.endPairing(channelID, p, client)
+
 		for {
 			select {
 			case evt, ok := <-qr:
@@ -91,10 +136,16 @@ func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate
 				var update PairUpdate
 				switch evt.Event {
 				case "code":
+					// Retained before it is forwarded, because the whole point is to
+					// answer a pair command that arrives while nobody is reading this
+					// channel -- including while this very send is blocked.
+					m.retainQR(channelID, p, evt.Code, evt.Timeout)
 					update = PairUpdate{QR: evt.Code}
 				case "success":
+					m.clearQR(channelID, p)
 					update = PairUpdate{Connected: true}
 				default:
+					m.clearQR(channelID, p)
 					pairErr := evt.Error
 					if pairErr == nil {
 						pairErr = fmt.Errorf("whatsmeow-gateway: pairing ended with event %q", evt.Event)
@@ -113,6 +164,80 @@ func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate
 	}()
 
 	return updates, nil
+}
+
+// beginPairing claims the channel's single QR loop for the caller. A caller that finds
+// the loop already claimed gets no pairing to drive and, instead, a closed channel
+// carrying the retained code when it is still valid -- see Pair.
+func (m *Manager) beginPairing(channelID string) (*pairing, <-chan PairUpdate) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if live, ok := m.pairings[channelID]; ok {
+		updates := make(chan PairUpdate, 1)
+		if code, valid := live.validQR(time.Now()); valid {
+			updates <- PairUpdate{QR: code}
+		}
+		close(updates)
+		return nil, updates
+	}
+
+	p := &pairing{}
+	m.pairings[channelID] = p
+	return p, nil
+}
+
+// endPairing takes the channel out of the pairing state and, when the device never got
+// paired, throws the client away.
+//
+// A client that reached a terminal QR event unpaired is finished: whatsmeow has already
+// removed its QR event handler and, on the timeout path, disconnected it. Left in
+// m.sessions it still looks like a live session, and it poisons both paths that come
+// next -- EnsureConnected would try to bring an unpaired device up rather than reporting
+// ErrNoSession, and the next pair command would reuse the same client, whose QRChannel
+// answers ErrQRAlreadyConnected on the outcomes where whatsmeow leaves the socket up.
+// Dropping it here is what lets the retry start from a fresh device and show a QR at
+// once.
+func (m *Manager) endPairing(channelID string, p *pairing, client WAClient) {
+	m.mu.Lock()
+	if m.pairings[channelID] == p {
+		delete(m.pairings, channelID)
+	}
+	m.mu.Unlock()
+
+	if client.DeviceJID() == nil {
+		m.drop(channelID, client)
+	}
+}
+
+// retainQR keeps the code whatsmeow just emitted for exactly as long as whatsmeow says
+// it lasts. A code that arrives without a stated lifetime is not retained at all: there
+// would be no way to tell later whether it is still the code the phone expects.
+func (m *Manager) retainQR(channelID string, p *pairing, code string, timeout time.Duration) {
+	if code == "" || timeout <= 0 {
+		m.clearQR(channelID, p)
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.pairings[channelID] != p {
+		return
+	}
+	p.qr = code
+	p.qrExpires = time.Now().Add(timeout)
+}
+
+func (m *Manager) clearQR(channelID string, p *pairing) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.pairings[channelID] != p {
+		return
+	}
+	p.qr = ""
+	p.qrExpires = time.Time{}
 }
 
 func (m *Manager) EnsureConnected(channelID string) error {
@@ -166,6 +291,9 @@ func (m *Manager) DisconnectAll() {
 		sessions = append(sessions, c)
 	}
 	m.sessions = make(map[string]WAClient)
+	// Every QR loop dies with its socket, so no code may survive into whatever
+	// pairs next.
+	m.pairings = make(map[string]*pairing)
 	m.mu.Unlock()
 
 	for _, c := range sessions {

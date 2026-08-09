@@ -28,7 +28,11 @@ type fakeWAClient struct {
 	// that whatsmeow is still retrying in the background.
 	staysDown bool
 
-	qrItems    []whatsmeow.QRChannelItem
+	qrItems []whatsmeow.QRChannelItem
+	// qrFeed, when set, is handed out by QRChannel as-is, so a test can hold a pairing
+	// session open and decide when each item lands. qrItems stays for the tests that
+	// only need a fixed script played out at once.
+	qrFeed     chan whatsmeow.QRChannelItem
 	connectErr error
 
 	connectCalls      int
@@ -58,9 +62,21 @@ func newFakeWAClient() *fakeWAClient {
 	return &fakeWAClient{}
 }
 
+// QRChannel mirrors whatsmeow's GetQRChannel, refusal included: a client whose socket
+// is up gets no QR channel at all. Reusing a client that already went through the QR
+// flow is exactly the case that refusal catches, so the fake has to reproduce it.
 func (f *fakeWAClient) QRChannel(ctx context.Context) (<-chan whatsmeow.QRChannelItem, error) {
 	f.mu.Lock()
 	f.qrChannelCalls++
+	if f.connected {
+		f.mu.Unlock()
+		return nil, whatsmeow.ErrQRAlreadyConnected
+	}
+	if f.qrFeed != nil {
+		feed := f.qrFeed
+		f.mu.Unlock()
+		return feed, nil
+	}
 	items := f.qrItems
 	if f.deviceJID == nil {
 		for _, item := range items {
@@ -205,6 +221,15 @@ func (f *fakeWAClient) dropSocket() {
 	f.mu.Lock()
 	f.connected = false
 	f.loggedIn = true
+	f.mu.Unlock()
+}
+
+// markPaired stands in for whatsmeow writing the device's JID to the store on
+// PairSuccess, which a test feeding items through qrFeed has to do for itself.
+func (f *fakeWAClient) markPaired() {
+	jid := types.NewJID("15550000000", types.DefaultUserServer)
+	f.mu.Lock()
+	f.deviceJID = &jid
 	f.mu.Unlock()
 }
 
