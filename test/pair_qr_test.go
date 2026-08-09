@@ -126,6 +126,125 @@ func TestManagerPairDoesNotReplayExpiredQR(t *testing.T) {
 	drainPairUpdates(t, first, 2*time.Second)
 }
 
+// TestManagerPairSkipsQRThatExpiredInWhatsmeowsBuffer covers the emitter as whatsmeow
+// actually wrote it: the codes go into a channel buffered at eight on the emitter's own
+// timer, sent whether or not anybody is reading. A loop held up publishing one code
+// therefore comes back to a code that was released while it was away and may already be
+// dead. Handing that one to the operator is the same broken scan as replaying an expired
+// code, only harder to see, so it is dropped and the loop moves on to the live one
+// behind it.
+func TestManagerPairSkipsQRThatExpiredInWhatsmeowsBuffer(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.qrFeed = make(chan whatsmeow.QRChannelItem)
+
+	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
+		return fake, nil
+	})
+
+	updates, err := mgr.Pair(context.Background(), "channel-stale-buffer-1")
+	if err != nil {
+		t.Fatalf("Pair failed: %v", err)
+	}
+
+	// Collected off to the side so a code the loop should have dropped cannot deadlock
+	// the feed below and turn a wrong answer into a hung test.
+	var (
+		codesMu sync.Mutex
+		codes   []string
+		drained = make(chan struct{})
+	)
+	go func() {
+		defer close(drained)
+		for u := range updates {
+			if u.QR == "" {
+				continue
+			}
+			codesMu.Lock()
+			codes = append(codes, u.QR)
+			codesMu.Unlock()
+		}
+	}()
+	published := func() []string {
+		codesMu.Lock()
+		defer codesMu.Unlock()
+		return append([]string(nil), codes...)
+	}
+
+	const lifetime = 600 * time.Millisecond
+
+	fake.qrFeed <- whatsmeow.QRChannelItem{Event: "code", Code: "qr-first", Timeout: lifetime}
+
+	// Long enough that the code the emitter released next -- at one lifetime after the
+	// first, on its schedule -- has itself run out before this loop gets to read it.
+	time.Sleep(lifetime * 5 / 2)
+
+	fake.qrFeed <- whatsmeow.QRChannelItem{Event: "code", Code: "qr-expired-in-buffer", Timeout: lifetime}
+	fake.qrFeed <- whatsmeow.QRChannelItem{Event: "code", Code: "qr-current", Timeout: lifetime}
+	close(fake.qrFeed)
+
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for the pair session to end, published %v", published())
+	}
+
+	got := published()
+	if len(got) != 2 || got[0] != "qr-first" || got[1] != "qr-current" {
+		t.Fatalf("expected the code that expired in the buffer to be dropped and only the live ones published, got %v", got)
+	}
+}
+
+// TestManagerPairReplayJudgesTheRetainedQRFromWhenItWasEmitted is the same fact seen
+// from the reopened dialog. A code read late is already part spent, so its window ends
+// one lifetime after the emitter released it, not one lifetime after this process
+// noticed it. Dating it from the read would keep replaying it past the point the phone
+// stops accepting it.
+func TestManagerPairReplayJudgesTheRetainedQRFromWhenItWasEmitted(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.qrFeed = make(chan whatsmeow.QRChannelItem)
+
+	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
+		return fake, nil
+	})
+
+	const channelID = "channel-late-read-1"
+
+	first, err := mgr.Pair(context.Background(), channelID)
+	if err != nil {
+		t.Fatalf("first Pair failed: %v", err)
+	}
+
+	const lifetime = time.Second
+
+	fake.qrFeed <- whatsmeow.QRChannelItem{Event: "code", Code: "qr-first", Timeout: lifetime}
+	if got := <-first; got.QR != "qr-first" {
+		t.Fatalf("expected the pair session to report qr-first, got %+v", got)
+	}
+
+	// The next code went out one lifetime in, so by the time it is read half its window
+	// is already gone.
+	time.Sleep(lifetime * 3 / 2)
+	fake.qrFeed <- whatsmeow.QRChannelItem{Event: "code", Code: "qr-half-spent", Timeout: lifetime}
+	if got := <-first; got.QR != "qr-half-spent" {
+		t.Fatalf("expected the part-spent code to still be published, got %+v", got)
+	}
+
+	replayed := drainPairUpdates(t, mustPair(t, mgr, channelID), 2*time.Second)
+	if codes := qrCodes(replayed); len(codes) != 1 || codes[0] != "qr-half-spent" {
+		t.Fatalf("expected the reopened dialog to get the code that is still on the wire, got %+v", replayed)
+	}
+
+	// Past the code's own window, but not past a window measured from the read -- which
+	// is exactly where dating it from the read would go on replaying a dead code.
+	time.Sleep(lifetime * 7 / 10)
+	if replayed := drainPairUpdates(t, mustPair(t, mgr, channelID), 2*time.Second); len(replayed) != 0 {
+		t.Fatalf("expected a code past its own window never to be replayed, got %+v", replayed)
+	}
+
+	close(fake.qrFeed)
+	drainPairUpdates(t, first, 2*time.Second)
+}
+
 // TestManagerPairAfterTimeoutPairsFromCleanClient covers the retry after a failed
 // pairing: the timed-out client is gone, the next command builds a fresh device, and the
 // dead code from the previous attempt is never replayed.

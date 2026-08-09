@@ -353,7 +353,15 @@ func (g *gateway) closeConsumerWithDrainDeadline() {
 	}
 }
 
-func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand) error {
+// PairHandler starts one pairing and then follows it to its end.
+//
+// The command is answered the moment the pairing is under way, not when it finishes:
+// the operator's minute with a QR on screen belongs to the session, and holding the
+// command open for it is what used to leave the second pair command -- the reopened
+// dialog the retained code exists for -- unread on the queue. Only a pairing that could
+// not be started at all comes back as an error, and that one is still dead-lettered;
+// everything the session goes on to report reaches the operator as a channel event.
+func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand, accept func()) error {
 	g.setTenant(cmd.ChannelID, cmd.TenantID)
 
 	updates, err := g.manager.Pair(ctx, cmd.ChannelID)
@@ -361,7 +369,20 @@ func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand) error {
 		g.publishChannelError(ctx, cmd.TenantID, cmd.UserID, cmd.ChannelID, err)
 		return fmt.Errorf("gateway: pair channel %s: %w", cmd.ChannelID, err)
 	}
+	accept()
 
+	// Logged rather than returned: past accept there is no delivery left to fail, and a
+	// pairing that dies unreported would look, from the outside, like one still running.
+	if err := g.followPairing(ctx, cmd, updates); err != nil {
+		g.logger.Error("gateway: pairing session failed", "channel_id", cmd.ChannelID, "error", err)
+	}
+	return nil
+}
+
+// followPairing publishes a live pairing's rotations and its outcome, ending when the
+// session does -- on success, on failure, or with the gateway's own shutdown, which
+// closes the updates channel through the context the session was started with.
+func (g *gateway) followPairing(ctx context.Context, cmd amqp.PairCommand, updates <-chan session.PairUpdate) error {
 	for update := range updates {
 		switch {
 		case update.Err != nil:

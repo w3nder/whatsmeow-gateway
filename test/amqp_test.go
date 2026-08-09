@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -287,6 +288,190 @@ func TestConsumerHandlerErrorRoutesToDLQAndDoesNotRetryLocally(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if got := atomic.LoadInt32(&callCount); got != 1 {
 		t.Fatalf("expected the handler to run exactly once (no local retry loop before dead-lettering), got %d calls", got)
+	}
+}
+
+// TestConsumerAdmitsPairCommandsWhileASessionIsInFlight: a pairing waits on a person,
+// so it holds its handler for the whole minute the operator has to scan. Consuming pair
+// commands one at a time meant the next one -- the same operator reopening the dialog,
+// or an entirely different channel -- sat unread on the queue for that minute. The
+// close at the end pins the other half: a session admitted this way is still waited for
+// on the way down rather than abandoned mid-pairing.
+func TestConsumerAdmitsPairCommandsWhileASessionIsInFlight(t *testing.T) {
+	conn := startRabbitMQ(t)
+
+	consumer, err := gatewayamqp.NewConsumer(conn, gatewayamqp.ConsumerConfig{Prefetch: 10})
+	if err != nil {
+		t.Fatalf("NewConsumer failed: %v", err)
+	}
+
+	admitted := make(chan string, 2)
+	release := make(chan struct{})
+	var finished int32
+	err = consumer.StartPair(context.Background(), func(_ context.Context, cmd gatewayamqp.PairCommand, accept func()) error {
+		accept()
+		admitted <- cmd.ChannelID
+		// Stands in for the QR loop: nothing more happens until the operator acts.
+		<-release
+		atomic.AddInt32(&finished, 1)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StartPair failed: %v", err)
+	}
+
+	publishCh, err := conn.Channel()
+	if err != nil {
+		t.Fatalf("failed to open publish channel: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := publishCh.Close(); err != nil && !errors.Is(err, rabbitmq.ErrClosed) {
+			t.Errorf("failed to close publish channel: %v", err)
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	channels := []string{"channel-pair-inflight-1", "channel-pair-inflight-2"}
+	for _, channelID := range channels {
+		body, err := json.Marshal(gatewayamqp.PairCommand{TenantID: "tenant-1", ChannelID: channelID, UserID: "user-1"})
+		if err != nil {
+			t.Fatalf("failed to marshal pair command: %v", err)
+		}
+		if err := publishCh.PublishWithContext(ctx, gatewayamqp.GatewayPairExchange, "0", false, false, rabbitmq.Publishing{
+			ContentType:  "application/json",
+			DeliveryMode: rabbitmq.Persistent,
+			Body:         body,
+		}); err != nil {
+			t.Fatalf("failed to publish pair command for %s: %v", channelID, err)
+		}
+	}
+
+	seen := make(map[string]bool, len(channels))
+	for range channels {
+		select {
+		case channelID := <-admitted:
+			seen[channelID] = true
+		// Generous on purpose: a command held behind the session ahead of it is not
+		// admitted late, it is never admitted, so the slack cannot mask the bug.
+		case <-time.After(30 * time.Second):
+			t.Fatalf("only %v was admitted: a pair command must not wait out the pairing session ahead of it", seen)
+		}
+	}
+	for _, channelID := range channels {
+		if !seen[channelID] {
+			t.Fatalf("expected both pair commands to be admitted, %s never reached the handler", channelID)
+		}
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- consumer.Close() }()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned while two pairings were still running (err %v): an in-flight pairing must not be silently abandoned", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not return after the pairings ended")
+	}
+	if got := atomic.LoadInt32(&finished); got != int32(len(channels)) {
+		t.Fatalf("expected both pairing sessions to run to their end before Close returned, got %d", got)
+	}
+}
+
+// TestConsumerAdmitsManyPairCommandsConcurrently pins that nothing here caps how many
+// pairings run at once. It publishes more channels than the old fixed cap ever allowed
+// concurrently and holds every one of them open on its own release gate; if a cap were
+// still in place, the channels past it would never be admitted and this test would time
+// out waiting for them.
+func TestConsumerAdmitsManyPairCommandsConcurrently(t *testing.T) {
+	const channelCount = 40
+
+	conn := startRabbitMQ(t)
+
+	consumer, err := gatewayamqp.NewConsumer(conn, gatewayamqp.ConsumerConfig{Prefetch: channelCount})
+	if err != nil {
+		t.Fatalf("NewConsumer failed: %v", err)
+	}
+
+	admitted := make(chan string, channelCount)
+	release := make(chan struct{})
+	var finished int32
+	err = consumer.StartPair(context.Background(), func(_ context.Context, cmd gatewayamqp.PairCommand, accept func()) error {
+		accept()
+		admitted <- cmd.ChannelID
+		// Every session parks here until the test lets them all go, so none can finish
+		// early and free up room for one still waiting to be admitted.
+		<-release
+		atomic.AddInt32(&finished, 1)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StartPair failed: %v", err)
+	}
+
+	publishCh, err := conn.Channel()
+	if err != nil {
+		t.Fatalf("failed to open publish channel: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := publishCh.Close(); err != nil && !errors.Is(err, rabbitmq.ErrClosed) {
+			t.Errorf("failed to close publish channel: %v", err)
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	channels := make([]string, channelCount)
+	for i := range channels {
+		channels[i] = fmt.Sprintf("channel-pair-concurrent-%d", i)
+		body, err := json.Marshal(gatewayamqp.PairCommand{TenantID: "tenant-1", ChannelID: channels[i], UserID: "user-1"})
+		if err != nil {
+			t.Fatalf("failed to marshal pair command: %v", err)
+		}
+		if err := publishCh.PublishWithContext(ctx, gatewayamqp.GatewayPairExchange, "0", false, false, rabbitmq.Publishing{
+			ContentType:  "application/json",
+			DeliveryMode: rabbitmq.Persistent,
+			Body:         body,
+		}); err != nil {
+			t.Fatalf("failed to publish pair command for %s: %v", channels[i], err)
+		}
+	}
+
+	seen := make(map[string]bool, len(channels))
+	for range channels {
+		select {
+		case channelID := <-admitted:
+			seen[channelID] = true
+		case <-time.After(30 * time.Second):
+			t.Fatalf("only %d of %d channels were admitted: a fixed cap would strand the rest behind sessions that have not finished", len(seen), channelCount)
+		}
+	}
+	for _, channelID := range channels {
+		if !seen[channelID] {
+			t.Fatalf("expected every channel to be admitted, %s never reached the handler", channelID)
+		}
+	}
+
+	close(release)
+	deadline := time.After(10 * time.Second)
+	for atomic.LoadInt32(&finished) != int32(channelCount) {
+		select {
+		case <-deadline:
+			t.Fatalf("expected all %d sessions to finish, got %d", channelCount, atomic.LoadInt32(&finished))
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	if err := consumer.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
 	}
 }
 

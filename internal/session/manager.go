@@ -37,18 +37,26 @@ type ClientFactory func(channelID string, jid *types.JID) (WAClient, error)
 // that arrives mid-flight can be answered with the code that is on the operator's
 // screen right now instead of the one twenty seconds away.
 type pairing struct {
-	qr        string
-	qrExpires time.Time
+	qr string
+	// emitted is when whatsmeow released the code, which is not when this loop read
+	// it, and lifetime is the window whatsmeow gave that one code. Together they are
+	// the only honest answer to whether the code still stands -- see retainQR.
+	emitted  time.Time
+	lifetime time.Duration
 }
 
 // validQR returns the retained code only while the phone would still accept it.
 // Replaying an expired code is worse than replaying nothing: the operator scans it,
 // WhatsApp refuses it, and nothing on screen explains why.
 func (p *pairing) validQR(now time.Time) (string, bool) {
-	if p.qr == "" || !now.Before(p.qrExpires) {
+	if p.qr == "" || !now.Before(p.emitted.Add(p.lifetime)) {
 		return "", false
 	}
 	return p.qr, true
+}
+
+func (p *pairing) clear() {
+	p.qr, p.emitted, p.lifetime = "", time.Time{}, 0
 }
 
 type Manager struct {
@@ -139,7 +147,13 @@ func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate
 					// Retained before it is forwarded, because the whole point is to
 					// answer a pair command that arrives while nobody is reading this
 					// channel -- including while this very send is blocked.
-					m.retainQR(channelID, p, evt.Code, evt.Timeout)
+					if !m.retainQR(channelID, p, evt.Code, evt.Timeout) {
+						// Dead before it was read: it waited in whatsmeow's buffer
+						// while this loop was busy. Sending it on would put a code in
+						// front of the operator that the phone refuses, and the one
+						// that replaced it is already queued behind it.
+						continue
+					}
 					update = PairUpdate{QR: evt.Code}
 				case "success":
 					m.clearQR(channelID, p)
@@ -210,23 +224,41 @@ func (m *Manager) endPairing(channelID string, p *pairing, client WAClient) {
 	}
 }
 
-// retainQR keeps the code whatsmeow just emitted for exactly as long as whatsmeow says
-// it lasts. A code that arrives without a stated lifetime is not retained at all: there
-// would be no way to tell later whether it is still the code the phone expects.
-func (m *Manager) retainQR(channelID string, p *pairing, code string, timeout time.Duration) {
-	if code == "" || timeout <= 0 {
-		m.clearQR(channelID, p)
-		return
-	}
-
+// retainQR records the code whatsmeow just emitted and reports whether it is still one
+// the phone would accept.
+//
+// When a code is read says nothing about how much of its life is left. whatsmeow's
+// emitter pushes a session's six codes into a channel buffered at eight, on a timer of
+// its own, whether or not anyone is reading; a loop held up publishing one code comes
+// back to find the next already emitted and part spent -- or wholly spent. So a code is
+// dated from when the emitter released it, not from when it was read: the first when it
+// is read, since nothing can have been buffered ahead of it, and every later one exactly
+// one previous lifetime after the code before it, which is the emitter's own schedule.
+func (m *Manager) retainQR(channelID string, p *pairing, code string, timeout time.Duration) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.pairings[channelID] != p {
-		return
+		return false
 	}
-	p.qr = code
-	p.qrExpires = time.Now().Add(timeout)
+
+	// A code with no stated lifetime cannot be dated or aged, so it is passed on this
+	// once and never retained: there would be no way to tell later whether it still
+	// stands.
+	if code == "" || timeout <= 0 {
+		p.clear()
+		return code != ""
+	}
+
+	now := time.Now()
+	emitted := now
+	// Never later than now, whatever the clock did: the code is already in our hands.
+	if scheduled := p.emitted.Add(p.lifetime); !p.emitted.IsZero() && scheduled.Before(now) {
+		emitted = scheduled
+	}
+
+	p.qr, p.emitted, p.lifetime = code, emitted, timeout
+	return now.Before(emitted.Add(timeout))
 }
 
 func (m *Manager) clearQR(channelID string, p *pairing) {
@@ -236,8 +268,7 @@ func (m *Manager) clearQR(channelID string, p *pairing) {
 	if m.pairings[channelID] != p {
 		return
 	}
-	p.qr = ""
-	p.qrExpires = time.Time{}
+	p.clear()
 }
 
 func (m *Manager) EnsureConnected(channelID string) error {
