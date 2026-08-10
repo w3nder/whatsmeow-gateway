@@ -277,6 +277,7 @@ type InboundEvent struct {
 	ProfilePicture     *avatar.Picture     `json:"profilePicture,omitempty"`
 	Group              *InboundGroup       `json:"group,omitempty"`
 	InteractiveReplyID string              `json:"interactiveReplyId,omitempty"`
+	AdReferral         *InboundAdReferral  `json:"adReferral,omitempty"`
 }
 
 type StatusError struct {
@@ -430,7 +431,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		ext := msg.GetExtendedTextMessage()
 		out.Type = "text"
 		out.Text = &InboundText{Body: ext.GetText()}
-		out.ContextMessageID = ext.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, ext.GetContextInfo())
 
 	case msg.GetReactionMessage() != nil:
 		r := msg.GetReactionMessage()
@@ -450,7 +451,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		media.Caption = img.GetCaption()
 		out.Type = "image"
 		out.Media = media
-		out.ContextMessageID = img.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, img.GetContextInfo())
 
 	case msg.GetVideoMessage() != nil:
 		video := msg.GetVideoMessage()
@@ -461,7 +462,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		media.Caption = video.GetCaption()
 		out.Type = "video"
 		out.Media = media
-		out.ContextMessageID = video.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, video.GetContextInfo())
 
 	case msg.GetAudioMessage() != nil:
 		audio := msg.GetAudioMessage()
@@ -475,7 +476,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 			out.Type = "audio"
 		}
 		out.Media = media
-		out.ContextMessageID = audio.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, audio.GetContextInfo())
 
 	case msg.GetDocumentMessage() != nil:
 		doc := msg.GetDocumentMessage()
@@ -487,7 +488,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		media.Caption = doc.GetCaption()
 		out.Type = "document"
 		out.Media = media
-		out.ContextMessageID = doc.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, doc.GetContextInfo())
 
 	case msg.GetLocationMessage() != nil:
 		loc := msg.GetLocationMessage()
@@ -498,13 +499,13 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 			Name:      loc.GetName(),
 			Address:   loc.GetAddress(),
 		}
-		out.ContextMessageID = loc.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, loc.GetContextInfo())
 
 	case msg.GetContactMessage() != nil:
 		contact := msg.GetContactMessage()
 		out.Type = "contacts"
 		out.Contacts = []InboundContact{contactFrom(contact.GetDisplayName(), contact.GetVcard())}
-		out.ContextMessageID = contact.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, contact.GetContextInfo())
 
 	case msg.GetContactsArrayMessage() != nil:
 		arr := msg.GetContactsArrayMessage()
@@ -514,7 +515,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 			contacts = append(contacts, contactFrom(c.GetDisplayName(), c.GetVcard()))
 		}
 		out.Contacts = contacts
-		out.ContextMessageID = arr.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, arr.GetContextInfo())
 
 	case msg.GetStickerMessage() != nil:
 		sticker := msg.GetStickerMessage()
@@ -524,7 +525,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		}
 		out.Type = "sticker"
 		out.Media = media
-		out.ContextMessageID = sticker.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, sticker.GetContextInfo())
 
 	case msg.GetPtvMessage() != nil:
 		ptv := msg.GetPtvMessage()
@@ -535,7 +536,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		media.Caption = ptv.GetCaption()
 		out.Type = "video"
 		out.Media = media
-		out.ContextMessageID = ptv.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, ptv.GetContextInfo())
 
 	case msg.GetLiveLocationMessage() != nil:
 		live := msg.GetLiveLocationMessage()
@@ -546,7 +547,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 			Name:      live.GetCaption(),
 			Live:      true,
 		}
-		out.ContextMessageID = live.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, live.GetContextInfo())
 
 	case msg.GetButtonsResponseMessage() != nil:
 		resp := msg.GetButtonsResponseMessage()
@@ -557,7 +558,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		out.Type = "text"
 		out.Text = &InboundText{Body: body}
 		out.InteractiveReplyID = resp.GetSelectedButtonID()
-		out.ContextMessageID = resp.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, resp.GetContextInfo())
 
 	case msg.GetListResponseMessage() != nil:
 		resp := msg.GetListResponseMessage()
@@ -568,7 +569,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		out.Type = "text"
 		out.Text = &InboundText{Body: body}
 		out.InteractiveReplyID = resp.GetSingleSelectReply().GetSelectedRowID()
-		out.ContextMessageID = resp.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, resp.GetContextInfo())
 
 	case msg.GetTemplateButtonReplyMessage() != nil:
 		resp := msg.GetTemplateButtonReplyMessage()
@@ -579,7 +580,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		out.Type = "text"
 		out.Text = &InboundText{Body: body}
 		out.InteractiveReplyID = resp.GetSelectedID()
-		out.ContextMessageID = resp.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, resp.GetContextInfo())
 
 	case msg.GetInteractiveResponseMessage() != nil:
 		resp := msg.GetInteractiveResponseMessage()
@@ -593,7 +594,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		out.Type = "text"
 		out.Text = &InboundText{Body: body}
 		out.InteractiveReplyID = parseNativeFlowButtonParams(resp.GetNativeFlowResponseMessage().GetParamsJSON()).ID
-		out.ContextMessageID = resp.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, resp.GetContextInfo())
 
 	case msg.GetPollCreationMessage() != nil, msg.GetPollCreationMessageV2() != nil, msg.GetPollCreationMessageV3() != nil:
 		poll := msg.GetPollCreationMessage()
@@ -609,35 +610,35 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		}
 		out.Type = "poll"
 		out.RichContent = rich
-		out.ContextMessageID = poll.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, poll.GetContextInfo())
 
 	case msg.GetButtonsMessage() != nil:
 		btn := msg.GetButtonsMessage()
 		if err := applyRichOrFallback(&out, msg, buildButtonsRich(btn)); err != nil {
 			return InboundEvent{}, err
 		}
-		out.ContextMessageID = btn.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, btn.GetContextInfo())
 
 	case msg.GetListMessage() != nil:
 		list := msg.GetListMessage()
 		if err := applyRichOrFallback(&out, msg, buildListRich(list)); err != nil {
 			return InboundEvent{}, err
 		}
-		out.ContextMessageID = list.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, list.GetContextInfo())
 
 	case msg.GetInteractiveMessage() != nil:
 		interactive := msg.GetInteractiveMessage()
 		if err := applyRichOrFallback(&out, msg, buildInteractiveRich(interactive)); err != nil {
 			return InboundEvent{}, err
 		}
-		out.ContextMessageID = interactive.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, interactive.GetContextInfo())
 
 	case msg.GetProductMessage() != nil:
 		product := msg.GetProductMessage()
 		if err := applyRichOrFallback(&out, msg, buildProductRich(product)); err != nil {
 			return InboundEvent{}, err
 		}
-		out.ContextMessageID = product.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, product.GetContextInfo())
 		if out.RichContent != nil {
 			if productImage := product.GetProduct().GetProductImage(); productImage != nil {
 				if media, err := downloadAndStore(ctx, dl, s3, tenantID, evt.Info.ID, productImage.GetMimetype(), productImage); err == nil {
@@ -651,7 +652,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		if err := applyRichOrFallback(&out, msg, buildOrderRich(order)); err != nil {
 			return InboundEvent{}, err
 		}
-		out.ContextMessageID = order.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, order.GetContextInfo())
 		if out.RichContent != nil && len(order.GetThumbnail()) > 0 {
 			key := fmt.Sprintf("inbound-media/%s/%s", tenantID, evt.Info.ID)
 			if err := s3.Put(ctx, key, "image/jpeg", order.GetThumbnail()); err == nil {
@@ -664,7 +665,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		if err := applyRichOrFallback(&out, msg, buildEventRich(event)); err != nil {
 			return InboundEvent{}, err
 		}
-		out.ContextMessageID = event.GetContextInfo().GetStanzaID()
+		applyContextInfo(&out, event.GetContextInfo())
 
 	default:
 		content, found := detectContentField(msg)
