@@ -68,6 +68,44 @@ func TestAdReferralFromSourceIDWithConversionMarkerAndNoCtwaClid(t *testing.T) {
 	}
 }
 
+func TestAdReferralNormalizesSourceAppFromKnownHost(t *testing.T) {
+	ci := &waE2E.ContextInfo{
+		ExternalAdReply: &waE2E.ContextInfo_ExternalAdReplyInfo{
+			CtwaClid:  proto.String("ARBxyz"),
+			SourceURL: proto.String("https://www.instagram.com/p/abc123"),
+			SourceApp: proto.String("some-internal-code-1234"),
+		},
+	}
+
+	got := adReferralFrom(ci)
+
+	if got == nil {
+		t.Fatal("expected a referral")
+	}
+	if got.SourceApp != "instagram" {
+		t.Fatalf("expected sourceApp derived from the source_url host, got %q", got.SourceApp)
+	}
+}
+
+func TestAdReferralOmitsSourceAppForAnUnknownHost(t *testing.T) {
+	ci := &waE2E.ContextInfo{
+		ExternalAdReply: &waE2E.ContextInfo_ExternalAdReplyInfo{
+			CtwaClid:  proto.String("ARBxyz"),
+			SourceURL: proto.String("https://ads.example.com/click/1"),
+			SourceApp: proto.String("facebook"),
+		},
+	}
+
+	got := adReferralFrom(ci)
+
+	if got == nil {
+		t.Fatal("expected a referral")
+	}
+	if got.SourceApp != "" {
+		t.Fatalf("expected sourceApp omitted for an unrecognized host, got %q", got.SourceApp)
+	}
+}
+
 func TestAdReferralIgnoresPlainLinkReply(t *testing.T) {
 	ci := &waE2E.ContextInfo{
 		ExternalAdReply: &waE2E.ContextInfo_ExternalAdReplyInfo{
