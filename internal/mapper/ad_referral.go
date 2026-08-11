@@ -23,7 +23,6 @@ type InboundAdReferral struct {
 	MediaURL     string `json:"mediaUrl,omitempty"`
 	ThumbnailURL string `json:"thumbnailUrl,omitempty"`
 	ThumbnailB64 string `json:"thumbnailB64,omitempty"`
-	EntryPoint   string `json:"entryPoint"`
 }
 
 // adReferralFrom reads the ad behind a message, and returns nil when there is
@@ -62,7 +61,6 @@ func adReferralFrom(ci *waE2E.ContextInfo) *InboundAdReferral {
 		MediaType:    adMediaType(ad.GetMediaType()),
 		MediaURL:     ad.GetMediaURL(),
 		ThumbnailURL: ad.GetThumbnailURL(),
-		EntryPoint:   "message",
 	}
 	if thumb := ad.GetThumbnail(); len(thumb) > 0 {
 		referral.ThumbnailB64 = base64.StdEncoding.EncodeToString(thumb)

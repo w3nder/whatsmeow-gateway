@@ -114,7 +114,7 @@ func TestPollVoteWireContractWithdrawnKeepsAnEmptyArray(t *testing.T) {
 	}
 }
 
-const adReferralWireContract = `{"phoneNumberId":"channel-1","from":"5511999999999","senderPn":"5511999999999","profileName":"Jane Doe","providerMessageId":"wamid.ad-referral-1","timestamp":"1700000000","type":"text","text":{"body":"quero saber mais"},"contextMessageId":"wamid.ad-source","adReferral":{"ctwaClid":"ARBxyz","sourceId":"120210000000000000","sourceType":"ad","sourceApp":"facebook","sourceUrl":"https://fb.me/2abc","headline":"Frete gratis hoje","body":"So ate as 18h","mediaType":"image","mediaUrl":"https://scontent.example/ad.jpg","thumbnailUrl":"https://scontent.example/thumb.jpg","thumbnailB64":"/9j/","entryPoint":"message"}}`
+const adReferralWireContract = `{"phoneNumberId":"channel-1","from":"5511999999999","senderPn":"5511999999999","profileName":"Jane Doe","providerMessageId":"wamid.ad-referral-1","timestamp":"1700000000","type":"text","text":{"body":"quero saber mais"},"contextMessageId":"wamid.ad-source","adReferral":{"ctwaClid":"ARBxyz","sourceId":"120210000000000000","sourceType":"ad","sourceApp":"facebook","sourceUrl":"https://fb.me/2abc","headline":"Frete gratis hoje","body":"So ate as 18h","mediaType":"image","mediaUrl":"https://scontent.example/ad.jpg","thumbnailUrl":"https://scontent.example/thumb.jpg","thumbnailB64":"/9j/"}}`
 
 func adReferralEvent() *events.Message {
 	return &events.Message{

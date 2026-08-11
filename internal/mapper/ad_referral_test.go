@@ -34,9 +34,6 @@ func TestAdReferralFromExternalAdReply(t *testing.T) {
 	if got.Headline != "Frete gratis hoje" {
 		t.Fatalf("expected the ad title as headline, got %q", got.Headline)
 	}
-	if got.EntryPoint != "message" {
-		t.Fatalf("expected entryPoint message, got %q", got.EntryPoint)
-	}
 	if got.ThumbnailB64 != base64.StdEncoding.EncodeToString([]byte{0xff, 0xd8, 0xff}) {
 		t.Fatalf("expected the thumbnail bytes encoded, got %q", got.ThumbnailB64)
 	}
