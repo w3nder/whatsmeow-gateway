@@ -114,6 +114,51 @@ func TestPollVoteWireContractWithdrawnKeepsAnEmptyArray(t *testing.T) {
 	}
 }
 
+const adReferralWireContract = `{"phoneNumberId":"channel-1","from":"5511999999999","senderPn":"5511999999999","profileName":"Jane Doe","providerMessageId":"wamid.ad-referral-1","timestamp":"1700000000","type":"text","text":{"body":"quero saber mais"},"contextMessageId":"wamid.ad-source","adReferral":{"ctwaClid":"ARBxyz","sourceId":"120210000000000000","sourceType":"ad","sourceApp":"facebook","sourceUrl":"https://fb.me/2abc","headline":"Frete gratis hoje","body":"So ate as 18h","mediaType":"image","mediaUrl":"https://scontent.example/ad.jpg","thumbnailUrl":"https://scontent.example/thumb.jpg","thumbnailB64":"/9j/"}}`
+
+func adReferralEvent() *events.Message {
+	return &events.Message{
+		Info: baseInfo("wamid.ad-referral-1", "5511999999999"),
+		Message: &waE2E.Message{
+			ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+				Text: proto.String("quero saber mais"),
+				ContextInfo: &waE2E.ContextInfo{
+					StanzaID:         proto.String("wamid.ad-source"),
+					ConversionSource: proto.String("ctwa_landing_page"),
+					ExternalAdReply: &waE2E.ContextInfo_ExternalAdReplyInfo{
+						CtwaClid:     proto.String("ARBxyz"),
+						SourceID:     proto.String("120210000000000000"),
+						SourceType:   proto.String("ad"),
+						SourceApp:    proto.String("facebook"),
+						SourceURL:    proto.String("https://fb.me/2abc"),
+						Title:        proto.String("Frete gratis hoje"),
+						Body:         proto.String("So ate as 18h"),
+						MediaType:    waE2E.ContextInfo_ExternalAdReplyInfo_IMAGE.Enum(),
+						MediaURL:     proto.String("https://scontent.example/ad.jpg"),
+						ThumbnailURL: proto.String("https://scontent.example/thumb.jpg"),
+						Thumbnail:    []byte{0xff, 0xd8, 0xff},
+					},
+				},
+			},
+		},
+	}
+}
+
+func TestAdReferralWireContract(t *testing.T) {
+	out, err := mapper.BuildInbound(context.Background(), testDeps(fakeDownloader{}, nil, &fakeMediaStore{}), adReferralEvent())
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal whatsapp.inbound.v1 event: %v", err)
+	}
+	if string(raw) != adReferralWireContract {
+		t.Fatalf("adReferral wire contract drifted\n got: %s\nwant: %s", raw, adReferralWireContract)
+	}
+}
+
 func TestPollVoteWireContractWithSelectionsEncodesLowercaseHex(t *testing.T) {
 	out, err := mapper.BuildInbound(context.Background(), depsWithSecrets(fakeSecrets{
 		vote: &waE2E.PollVoteMessage{SelectedOptions: [][]byte{{0xc1, 0x64}, {0x5b, 0x19}}},
