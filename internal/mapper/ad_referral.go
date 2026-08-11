@@ -12,19 +12,18 @@ import (
 // WABA adapter produces. Both channels feed one contract, so the backend never
 // learns which one it was talking to.
 type InboundAdReferral struct {
-	CtwaClid         string `json:"ctwaClid,omitempty"`
-	SourceID         string `json:"sourceId,omitempty"`
-	SourceType       string `json:"sourceType,omitempty"`
-	SourceApp        string `json:"sourceApp,omitempty"`
-	SourceURL        string `json:"sourceUrl,omitempty"`
-	Headline         string `json:"headline,omitempty"`
-	Body             string `json:"body,omitempty"`
-	MediaType        string `json:"mediaType,omitempty"`
-	MediaURL         string `json:"mediaUrl,omitempty"`
-	ThumbnailURL     string `json:"thumbnailUrl,omitempty"`
-	ThumbnailB64     string `json:"thumbnailB64,omitempty"`
-	EntryPoint       string `json:"entryPoint"`
-	ConversionSource string `json:"conversionSource,omitempty"`
+	CtwaClid     string `json:"ctwaClid,omitempty"`
+	SourceID     string `json:"sourceId,omitempty"`
+	SourceType   string `json:"sourceType,omitempty"`
+	SourceApp    string `json:"sourceApp,omitempty"`
+	SourceURL    string `json:"sourceUrl,omitempty"`
+	Headline     string `json:"headline,omitempty"`
+	Body         string `json:"body,omitempty"`
+	MediaType    string `json:"mediaType,omitempty"`
+	MediaURL     string `json:"mediaUrl,omitempty"`
+	ThumbnailURL string `json:"thumbnailUrl,omitempty"`
+	ThumbnailB64 string `json:"thumbnailB64,omitempty"`
+	EntryPoint   string `json:"entryPoint"`
 }
 
 // adReferralFrom reads the ad behind a message, and returns nil when there is
@@ -53,18 +52,17 @@ func adReferralFrom(ci *waE2E.ContextInfo) *InboundAdReferral {
 		return nil
 	}
 	referral := &InboundAdReferral{
-		CtwaClid:         ad.GetCtwaClid(),
-		SourceID:         ad.GetSourceID(),
-		SourceType:       ad.GetSourceType(),
-		SourceApp:        sourceAppFrom(ad.GetSourceURL()),
-		SourceURL:        ad.GetSourceURL(),
-		Headline:         ad.GetTitle(),
-		Body:             ad.GetBody(),
-		MediaType:        adMediaType(ad.GetMediaType()),
-		MediaURL:         ad.GetMediaURL(),
-		ThumbnailURL:     ad.GetThumbnailURL(),
-		EntryPoint:       "message",
-		ConversionSource: conversion,
+		CtwaClid:     ad.GetCtwaClid(),
+		SourceID:     ad.GetSourceID(),
+		SourceType:   ad.GetSourceType(),
+		SourceApp:    sourceAppFrom(ad.GetSourceURL()),
+		SourceURL:    ad.GetSourceURL(),
+		Headline:     ad.GetTitle(),
+		Body:         ad.GetBody(),
+		MediaType:    adMediaType(ad.GetMediaType()),
+		MediaURL:     ad.GetMediaURL(),
+		ThumbnailURL: ad.GetThumbnailURL(),
+		EntryPoint:   "message",
 	}
 	if thumb := ad.GetThumbnail(); len(thumb) > 0 {
 		referral.ThumbnailB64 = base64.StdEncoding.EncodeToString(thumb)

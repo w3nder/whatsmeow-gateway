@@ -63,9 +63,6 @@ func TestAdReferralFromSourceIDWithConversionMarkerAndNoCtwaClid(t *testing.T) {
 	if got.SourceID != "120210000000000000" {
 		t.Fatalf("unexpected SourceID: %q", got.SourceID)
 	}
-	if got.ConversionSource != "ctwa_landing_page" {
-		t.Fatalf("expected the conversion marker preserved, got %q", got.ConversionSource)
-	}
 }
 
 func TestAdReferralNormalizesSourceAppFromKnownHost(t *testing.T) {
