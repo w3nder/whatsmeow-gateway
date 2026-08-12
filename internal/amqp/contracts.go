@@ -1,9 +1,12 @@
 package amqp
 
 type MediaPayload struct {
-	URL      string `json:"url"`
-	Mime     string `json:"mime"`
-	Filename string `json:"filename,omitempty"`
+	URL             string `json:"url"`
+	Mime            string `json:"mime"`
+	Filename        string `json:"filename,omitempty"`
+	Voice           bool   `json:"voice,omitempty"`
+	Waveform        string `json:"waveform,omitempty"`
+	DurationSeconds uint32 `json:"durationSeconds,omitempty"`
 }
 
 type LocationPayload struct {
