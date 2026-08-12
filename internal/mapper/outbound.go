@@ -2,6 +2,7 @@ package mapper
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 
 	"go.mau.fi/whatsmeow"
@@ -208,18 +209,26 @@ func buildMedia(ctx context.Context, up Uploader, fetch MediaFetcher, cmd amqp.G
 			},
 		}, nil
 	case "audio":
-		return &waE2E.Message{
-			AudioMessage: &waE2E.AudioMessage{
-				URL:           proto.String(resp.URL),
-				DirectPath:    proto.String(resp.DirectPath),
-				MediaKey:      resp.MediaKey,
-				Mimetype:      proto.String(cmd.Media.Mime),
-				FileEncSHA256: resp.FileEncSHA256,
-				FileSHA256:    resp.FileSHA256,
-				FileLength:    proto.Uint64(resp.FileLength),
-				ContextInfo:   ctxInfo,
-			},
-		}, nil
+		audio := &waE2E.AudioMessage{
+			URL:           proto.String(resp.URL),
+			DirectPath:    proto.String(resp.DirectPath),
+			MediaKey:      resp.MediaKey,
+			Mimetype:      proto.String(cmd.Media.Mime),
+			FileEncSHA256: resp.FileEncSHA256,
+			FileSHA256:    resp.FileSHA256,
+			FileLength:    proto.Uint64(resp.FileLength),
+			ContextInfo:   ctxInfo,
+		}
+		if cmd.Media.Voice {
+			audio.PTT = proto.Bool(true)
+			if cmd.Media.DurationSeconds > 0 {
+				audio.Seconds = proto.Uint32(cmd.Media.DurationSeconds)
+			}
+			if waveform, err := base64.StdEncoding.DecodeString(cmd.Media.Waveform); err == nil && len(waveform) == 64 {
+				audio.Waveform = waveform
+			}
+		}
+		return &waE2E.Message{AudioMessage: audio}, nil
 	default:
 		return &waE2E.Message{
 			DocumentMessage: &waE2E.DocumentMessage{

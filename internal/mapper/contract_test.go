@@ -107,3 +107,54 @@ func TestReactionParticipantJIDMustParse(t *testing.T) {
 		t.Fatalf("expected an error for an unparseable participant jid")
 	}
 }
+
+const voiceNoteCommandLiteral = `{"tenantId":"1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c","channelId":"2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d","messageId":"3EB068F90C62346073B954","to":"5511999887766@s.whatsapp.net","type":"audio","media":{"url":"https://example.test/a.ogg","mime":"audio/ogg; codecs=opus","voice":true,"waveform":"MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMg==","durationSeconds":7}}`
+
+func TestVoiceNoteContractLiteralSendsPTT(t *testing.T) {
+	var cmd amqp.GatewaySendCommand
+	if err := json.Unmarshal([]byte(voiceNoteCommandLiteral), &cmd); err != nil {
+		t.Fatalf("unmarshal contract literal: %v", err)
+	}
+
+	expected := amqp.GatewaySendCommand{
+		TenantID:  "1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c",
+		ChannelID: "2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d",
+		MessageID: "3EB068F90C62346073B954",
+		To:        "5511999887766@s.whatsapp.net",
+		Type:      "audio",
+		Media: &amqp.MediaPayload{
+			URL:             "https://example.test/a.ogg",
+			Mime:            "audio/ogg; codecs=opus",
+			Voice:           true,
+			Waveform:        "MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMg==",
+			DurationSeconds: 7,
+		},
+	}
+	if !reflect.DeepEqual(cmd, expected) {
+		t.Fatalf("contract literal decoded to %+v, want %+v", cmd, expected)
+	}
+
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{resp: stubUploadResponse}, cmd, stubFetch([]byte("bytes"), nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+
+	audio := msg.GetAudioMessage()
+	if !audio.GetPTT() {
+		t.Fatalf("expected PTT to be set from the wire contract")
+	}
+	if got := len(audio.GetWaveform()); got != 64 {
+		t.Fatalf("waveform length = %d, want 64", got)
+	}
+	if audio.GetSeconds() != 7 {
+		t.Fatalf("seconds = %d, want 7", audio.GetSeconds())
+	}
+
+	raw, err := json.Marshal(cmd)
+	if err != nil {
+		t.Fatalf("marshal command: %v", err)
+	}
+	if string(raw) != voiceNoteCommandLiteral {
+		t.Fatalf("gatewaySendCommand wire contract drifted\n got: %s\nwant: %s", raw, voiceNoteCommandLiteral)
+	}
+}
