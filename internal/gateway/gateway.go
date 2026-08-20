@@ -394,10 +394,11 @@ func (g *gateway) followPairing(ctx context.Context, cmd amqp.PairCommand, updat
 			}
 			g.attachCalls(cmd.ChannelID)
 			if err := g.publisher.PublishChannelStatus(ctx, amqp.ChannelStatusEvent{
-				TenantID:  cmd.TenantID,
-				UserID:    cmd.UserID,
-				ChannelID: cmd.ChannelID,
-				Status:    "connected",
+				TenantID:    cmd.TenantID,
+				UserID:      cmd.UserID,
+				ChannelID:   cmd.ChannelID,
+				Status:      "connected",
+				PhoneNumber: g.connectedPhone(cmd.ChannelID),
 			}); err != nil {
 				return fmt.Errorf("gateway: publish channel.status connected: %w", err)
 			}
@@ -761,13 +762,35 @@ func (g *gateway) handleConnectionEvent(channelID string, evt any) {
 	}
 }
 
+// phoneFromJID extrai o numero do JID do aparelho. Vazio quando ainda nao ha sessao: o numero e
+// informacao extra, e nunca pode impedir a publicacao do status.
+func phoneFromJID(jid *types.JID) string {
+	if jid == nil {
+		return ""
+	}
+	return jid.User
+}
+
+func (g *gateway) connectedPhone(channelID string) string {
+	client, err := g.waClientFor(channelID)
+	if err != nil {
+		g.logger.Warn("gateway: resolve client for phone", "channel_id", channelID, "error", err)
+		return ""
+	}
+	return phoneFromJID(client.DeviceJID())
+}
+
 func (g *gateway) publishChannelStatus(channelID, status, reason string) {
-	if err := g.publisher.PublishChannelStatus(g.workCtx, amqp.ChannelStatusEvent{
+	event := amqp.ChannelStatusEvent{
 		TenantID:  g.tenantFor(channelID),
 		ChannelID: channelID,
 		Status:    status,
 		Reason:    reason,
-	}); err != nil {
+	}
+	if status == "connected" {
+		event.PhoneNumber = g.connectedPhone(channelID)
+	}
+	if err := g.publisher.PublishChannelStatus(g.workCtx, event); err != nil {
 		g.logger.Error("gateway: publish channel.status", "channel_id", channelID, "status", status, "error", err)
 	}
 }
