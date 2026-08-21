@@ -21,6 +21,8 @@ type ChannelStatusEvent struct {
 	ChannelID string `json:"channelId"`
 	Status    string `json:"status"`
 	Reason    string `json:"reason,omitempty"`
+	// Numero conectado, so no status "connected". Vazio quando a sessao ainda nao existe.
+	PhoneNumber string `json:"phoneNumber,omitempty"`
 }
 
 type Publisher struct {
