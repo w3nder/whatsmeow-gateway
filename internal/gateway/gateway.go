@@ -393,12 +393,15 @@ func (g *gateway) followPairing(ctx context.Context, cmd amqp.PairCommand, updat
 				return fmt.Errorf("gateway: persist session %s: %w", cmd.ChannelID, err)
 			}
 			g.attachCalls(cmd.ChannelID)
+			phone, displayName, picture := g.connectedIdentity(ctx, cmd.ChannelID)
 			if err := g.publisher.PublishChannelStatus(ctx, amqp.ChannelStatusEvent{
-				TenantID:    cmd.TenantID,
-				UserID:      cmd.UserID,
-				ChannelID:   cmd.ChannelID,
-				Status:      "connected",
-				PhoneNumber: g.connectedPhone(cmd.ChannelID),
+				TenantID:       cmd.TenantID,
+				UserID:         cmd.UserID,
+				ChannelID:      cmd.ChannelID,
+				Status:         "connected",
+				PhoneNumber:    phone,
+				DisplayName:    displayName,
+				ProfilePicture: picture,
 			}); err != nil {
 				return fmt.Errorf("gateway: publish channel.status connected: %w", err)
 			}
@@ -771,13 +774,31 @@ func phoneFromJID(jid *types.JID) string {
 	return jid.User
 }
 
-func (g *gateway) connectedPhone(channelID string) string {
+// connectedIdentity resolves everything a "connected" status event says about the
+// account itself: its phone number, its display name and its profile photo. All three
+// are decoration on the event -- a channel coming up is what the operator is waiting
+// for, and a session that is not there yet, or a slow or failing photo lookup, must
+// never keep "connected" from being published or delay it. Each piece simply comes
+// back zero on its own failure.
+//
+// The photo is asked about the device's own JID, not a peer's: this identifies the
+// channel's own account, not someone it talked to.
+func (g *gateway) connectedIdentity(ctx context.Context, channelID string) (phone, displayName string, picture *avatar.Picture) {
 	client, err := g.waClientFor(channelID)
 	if err != nil {
-		g.logger.Warn("gateway: resolve client for phone", "channel_id", channelID, "error", err)
-		return ""
+		g.logger.Warn("gateway: resolve client for connected identity", "channel_id", channelID, "error", err)
+		return "", "", nil
 	}
-	return phoneFromJID(client.DeviceJID())
+
+	jid := client.DeviceJID()
+	phone = phoneFromJID(jid)
+	displayName = client.DisplayName()
+	if jid != nil {
+		// channelAvatars already turns a slow or failing lookup, and a contact with no
+		// visible photo, into a nil picture rather than an error -- see avatar.Cache.For.
+		picture = g.channelAvatars(channelID).For(ctx, *jid)
+	}
+	return phone, displayName, picture
 }
 
 func (g *gateway) publishChannelStatus(channelID, status, reason string) {
@@ -788,7 +809,7 @@ func (g *gateway) publishChannelStatus(channelID, status, reason string) {
 		Reason:    reason,
 	}
 	if status == "connected" {
-		event.PhoneNumber = g.connectedPhone(channelID)
+		event.PhoneNumber, event.DisplayName, event.ProfilePicture = g.connectedIdentity(g.workCtx, channelID)
 	}
 	if err := g.publisher.PublishChannelStatus(g.workCtx, event); err != nil {
 		g.logger.Error("gateway: publish channel.status", "channel_id", channelID, "status", status, "error", err)

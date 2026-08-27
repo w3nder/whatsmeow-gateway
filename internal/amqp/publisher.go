@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	rabbitmq "github.com/rabbitmq/amqp091-go"
+
+	"github.com/w3nder/whatsmeow-gateway/internal/avatar"
 )
 
 type ChannelQREvent struct {
@@ -23,6 +25,13 @@ type ChannelStatusEvent struct {
 	Reason    string `json:"reason,omitempty"`
 	// Numero conectado, so no status "connected". Vazio quando a sessao ainda nao existe.
 	PhoneNumber string `json:"phoneNumber,omitempty"`
+	// DisplayName e ProfilePicture identificam a conta conectada, mesma regra do
+	// PhoneNumber acima: preenchidos so no status "connected", e nunca o motivo de o
+	// evento atrasar ou deixar de ser publicado. A foto viaja como chave do object
+	// store, nunca como bytes nem como URL resolvida -- o backend ja sabe resolver
+	// uma chave, exatamente como faz para midia de mensagem e gravacao de chamada.
+	DisplayName    string          `json:"displayName,omitempty"`
+	ProfilePicture *avatar.Picture `json:"profilePicture,omitempty"`
 }
 
 type Publisher struct {

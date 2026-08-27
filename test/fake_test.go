@@ -20,9 +20,10 @@ import (
 type fakeWAClient struct {
 	mu sync.Mutex
 
-	deviceJID *types.JID
-	loggedIn  bool
-	connected bool
+	deviceJID   *types.JID
+	displayName string
+	loggedIn    bool
+	connected   bool
 
 	// staysDown keeps the fake disconnected after Connect, standing in for a socket
 	// that whatsmeow is still retrying in the background.
@@ -133,6 +134,12 @@ func (f *fakeWAClient) DeviceJID() *types.JID {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.deviceJID
+}
+
+func (f *fakeWAClient) DisplayName() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.displayName
 }
 
 func (f *fakeWAClient) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID, nodes []waBinary.Node) (whatsmeow.SendResponse, error) {
