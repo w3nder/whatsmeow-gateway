@@ -42,6 +42,10 @@ func (f *recordingClient) DeviceJID() *types.JID {
 	return nil
 }
 
+func (f *recordingClient) DisplayName() string {
+	return ""
+}
+
 func (f *recordingClient) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID, nodes []waBinary.Node) (whatsmeow.SendResponse, error) {
 	f.lastExtra = sendExtra(id, nodes)
 	return whatsmeow.SendResponse{}, nil

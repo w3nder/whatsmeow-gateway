@@ -33,6 +33,10 @@ type WAClient interface {
 	IsConnected() bool
 	WaitForConnection(timeout time.Duration) bool
 	DeviceJID() *types.JID
+	// DisplayName is the account's own name, as WhatsApp shows it to other people --
+	// not a peer's, the device's own. It comes from the store rather than an IQ, so it
+	// is never a reason a "connected" event could be slow or fail.
+	DisplayName() string
 	SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID, nodes []waBinary.Node) (whatsmeow.SendResponse, error)
 	BuildEdit(chat types.JID, id types.MessageID, newContent *waE2E.Message) *waE2E.Message
 	BuildRevoke(chat, sender types.JID, id types.MessageID) *waE2E.Message
@@ -110,6 +114,10 @@ func (w *waClient) WaitForConnection(timeout time.Duration) bool {
 
 func (w *waClient) DeviceJID() *types.JID {
 	return w.client.Store.ID
+}
+
+func (w *waClient) DisplayName() string {
+	return w.client.Store.PushName
 }
 
 func (w *waClient) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID, nodes []waBinary.Node) (whatsmeow.SendResponse, error) {
