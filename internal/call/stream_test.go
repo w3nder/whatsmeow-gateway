@@ -39,8 +39,6 @@ func TestPeerAudioReachesBothRecorderAndStream(t *testing.T) {
 
 	lc.fireEnd("hangup")
 
-	// The upload now runs off the call's teardown path; wait for it rather
-	// than racing the assertion against the background goroutine.
 	m.WaitForRecordings(2 * time.Second)
 
 	if _, ok := store.object("calls/chan-a/C1.wav"); !ok {
@@ -48,8 +46,6 @@ func TestPeerAudioReachesBothRecorderAndStream(t *testing.T) {
 	}
 }
 
-// The stream must work with recording off: the two sinks are independent,
-// and a call with Record: false must still let an operator listen in.
 func TestStreamWorksWithRecordingDisabled(t *testing.T) {
 	store := newMemStore()
 	m := call.NewManager(&memPublisher{}, store,
@@ -89,10 +85,6 @@ func TestStreamWorksWithRecordingDisabled(t *testing.T) {
 	}
 }
 
-// WriteAudio must be verified end to end: Manager.Track subscribes the call's
-// outbound source before any operator exists, so asserting only that Play
-// happened would pass even if WriteAudio silently dropped every frame. Reading
-// the bytes back off that source is what actually exercises the write path.
 func TestOperatorAudioReachesTheCall(t *testing.T) {
 	m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
 	caller := &fakeCaller{}
@@ -114,8 +106,6 @@ func TestOperatorAudioReachesTheCall(t *testing.T) {
 		t.Fatal("Track did not subscribe the call's outbound audio")
 	}
 
-	// WriteAudio queues synchronously and the source never blocks, so the
-	// bytes are readable the moment it returns -- no polling, no goroutine.
 	got := make([]byte, len(want))
 	if _, err := io.ReadFull(src, got); err != nil {
 		t.Fatalf("read operator audio: %v", err)
@@ -125,16 +115,6 @@ func TestOperatorAudioReachesTheCall(t *testing.T) {
 	}
 }
 
-// I3: an operator clicking "listen" the instant the peer hangs up used to slip
-// a stream onto a call that teardown had already passed. Nothing ever closed
-// it, so the operator's socket waited forever for an end frame that only a
-// closed Audio() produces, pinning two goroutines and a websocket fd until the
-// browser gave up on its own.
-//
-// The deterministic half of this lives in registry_internal_test.go, where the
-// interleaving can be written out by hand; here the two really race, and the
-// invariant is what matters: every stream AttachStream hands back is closed by
-// somebody, no matter which side won.
 func TestAttachRacingTeardownNeverStrandsAStream(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
@@ -193,10 +173,6 @@ func TestOperatorVideoReachesTheCall(t *testing.T) {
 	}
 }
 
-// The peer's own request for a fresh IDR (WhatsApp's PLI/FIR feedback after
-// packet loss) has to reach the attached stream's Keyframe channel, same as
-// the one-shot request on attach -- otherwise a peer that lost packets mid
-// call never gets rescued.
 func TestPeerKeyframeRequestReachesTheAttachedStream(t *testing.T) {
 	m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
 	caller := &fakeCaller{}
@@ -211,8 +187,6 @@ func TestPeerKeyframeRequestReachesTheAttachedStream(t *testing.T) {
 	}
 	defer detach()
 
-	// Drain the one-shot request AttachStream itself makes on attach, so the
-	// assertion below can only pass because of fireVideoKeyframeRequest.
 	select {
 	case <-stream.Keyframe():
 	case <-time.After(time.Second):
@@ -228,8 +202,6 @@ func TestPeerKeyframeRequestReachesTheAttachedStream(t *testing.T) {
 	}
 }
 
-// With no operator attached there is nothing to route a keyframe request to;
-// the callback must simply do nothing rather than panic on a nil stream.
 func TestPeerKeyframeRequestWithNoStreamAttachedIsANoop(t *testing.T) {
 	m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
 	caller := &fakeCaller{}
@@ -248,8 +220,6 @@ func TestAttachStreamOnAnUnknownCallFails(t *testing.T) {
 	}
 }
 
-// A second attach must not leave two consumers racing for the same frames:
-// the first stream is closed and the second one takes over.
 func TestAttachStreamReplacesAnEarlierStream(t *testing.T) {
 	m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
 	caller := &fakeCaller{}
@@ -290,8 +260,6 @@ func TestAttachStreamReplacesAnEarlierStream(t *testing.T) {
 	}
 }
 
-// detach can run more than once -- a caller's defer alongside a replacing
-// AttachStream, say -- and must not panic.
 func TestDetachIsIdempotent(t *testing.T) {
 	m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
 	caller := &fakeCaller{}
@@ -309,8 +277,6 @@ func TestDetachIsIdempotent(t *testing.T) {
 	detach()
 }
 
-// Nothing else tells an operator that the call ended; the stream itself must
-// close so a consumer parked on Audio() is not left hanging forever.
 func TestStreamClosesWhenTheCallEnds(t *testing.T) {
 	m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
 	caller := &fakeCaller{}
@@ -327,8 +293,6 @@ func TestStreamClosesWhenTheCallEnds(t *testing.T) {
 
 	lc.fireEnd("hangup")
 
-	// finish runs synchronously from fireEnd, so the close is visible
-	// immediately -- no polling needed.
 	select {
 	case _, ok := <-stream.Audio():
 		if ok {
@@ -343,8 +307,6 @@ func TestStreamClosesWhenTheCallEnds(t *testing.T) {
 	}
 }
 
-// A slow or gone operator must never block the media goroutine that feeds the
-// recorder, or the recording stalls with it.
 func TestStreamDropsFramesWhenTheOperatorIsNotReading(t *testing.T) {
 	m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
 	caller := &fakeCaller{}
@@ -372,18 +334,6 @@ func TestStreamDropsFramesWhenTheOperatorIsNotReading(t *testing.T) {
 	}
 }
 
-// The mu fence in close() exists to protect exactly this: a stream torn
-// down while both directions are actively flowing, so a fenceless close
-// would either panic on a send to a closed channel or deadlock the media
-// goroutine behind close's pending Lock (see the review that caught
-// WriteVideo doing precisely that before it snapshotted closed and
-// released the lock). Run under -race and with -count>1, this is where
-// that fencing actually gets exercised instead of merely inspected.
-//
-// teardown runs concurrently with traffic in both directions and reports
-// whether the stream should still be usable afterward: detach makes it
-// dead, but ending some *other* call must leave this stream's traffic
-// untouched.
 func raceTrafficAgainstTeardown(t *testing.T, teardown func(lc *fakeCall, detach func())) {
 	t.Helper()
 	m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
@@ -402,8 +352,6 @@ func raceTrafficAgainstTeardown(t *testing.T, teardown func(lc *fakeCall, detach
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 
-	// Stands in for the calling library's media goroutine: the one this
-	// whole package exists to keep from ever blocking or panicking.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -418,8 +366,6 @@ func raceTrafficAgainstTeardown(t *testing.T, teardown func(lc *fakeCall, detach
 		}
 	}()
 
-	// The operator's own traffic, flowing the other way at the same time,
-	// straight through the same Stream that close() is about to tear down.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -434,7 +380,6 @@ func raceTrafficAgainstTeardown(t *testing.T, teardown func(lc *fakeCall, detach
 		}
 	}()
 
-	// Let real interleaving build up before tearing down mid-flight.
 	time.Sleep(5 * time.Millisecond)
 	teardown(lc, detach)
 
@@ -452,8 +397,6 @@ func raceTrafficAgainstTeardown(t *testing.T, teardown func(lc *fakeCall, detach
 		t.Fatal("traffic goroutines did not stop after teardown")
 	}
 
-	// Whatever tore it down, the stream itself is now dead: further writes
-	// must fail fast rather than block or silently succeed.
 	if err := stream.WriteAudio([]byte{0, 0}); err == nil {
 		t.Error("WriteAudio succeeded after teardown, want an error")
 	}
@@ -474,8 +417,6 @@ func TestConcurrentTrafficSurvivesCallEnding(t *testing.T) {
 	})
 }
 
-// Same guarantee as above, for the video sink: dropping is what protects the
-// media goroutine, and only the audio direction was covered before.
 func TestStreamDropsVideoFramesWhenTheOperatorIsNotReading(t *testing.T) {
 	m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
 	caller := &fakeCaller{}

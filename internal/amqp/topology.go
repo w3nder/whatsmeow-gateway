@@ -25,9 +25,6 @@ const (
 	GatewaySendDLQ      = "gateway.send.dlq"
 	GatewaySendConsumer = "whatsmeow-gateway.send"
 
-	// Call commands get their own queue rather than sharing gateway.send: a call
-	// is long-lived, and letting one sit in a shared prefetch would stall
-	// message delivery behind it.
 	GatewayCallExchange = "whatsapp.gateway.call.v1"
 	GatewayCallQueue    = "gateway.call"
 	GatewayCallDLX      = "gateway.call.dlx"

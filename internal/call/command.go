@@ -9,15 +9,8 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
 )
 
-// MediaFetcher fetches the bytes behind a command's mediaUrl.
 type MediaFetcher func(ctx context.Context, url string) ([]byte, error)
 
-// Dispatch runs one command against a channel's caller.
-//
-// It always reports the outcome as an event carrying the command id, and it
-// returns an error only when the failure is the caller's to retry. A malformed
-// or impossible command is never an error: nacking it would put it back on the
-// queue and loop it to the DLQ.
 func (m *Manager) Dispatch(
 	ctx context.Context,
 	caller Caller,
@@ -37,8 +30,6 @@ func (m *Manager) Dispatch(
 	}
 }
 
-// dispatchCaller handles the actions that create a call or work on links, none
-// of which need an existing call.
 func (m *Manager) dispatchCaller(ctx context.Context, caller Caller, cmd amqp.GatewayCallCommand) error {
 	switch cmd.Action {
 	case "dial":
@@ -54,8 +45,6 @@ func (m *Manager) dispatchCaller(ctx context.Context, caller Caller, cmd amqp.Ga
 		m.trackOutbound(cmd, lc)
 
 	case "group.dial":
-		// WhatsApp needs at least two remote parties for a group call; one
-		// target is a 1:1 call wearing the wrong command.
 		if len(cmd.Targets) < 2 {
 			m.failCommand(cmd, CodeInvalidTarget, "group.dial requires at least two targets")
 			return nil
@@ -124,13 +113,9 @@ func (m *Manager) dispatchCaller(ctx context.Context, caller Caller, cmd amqp.Ga
 	return nil
 }
 
-// trackOutbound registers a call the gateway just placed and reports it ringing.
 func (m *Manager) trackOutbound(cmd amqp.GatewayCallCommand, lc LiveCall) {
 	t := m.Track(cmd.ChannelID, lc, DirectionOutbound, m.recordFor(cmd))
 
-	// The inbound event goes out before ringing, for the same reason Attach
-	// publishes it before incoming: the backend needs the chat row to exist
-	// before any lifecycle transition arrives to update it.
 	m.publishInbound(t)
 
 	evt := m.event(t, EventRinging)
@@ -139,14 +124,9 @@ func (m *Manager) trackOutbound(cmd amqp.GatewayCallCommand, lc LiveCall) {
 
 	m.ackCommand(cmd)
 
-	// A call rejected the instant it was placed can end before Track finished
-	// wiring its callbacks; that end is reported here, after ringing, rather
-	// than lost.
 	m.flushEarlyEnd(t)
 }
 
-// recordFor resolves whether a call records: the command may turn it off, but
-// only the gateway default can turn it on.
 func (m *Manager) recordFor(cmd amqp.GatewayCallCommand) bool {
 	if cmd.Record != nil {
 		return *cmd.Record && m.opts.Record
@@ -154,16 +134,10 @@ func (m *Manager) recordFor(cmd amqp.GatewayCallCommand) bool {
 	return m.opts.Record
 }
 
-// dispatchLive handles the actions that act on a call already in flight.
 func (m *Manager) dispatchLive(ctx context.Context, cmd amqp.GatewayCallCommand, fetch MediaFetcher) error {
 	tracked, ok := m.registry.Get(cmd.ChannelID, cmd.CallID)
 	if !ok {
 		if cmd.Action == "hangup" || cmd.Action == "reject" {
-			// hangup and reject express a desired end state, not an action on
-			// a specific live call. When the call is already gone -- an easy
-			// race, since the front can send hangup the same moment the peer
-			// hangs up -- that end state already holds, so the command is
-			// satisfied rather than a fault.
 			m.log.Info("call: command satisfied, call already ended",
 				"channel_id", cmd.ChannelID, "call_id", cmd.CallID,
 				"command_id", cmd.CommandID, "action", cmd.Action)
@@ -234,8 +208,6 @@ func (m *Manager) dispatchLive(ctx context.Context, cmd amqp.GatewayCallCommand,
 	return nil
 }
 
-// fetchError marks a failure that came from fetching the command's media, so
-// the backend can tell a bad URL from a call that refused the action.
 type fetchError struct{ err error }
 
 func (e fetchError) Error() string { return e.err.Error() }
@@ -246,7 +218,6 @@ func isFetchError(err error) bool {
 	return errors.As(err, &fe)
 }
 
-// commandEvent builds an event tied to a command rather than to a tracked call.
 func (m *Manager) commandEvent(cmd amqp.GatewayCallCommand, eventType string) Event {
 	id := m.identity(cmd.ChannelID)
 	tenantID := id.TenantID
@@ -283,19 +254,6 @@ func (m *Manager) failCommand(cmd amqp.GatewayCallCommand, code, reason string) 
 	m.publish(evt)
 }
 
-// play streams audio from the command's media URL into the call. The bytes are
-// s16le mono 16 kHz PCM.
-//
-// It queues the audio on the call's own outbound source rather than calling
-// Play again. Play is not additive in the calling library -- each call
-// subscribes a fresh player and drops the previous one without stopping it --
-// so a second Play would silently orphan an attached operator's microphone for
-// the rest of the call. The announcement takes the floor while it lasts and the
-// operator's microphone resumes when it ends; see outbound.go.
-//
-// Success here means the audio was queued, not that it has been heard: the
-// send loop drains it over the following seconds, and nothing downstream
-// reports what the peer made of it.
 func (m *Manager) play(ctx context.Context, t *Tracked, cmd amqp.GatewayCallCommand, fetch MediaFetcher) error {
 	if cmd.MediaURL == "" {
 		return fetchError{fmt.Errorf("call: play requires a mediaUrl")}

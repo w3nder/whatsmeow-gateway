@@ -20,8 +20,6 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
 )
 
-// When RabbitMQ dies the gateway must not keep running with dead consumers: Run has to
-// return the failure so main exits non-zero and the orchestrator restarts the process.
 func TestGatewayRunFailsWhenRabbitMQDies(t *testing.T) {
 	conn := startRabbitMQ(t)
 	redisClient := startRedis(t)
@@ -74,7 +72,6 @@ func TestGatewayRunFailsWhenRabbitMQDies(t *testing.T) {
 		})
 	}()
 
-	// Give Run time to start both consumers before the broker goes away.
 	time.Sleep(2 * time.Second)
 
 	if err := conn.Close(); err != nil {
@@ -91,10 +88,6 @@ func TestGatewayRunFailsWhenRabbitMQDies(t *testing.T) {
 	}
 }
 
-// A channel the boot resume never saw -- its row landed after startup, or the network
-// was down when the gateway booted -- must come back from its stored JID on the next
-// send. Building a fresh device instead would leave the channel unpaired and stuck
-// waiting for a QR scan.
 func TestGatewaySendResumesChannelMissedByBootResume(t *testing.T) {
 	conn := startRabbitMQ(t)
 	redisClient := startRedis(t)
@@ -186,7 +179,6 @@ func TestGatewaySendResumesChannelMissedByBootResume(t *testing.T) {
 		})
 	}()
 
-	// The row shows up only after boot, so resumeOwnedSessions never saw this channel.
 	if err := registryStore.Save(context.Background(), channelID, storedJID.String(), tenantID); err != nil {
 		t.Fatalf("registry.Save failed: %v", err)
 	}

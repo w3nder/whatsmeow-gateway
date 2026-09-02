@@ -9,10 +9,6 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/call"
 )
 
-// The library's Call and Client are driven by a live VoIP stack and cannot be
-// built in a test, so what is covered here is what is testable without one: the
-// conversion of every value the adapter passes across the boundary.
-
 func TestPhaseFromLibrary(t *testing.T) {
 	cases := map[meowcaller.CallPhase]call.Phase{
 		meowcaller.CallPhaseIdle:        call.PhaseIdle,
@@ -94,7 +90,6 @@ func TestHandAndScreenShareFromLibrary(t *testing.T) {
 	}
 }
 
-// An absent JID must render as empty rather than as a bare "@server".
 func TestJIDStringKeepsEmptyEmpty(t *testing.T) {
 	if got := jidString(types.EmptyJID); got != "" {
 		t.Errorf("jidString(empty) = %q, want an empty string", got)

@@ -55,8 +55,6 @@ func TestVerifyCallTokenRejectsAnExpiredToken(t *testing.T) {
 	}
 }
 
-// A token without exp would never expire, which defeats the point of a short
-// lived credential.
 func TestVerifyCallTokenRejectsAMissingExpiry(t *testing.T) {
 	claims := validClaims()
 	delete(claims, "exp")
@@ -65,8 +63,6 @@ func TestVerifyCallTokenRejectsAMissingExpiry(t *testing.T) {
 	}
 }
 
-// alg=none is the classic JWT bypass: a token that carries no signature at all
-// must never be accepted.
 func TestVerifyCallTokenRejectsAlgNone(t *testing.T) {
 	unsigned, err := jwt.NewWithClaims(jwt.SigningMethodNone, validClaims()).
 		SignedString(jwt.UnsafeAllowNoneSignatureType)
@@ -88,9 +84,6 @@ func TestVerifyCallTokenRejectsMissingClaims(t *testing.T) {
 	}
 }
 
-// An empty string is technically "present" but is not a usable identifier;
-// treating it as missing closes off a degenerate token that would otherwise
-// carry, say, tenantId: "" past the check above.
 func TestVerifyCallTokenRejectsEmptyClaims(t *testing.T) {
 	for _, empty := range []string{"tenantId", "channelId", "callId", "userId"} {
 		claims := validClaims()
@@ -101,11 +94,6 @@ func TestVerifyCallTokenRejectsEmptyClaims(t *testing.T) {
 	}
 }
 
-// jsonwebtoken (the API's signer) stamps iat whenever expiresIn is used, so
-// every real token carries one. VerifyCallToken must ignore it rather than
-// validate it -- there is no iat requirement in the contract, and adding one
-// later (e.g. jwt.WithIssuedAt()) would silently start rejecting every real
-// token this test guards against that regression.
 func TestVerifyCallTokenAcceptsARealisticIssuedAt(t *testing.T) {
 	claims := validClaims()
 	claims["iat"] = time.Now().Unix()

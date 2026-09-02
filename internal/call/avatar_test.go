@@ -42,8 +42,6 @@ func callPicture() *avatar.Picture {
 	}
 }
 
-// newAvatarTestManager mirrors newTestManager, with a profile-photo source
-// wired in where the gateway wires the channel's own.
 func newAvatarTestManager(t *testing.T, pub call.Publisher, avatars call.AvatarSource) *call.Manager {
 	t.Helper()
 	return call.NewManager(pub, newMemStore(),
@@ -99,9 +97,6 @@ func TestAnArrivingCallFromALIDPeerLooksUpThatIdentity(t *testing.T) {
 	if len(looked) != 1 {
 		t.Fatalf("avatar lookups = %d, want 1", len(looked))
 	}
-	// The @lid identity is what WhatsApp addressed the call from, so that is
-	// what the photo is asked for under -- not the phone number it resolves
-	// to. Dropping the peer's device suffix is the cache's job, not this one's.
 	if looked[0].User != "173907587899617" || looked[0].Server != types.HiddenUserServer {
 		t.Errorf("looked up %s, want 173907587899617@lid", looked[0])
 	}
@@ -141,8 +136,6 @@ func TestACallWithAnUnidentifiablePeerLooksUpNoProfilePicture(t *testing.T) {
 
 	caller := &fakeCaller{}
 	m.Attach("chan-a", caller)
-	// A peer the gateway cannot make an identity out of: the call is still
-	// tracked and reported, but there is nobody to ask WhatsApp about.
 	caller.fireIncoming(&fakeCall{id: "C1", peer: "not-a-jid"})
 
 	inbound := pub.inboundEvents()

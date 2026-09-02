@@ -29,9 +29,6 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/store"
 )
 
-// mediaShutdownTimeout bounds how long the media server gets to close live
-// operator sockets on shutdown. Short on purpose: it rides the same signal as
-// the rest of the gateway, which has its own drain deadline to honour.
 const mediaShutdownTimeout = 5 * time.Second
 
 func main() {
@@ -158,10 +155,6 @@ func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *
 	})
 }
 
-// runMediaServer starts the call-media websocket listener in the background
-// when CALL_MEDIA_ADDR is configured, and ties its shutdown to the same
-// context the rest of the gateway shuts down on. An empty address is a no-op:
-// that is today's behaviour, with no listener at all.
 func runMediaServer(ctx context.Context, calls *call.Manager, cfg config.Config, logger *slog.Logger) {
 	if cfg.CallMediaAddr == "" {
 		return

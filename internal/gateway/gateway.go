@@ -42,18 +42,9 @@ type Deps struct {
 	ShardLockTTL         time.Duration
 	SendTimeout          time.Duration
 	ShutdownDrainTimeout time.Duration
-	// CallOptions configures call tracking. Run builds the call manager itself:
-	// the identity it stamps on every event comes from the channel's tenant and
-	// the channel id itself, neither of which main can reach.
-	CallOptions call.Options
-	// OnCallManager, if set, is handed the call manager as soon as it exists --
-	// before Run blocks in its own serving loop. This is the only way anything
-	// outside this package (namely main's media websocket, which must attach
-	// streams on the very registry the dispatcher populates) ever sees the
-	// manager: Run doesn't return one, since it doesn't return at all until
-	// shutdown.
-	OnCallManager func(*call.Manager)
-	Logger        *slog.Logger
+	CallOptions          call.Options
+	OnCallManager        func(*call.Manager)
+	Logger               *slog.Logger
 }
 
 type gateway struct {
@@ -121,9 +112,6 @@ func Run(ctx context.Context, deps Deps) error {
 	return g.run(ctx)
 }
 
-// callPublisher adapts the amqp publisher to call.Publisher. The amqp package
-// takes `any` for every event, as it does for inbound and status, so it stays
-// unaware of the call package.
 type callPublisher struct {
 	publisher *amqp.Publisher
 }
@@ -136,23 +124,10 @@ func (c callPublisher) PublishInbound(ctx context.Context, evt call.InboundCallE
 	return c.publisher.PublishInbound(ctx, evt)
 }
 
-// callIdentity resolves the tenant and phone-number id a call event belongs
-// to. PhoneNumberID is the channel id, not the device's JID: the backend
-// resolves a channel by its phoneNumberId column, and for a gateway channel
-// that column holds the channel's own UUID, not a phone number. The inbound
-// message path (mapper.BuildInbound) stamps the same value for the same
-// reason -- match it here rather than the device JID, or channel lookups on
-// the backend silently fail to find every call event.
 func (g *gateway) callIdentity(channelID string) call.Identity {
 	return call.Identity{TenantID: g.tenantFor(channelID), PhoneNumberID: channelID}
 }
 
-// callSenderResolver hands the call manager the same PNForLID lookup
-// mapper.BuildInbound uses for a message's sender, reached through the
-// channel's own client, so a call's @lid peer resolves to the identical
-// phone number a message from that person would. A channel with no live
-// client -- not yet paired, or gone -- resolves nothing: a call already in
-// flight must not be failed over an identity lookup.
 func (g *gateway) callSenderResolver(channelID string) senderid.Resolver {
 	client, err := g.waClientFor(channelID)
 	if err != nil {
@@ -161,17 +136,7 @@ func (g *gateway) callSenderResolver(channelID string) senderid.Resolver {
 	return client
 }
 
-// channelAvatars binds the shared photo cache to one channel: its own client
-// does the asking, since WhatsApp evaluates photo privacy against the account
-// that asks, and its tenant decides where the photo is stored. A channel with
-// no live client resolves nothing, exactly as callSenderResolver does -- a
-// call or a message must never be lost over a profile photo.
-//
-// It satisfies both mapper.AvatarSource and call.AvatarSource, which is the
-// point: a message and a call from the same person name the same photo.
 func (g *gateway) channelAvatars(channelID string) *channelAvatarSource {
-	// A channel with no live client leaves lookup nil, which the cache reads
-	// as "cannot ask" and answers with no photo.
 	var lookup avatar.Lookup
 	if client, err := g.waClientFor(channelID); err == nil {
 		lookup = client
@@ -184,9 +149,6 @@ func (g *gateway) channelAvatars(channelID string) *channelAvatarSource {
 	}
 }
 
-// callAvatars is channelAvatars as the call manager's own interface. The two
-// packages each declare the interface they consume, so the gateway is where
-// the one implementation is named as both.
 func (g *gateway) callAvatars(channelID string) call.AvatarSource {
 	return g.channelAvatars(channelID)
 }
@@ -266,9 +228,6 @@ func (g *gateway) run(ctx context.Context) error {
 
 	g.logger.Info("gateway started", "instance_id", g.instanceID)
 
-	// A dead broker leaves the consumers stopped and the publisher failing every event.
-	// Rather than idle on forever in that state, shut down and report it: main exits
-	// non-zero and the orchestrator restarts us onto a fresh connection.
 	var fatal error
 	select {
 	case <-ctx.Done():
@@ -280,11 +239,6 @@ func (g *gateway) run(ctx context.Context) error {
 
 	g.closeConsumerWithDrainDeadline()
 
-	// End live calls before the sockets go: a call left registered would never
-	// report its end to the backend. AbortAll only starts each recording's
-	// upload -- it runs off the call's teardown path -- so WaitForRecordings
-	// gives it a bounded window to finish rather than letting the process
-	// exit and kill an upload that was nearly done.
 	g.calls.AbortAll(g.workCtx, "gateway_shutdown")
 	g.calls.WaitForRecordings(g.shutdownDrainTimeout)
 
@@ -353,14 +307,6 @@ func (g *gateway) closeConsumerWithDrainDeadline() {
 	}
 }
 
-// PairHandler starts one pairing and then follows it to its end.
-//
-// The command is answered the moment the pairing is under way, not when it finishes:
-// the operator's minute with a QR on screen belongs to the session, and holding the
-// command open for it is what used to leave the second pair command -- the reopened
-// dialog the retained code exists for -- unread on the queue. Only a pairing that could
-// not be started at all comes back as an error, and that one is still dead-lettered;
-// everything the session goes on to report reaches the operator as a channel event.
 func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand, accept func()) error {
 	g.setTenant(cmd.ChannelID, cmd.TenantID)
 
@@ -371,17 +317,12 @@ func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand, accept 
 	}
 	accept()
 
-	// Logged rather than returned: past accept there is no delivery left to fail, and a
-	// pairing that dies unreported would look, from the outside, like one still running.
 	if err := g.followPairing(ctx, cmd, updates); err != nil {
 		g.logger.Error("gateway: pairing session failed", "channel_id", cmd.ChannelID, "error", err)
 	}
 	return nil
 }
 
-// followPairing publishes a live pairing's rotations and its outcome, ending when the
-// session does -- on success, on failure, or with the gateway's own shutdown, which
-// closes the updates channel through the context the session was started with.
 func (g *gateway) followPairing(ctx context.Context, cmd amqp.PairCommand, updates <-chan session.PairUpdate) error {
 	for update := range updates {
 		switch {
@@ -451,11 +392,6 @@ func (g *gateway) publishChannelError(ctx context.Context, tenantID, userID, cha
 	}
 }
 
-// CallHandler runs one call command.
-//
-// It reports a bad command as an event rather than as an error: nacking would
-// requeue it, and a command for a call that does not exist would loop until the
-// DLQ. Only a failure worth retrying comes back as an error.
 func (g *gateway) CallHandler(ctx context.Context, cmd amqp.GatewayCallCommand) error {
 	g.setTenant(cmd.ChannelID, cmd.TenantID)
 
@@ -477,8 +413,6 @@ func (g *gateway) CallHandler(ctx context.Context, cmd amqp.GatewayCallCommand) 
 	return g.calls.Dispatch(ctx, client.Calls(), cmd, fetchMediaURL)
 }
 
-// attachCalls subscribes the call manager to a channel's inbound calls. Called
-// once a session is live, from both the pair and the resume paths.
 func (g *gateway) attachCalls(channelID string) {
 	client, err := g.waClientFor(channelID)
 	if err != nil {
@@ -492,8 +426,6 @@ func (g *gateway) attachCalls(channelID string) {
 		return
 	}
 	g.calls.Attach(channelID, caller)
-	// The failure path above already logs; without this, a successful attach is
-	// silent and indistinguishable from attachCalls never having run at all.
 	g.logger.Info("gateway: calling client attached", "channel_id", channelID)
 }
 
@@ -610,10 +542,6 @@ func (g *gateway) waClientFor(channelID string) (session.WAClient, error) {
 	return g.manager.Client(channelID)
 }
 
-// ensureChannelConnected gets a channel's socket up before a send. When the channel has
-// no live session on this instance -- boot resume failed while the network was down, or
-// the channel moved between instances -- it is resumed from its stored JID. Falling back
-// to a brand-new device would leave the channel unpaired and waiting for a QR scan.
 func (g *gateway) ensureChannelConnected(ctx context.Context, channelID string) error {
 	err := g.manager.EnsureConnected(channelID)
 	if !errors.Is(err, session.ErrNoSession) {
@@ -644,9 +572,6 @@ func (g *gateway) ensureChannelConnected(ctx context.Context, channelID string) 
 }
 
 func (g *gateway) handleSessionEvent(channelID string, evt any) {
-	// Every event that really kills a channel's calls goes through one place,
-	// so the difference between "the socket blipped" and "this session is
-	// gone" is decided once rather than per case -- see callsAreDead.
 	if reason, dead := callsAreDead(evt); dead {
 		g.calls.AbortChannel(g.workCtx, channelID, reason)
 	}
@@ -673,10 +598,6 @@ func (g *gateway) handleSessionEvent(channelID string, evt any) {
 	}
 }
 
-// handleCallSignal logs whatsmeow's raw call signalling so the gateway is never blind to
-// a call arriving, even when the calling library (meowcaller, subscribed to these same
-// events independently) ignores or mishandles one. This is observability only: nothing
-// here acts on a call, so it cannot change call behaviour.
 func (g *gateway) handleCallSignal(channelID string, evt any) {
 	switch e := evt.(type) {
 	case *events.CallOffer:
@@ -696,22 +617,6 @@ func (g *gateway) handleCallSignal(channelID string, evt any) {
 	}
 }
 
-// callsAreDead reports whether a session event means the channel's live calls are
-// genuinely over, and the reason to report them ending with. Ending a call publishes
-// its `ended`, closes the operator's stream and finishes its recording, so getting this
-// wrong in either direction is expensive.
-//
-// events.Disconnected is deliberately absent, and it is the whole reason this decision
-// is written down rather than inlined. whatsmeow raises it on every socket drop -- a
-// missed keepalive, a broker-side reset, a two-second blip -- and then reconnects on its
-// own. A call's media does not ride that socket: it is a separate SRTP relay connection
-// the calling library holds, which nothing tears down when the websocket flaps. Treating
-// Disconnected as fatal truncated the recording and the CDR of calls that were still
-// running, and left the live call behind with no registry entry for a hangup to reach.
-//
-// The four below are the ones whatsmeow does not come back from: a logout, a session
-// taken over by another connection, a refused build, and a connect failure it gives up
-// on rather than retrying.
 func callsAreDead(evt any) (reason string, dead bool) {
 	switch evt.(type) {
 	case *events.LoggedOut:
@@ -727,11 +632,6 @@ func callsAreDead(evt any) (reason string, dead bool) {
 	}
 }
 
-// handleConnectionEvent reports socket health. Everything here that is recoverable is
-// already being retried by whatsmeow's auto-reconnect, so the gateway only observes and
-// publishes status; the cases whatsmeow deliberately gives up on are published as errors
-// because they need action outside the gateway (re-pair, unban, upgrade). Whether an
-// event also ends the channel's live calls is decided by callsAreDead, before this runs.
 func (g *gateway) handleConnectionEvent(channelID string, evt any) {
 	switch e := evt.(type) {
 	case *events.Connected:
@@ -765,8 +665,6 @@ func (g *gateway) handleConnectionEvent(channelID string, evt any) {
 	}
 }
 
-// phoneFromJID extrai o numero do JID do aparelho. Vazio quando ainda nao ha sessao: o numero e
-// informacao extra, e nunca pode impedir a publicacao do status.
 func phoneFromJID(jid *types.JID) string {
 	if jid == nil {
 		return ""
@@ -774,15 +672,6 @@ func phoneFromJID(jid *types.JID) string {
 	return jid.User
 }
 
-// connectedIdentity resolves everything a "connected" status event says about the
-// account itself: its phone number, its display name and its profile photo. All three
-// are decoration on the event -- a channel coming up is what the operator is waiting
-// for, and a session that is not there yet, or a slow or failing photo lookup, must
-// never keep "connected" from being published or delay it. Each piece simply comes
-// back zero on its own failure.
-//
-// The photo is asked about the device's own JID, not a peer's: this identifies the
-// channel's own account, not someone it talked to.
 func (g *gateway) connectedIdentity(ctx context.Context, channelID string) (phone, displayName string, picture *avatar.Picture) {
 	client, err := g.waClientFor(channelID)
 	if err != nil {
@@ -794,8 +683,6 @@ func (g *gateway) connectedIdentity(ctx context.Context, channelID string) (phon
 	phone = phoneFromJID(jid)
 	displayName = client.DisplayName()
 	if jid != nil {
-		// channelAvatars already turns a slow or failing lookup, and a contact with no
-		// visible photo, into a nil picture rather than an error -- see avatar.Cache.For.
 		picture = g.channelAvatars(channelID).For(ctx, *jid)
 	}
 	return phone, displayName, picture

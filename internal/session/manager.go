@@ -14,14 +14,8 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 )
 
-// ErrNoSession means the channel has no live session on this instance. Callers must
-// resume it from its stored JID: building a device from scratch would produce an
-// unpaired one and force the user through the QR flow again.
 var ErrNoSession = errors.New("session: channel has no live session")
 
-// connectWait bounds how long a caller blocks waiting for a socket to come back up.
-// whatsmeow keeps auto-reconnecting past this deadline, so exceeding it fails only the
-// message in flight, never the channel.
 const connectWait = 10 * time.Second
 
 type PairUpdate struct {
@@ -32,22 +26,12 @@ type PairUpdate struct {
 
 type ClientFactory func(channelID string, jid *types.JID) (WAClient, error)
 
-// pairing is one channel's live QR loop, from the moment Pair opens the QR channel
-// until that loop ends. It carries the code whatsmeow emitted last so a pair command
-// that arrives mid-flight can be answered with the code that is on the operator's
-// screen right now instead of the one twenty seconds away.
 type pairing struct {
-	qr string
-	// emitted is when whatsmeow released the code, which is not when this loop read
-	// it, and lifetime is the window whatsmeow gave that one code. Together they are
-	// the only honest answer to whether the code still stands -- see retainQR.
+	qr       string
 	emitted  time.Time
 	lifetime time.Duration
 }
 
-// validQR returns the retained code only while the phone would still accept it.
-// Replaying an expired code is worse than replaying nothing: the operator scans it,
-// WhatsApp refuses it, and nothing on screen explains why.
 func (p *pairing) validQR(now time.Time) (string, bool) {
 	if p.qr == "" || !now.Before(p.emitted.Add(p.lifetime)) {
 		return "", false
@@ -64,8 +48,6 @@ type Manager struct {
 
 	mu       sync.Mutex
 	sessions map[string]WAClient
-	// pairings holds only the channels currently pairing, so a retained code dies
-	// with its loop and can never be replayed to another channel or another tenant.
 	pairings map[string]*pairing
 
 	handlersMu sync.RWMutex
@@ -86,17 +68,6 @@ func (m *Manager) OnEvent(handler func(channelID string, evt any)) {
 	m.handlers = append(m.handlers[:len(m.handlers):len(m.handlers)], handler)
 }
 
-// Pair drives a channel through the QR flow, reporting every step on the returned
-// channel, which closes once the pairing ends.
-//
-// Exactly one QR loop ever runs per channel. whatsmeow refuses to hand out a second
-// QR channel for a client whose socket is up (ErrQRAlreadyConnected), so a second pair
-// command -- the operator closing the pairing dialog and opening it again -- could not
-// run its own loop even if we let it. It joins the live one instead: it is handed the
-// retained code immediately when that code is still valid and then closes, leaving the
-// running loop as the only publisher of the rotations and of the outcome. Nothing is
-// published twice, and the operator stops staring at an empty box until the next
-// rotation twenty seconds later.
 func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate, error) {
 	client, err := m.client(channelID)
 	if err != nil {
@@ -131,8 +102,6 @@ func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate
 	updates := make(chan PairUpdate)
 	go func() {
 		defer close(updates)
-		// One cleanup for every way this loop ends -- a terminal event, whatsmeow
-		// closing the channel, or the caller's context going away.
 		defer m.endPairing(channelID, p, client)
 
 		for {
@@ -144,14 +113,7 @@ func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate
 				var update PairUpdate
 				switch evt.Event {
 				case "code":
-					// Retained before it is forwarded, because the whole point is to
-					// answer a pair command that arrives while nobody is reading this
-					// channel -- including while this very send is blocked.
 					if !m.retainQR(channelID, p, evt.Code, evt.Timeout) {
-						// Dead before it was read: it waited in whatsmeow's buffer
-						// while this loop was busy. Sending it on would put a code in
-						// front of the operator that the phone refuses, and the one
-						// that replaced it is already queued behind it.
 						continue
 					}
 					update = PairUpdate{QR: evt.Code}
@@ -180,9 +142,6 @@ func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate
 	return updates, nil
 }
 
-// beginPairing claims the channel's single QR loop for the caller. A caller that finds
-// the loop already claimed gets no pairing to drive and, instead, a closed channel
-// carrying the retained code when it is still valid -- see Pair.
 func (m *Manager) beginPairing(channelID string) (*pairing, <-chan PairUpdate) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -201,17 +160,6 @@ func (m *Manager) beginPairing(channelID string) (*pairing, <-chan PairUpdate) {
 	return p, nil
 }
 
-// endPairing takes the channel out of the pairing state and, when the device never got
-// paired, throws the client away.
-//
-// A client that reached a terminal QR event unpaired is finished: whatsmeow has already
-// removed its QR event handler and, on the timeout path, disconnected it. Left in
-// m.sessions it still looks like a live session, and it poisons both paths that come
-// next -- EnsureConnected would try to bring an unpaired device up rather than reporting
-// ErrNoSession, and the next pair command would reuse the same client, whose QRChannel
-// answers ErrQRAlreadyConnected on the outcomes where whatsmeow leaves the socket up.
-// Dropping it here is what lets the retry start from a fresh device and show a QR at
-// once.
 func (m *Manager) endPairing(channelID string, p *pairing, client WAClient) {
 	m.mu.Lock()
 	if m.pairings[channelID] == p {
@@ -224,16 +172,6 @@ func (m *Manager) endPairing(channelID string, p *pairing, client WAClient) {
 	}
 }
 
-// retainQR records the code whatsmeow just emitted and reports whether it is still one
-// the phone would accept.
-//
-// When a code is read says nothing about how much of its life is left. whatsmeow's
-// emitter pushes a session's six codes into a channel buffered at eight, on a timer of
-// its own, whether or not anyone is reading; a loop held up publishing one code comes
-// back to find the next already emitted and part spent -- or wholly spent. So a code is
-// dated from when the emitter released it, not from when it was read: the first when it
-// is read, since nothing can have been buffered ahead of it, and every later one exactly
-// one previous lifetime after the code before it, which is the emitter's own schedule.
 func (m *Manager) retainQR(channelID string, p *pairing, code string, timeout time.Duration) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -242,9 +180,6 @@ func (m *Manager) retainQR(channelID string, p *pairing, code string, timeout ti
 		return false
 	}
 
-	// A code with no stated lifetime cannot be dated or aged, so it is passed on this
-	// once and never retained: there would be no way to tell later whether it still
-	// stands.
 	if code == "" || timeout <= 0 {
 		p.clear()
 		return code != ""
@@ -252,7 +187,6 @@ func (m *Manager) retainQR(channelID string, p *pairing, code string, timeout ti
 
 	now := time.Now()
 	emitted := now
-	// Never later than now, whatever the clock did: the code is already in our hands.
 	if scheduled := p.emitted.Add(p.lifetime); !p.emitted.IsZero() && scheduled.Before(now) {
 		emitted = scheduled
 	}
@@ -279,13 +213,6 @@ func (m *Manager) EnsureConnected(channelID string) error {
 	return ensureUp(client)
 }
 
-// ensureUp brings a session's socket back up.
-//
-// IsLoggedIn is not enough to decide: whatsmeow only clears that flag on a stream
-// error, so a socket killed by the network still reports the device as logged in.
-// IsConnected is the one that reflects the socket. Racing whatsmeow's own
-// auto-reconnect is expected and surfaces as ErrAlreadyConnected, which means the
-// socket is up, not that the call failed.
 func ensureUp(client WAClient) error {
 	if client.IsConnected() && client.IsLoggedIn() {
 		return nil
@@ -322,8 +249,6 @@ func (m *Manager) DisconnectAll() {
 		sessions = append(sessions, c)
 	}
 	m.sessions = make(map[string]WAClient)
-	// Every QR loop dies with its socket, so no code may survive into whatever
-	// pairs next.
 	m.pairings = make(map[string]*pairing)
 	m.mu.Unlock()
 
@@ -332,8 +257,6 @@ func (m *Manager) DisconnectAll() {
 	}
 }
 
-// session returns the live session for a channel. It never builds a device: only
-// pairing and resuming know which device a channel belongs to.
 func (m *Manager) session(channelID string) (WAClient, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -345,8 +268,6 @@ func (m *Manager) session(channelID string) (WAClient, error) {
 	return c, nil
 }
 
-// client returns the live session for a channel, building a fresh (unpaired) device
-// when there is none. Only the pairing flow may use it.
 func (m *Manager) client(channelID string) (WAClient, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -377,8 +298,6 @@ func (m *Manager) Resume(ctx context.Context, channelID string, jid types.JID) e
 		return fmt.Errorf("session: resume device for channel %s: %w", channelID, err)
 	}
 
-	// Register before connecting so connection events emitted during the handshake
-	// reach the gateway, and connect outside the lock because the handler takes it.
 	m.register(channelID, c)
 	m.mu.Unlock()
 
@@ -390,12 +309,9 @@ func (m *Manager) Resume(ctx context.Context, channelID string, jid types.JID) e
 	return nil
 }
 
-// register wires a client's events to the manager and stores it. m.mu must be held.
 func (m *Manager) register(channelID string, c WAClient) {
 	c.AddEventHandler(func(evt any) {
 		if _, ok := evt.(*events.LoggedOut); ok {
-			// LoggedOut is the one disconnect that must not be retried: the device is
-			// gone from the phone and the channel has to be paired again.
 			go m.drop(channelID, c)
 		}
 		m.dispatch(channelID, evt)

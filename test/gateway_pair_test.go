@@ -21,9 +21,6 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
 )
 
-// setupPairGateway runs a real gateway against a real broker with the channel.qr and
-// channel.status events on a probe queue, which is the only place these tests can see
-// whether a pair command was ever picked up.
 func setupPairGateway(t *testing.T, factory session.ClientFactory) (probeCh *rabbitmq.Channel, deliveries <-chan rabbitmq.Delivery, cancel context.CancelFunc, runErrCh chan error) {
 	t.Helper()
 
@@ -128,16 +125,8 @@ func publishPairCommand(t *testing.T, probeCh *rabbitmq.Channel, cmd gatewayamqp
 	}
 }
 
-// pairWait is how long these tests give the broker and the gateway to do something they
-// would otherwise never do. Every deadline here separates "answered" from "never
-// answered" -- a pair command queued behind another one waits for a session that only
-// ends at shutdown -- so the slack costs the assertions nothing and keeps a loaded
-// machine from reading as a regression.
 const pairWait = 30 * time.Second
 
-// feedQR hands the pairing loop its next item, failing the test rather than blocking
-// forever when nothing is reading -- which is precisely what a pair command stuck
-// behind another one looks like from here.
 func feedQR(t *testing.T, fake *fakeWAClient, item whatsmeow.QRChannelItem) {
 	t.Helper()
 
@@ -194,13 +183,6 @@ func waitForChannelStatus(t *testing.T, deliveries <-chan rabbitmq.Delivery, cha
 	}
 }
 
-// TestGatewaySecondPairCommandIsAnsweredWhileTheFirstIsInFlight is the reopened dialog
-// as the operator actually meets it, over the queue rather than in the manager: the
-// first command is still following its pairing session, and the second one -- which the
-// retained code exists to answer -- must be picked up and answered anyway.
-//
-// The gateway is shut down with the session still live, which also pins that a pairing
-// no one will finish does not hold shutdown open.
 func TestGatewaySecondPairCommandIsAnsweredWhileTheFirstIsInFlight(t *testing.T) {
 	fake := newFakeWAClient()
 	fake.qrFeed = make(chan whatsmeow.QRChannelItem)
@@ -222,9 +204,6 @@ func TestGatewaySecondPairCommandIsAnsweredWhileTheFirstIsInFlight(t *testing.T)
 		t.Fatalf("unexpected first channel.qr event: %+v", first)
 	}
 
-	// The dialog is closed and reopened. Nothing is fed to the pairing loop in the
-	// meantime, so the only code that can come back is the retained one -- and it can
-	// only come back if this command was consumed while the first session is running.
 	publishPairCommand(t, probeCh, gatewayamqp.PairCommand{TenantID: tenantID, ChannelID: channelID, UserID: "user-second"})
 
 	second := waitForChannelQR(t, deliveries, channelID, pairWait)
@@ -242,9 +221,6 @@ func TestGatewaySecondPairCommandIsAnsweredWhileTheFirstIsInFlight(t *testing.T)
 	shutdownStatusRoundtripGateway(t, cancel, runErrCh)
 }
 
-// TestGatewayPairForOneChannelDoesNotWaitForAnother: one operator's pairing used to
-// stall every other operator's on the same instance, which is worse than the reported
-// symptom and invisible to the channel it happens to.
 func TestGatewayPairForOneChannelDoesNotWaitForAnother(t *testing.T) {
 	const (
 		slowChannel = "channel-pair-slow-1"
@@ -267,8 +243,6 @@ func TestGatewayPairForOneChannelDoesNotWaitForAnother(t *testing.T) {
 	feedQR(t, slow, whatsmeow.QRChannelItem{Event: "code", Code: "qr-slow", Timeout: time.Minute})
 	waitForChannelQR(t, deliveries, slowChannel, pairWait)
 
-	// The first channel's session is now parked on its feed, exactly as a real one is
-	// parked on the operator's phone.
 	publishPairCommand(t, probeCh, gatewayamqp.PairCommand{TenantID: "tenant-pair-fast", ChannelID: fastChannel, UserID: "user-fast"})
 
 	got := waitForChannelQR(t, deliveries, fastChannel, pairWait)
@@ -279,12 +253,6 @@ func TestGatewayPairForOneChannelDoesNotWaitForAnother(t *testing.T) {
 	shutdownStatusRoundtripGateway(t, cancel, runErrCh)
 }
 
-// TestGatewayPairFailureIsAckedUnlessThePairingNeverStarted fixes what the queue now
-// means for a failed pairing. Once the command is accepted, the operator not scanning
-// in time is reported to that operator as channel.status error and nothing else: it is
-// their outcome, not a command to replay or a fault to dead-letter. A pairing this
-// instance could not start at all never reaches that point, so it still dead-letters --
-// which is what keeps a broken instance distinguishable from an idle operator.
 func TestGatewayPairFailureIsAckedUnlessThePairingNeverStarted(t *testing.T) {
 	const (
 		timeoutChannel     = "channel-pair-timeout-1"

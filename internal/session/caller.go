@@ -11,12 +11,6 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/call"
 )
 
-// This file is the only place that knows the calling library's concrete types.
-// Everything else in the gateway works against call.Caller and call.LiveCall,
-// which can be faked in a test; the library's own types cannot, because they
-// are driven by a live VoIP stack.
-
-// callerAdapter presents a meowcaller client as a call.Caller.
 type callerAdapter struct {
 	client *meowcaller.Client
 }
@@ -89,7 +83,6 @@ func (a *callerAdapter) OnIncomingCall(fn func(call.LiveCall)) {
 	})
 }
 
-// liveCallAdapter presents a meowcaller call as a call.LiveCall.
 type liveCallAdapter struct {
 	call *meowcaller.Call
 }
@@ -144,16 +137,6 @@ func (c *liveCallAdapter) DenyParticipant(ctx context.Context, user string) erro
 	return c.call.DenyParticipant(ctx, user)
 }
 
-// Play subscribes src as the call's outbound audio, as s16le mono 16 kHz PCM.
-// The gateway hands over raw PCM rather than an encoded file so the decoding
-// stays on the backend's side.
-//
-// This returns as soon as the player is subscribed; it does not consume src.
-// The library's own transmit loop does that, synchronously, once per 60 ms
-// frame -- so src blocking stops the gateway emitting RTP at all. The returned
-// *Player is deliberately dropped: the gateway never stops or replaces the
-// player, because the source it subscribes here is the call's single outbound
-// source for the whole call (see internal/call/outbound.go).
 func (c *liveCallAdapter) Play(src io.ReadCloser) error {
 	c.call.Play(meowcaller.PCMStream(src))
 	return nil
@@ -205,9 +188,6 @@ func (c *liveCallAdapter) OnVideoKeyframeRequest(fn func()) {
 }
 
 var _ call.LiveCall = (*liveCallAdapter)(nil)
-
-// The conversions below flatten the library's types onto the gateway's own.
-// JIDs become strings because that is what goes on the wire.
 
 func phaseFrom(p meowcaller.CallPhase) call.Phase {
 	switch p {
@@ -291,8 +271,6 @@ func screenShareFrom(s meowcaller.ScreenShareState) call.ScreenShare {
 	}
 }
 
-// jidString renders a JID, keeping an empty one empty rather than letting it
-// stringify to a bare "@server".
 func jidString(jid types.JID) string {
 	if jid.IsEmpty() {
 		return ""

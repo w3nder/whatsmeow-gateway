@@ -16,11 +16,7 @@ type memPublisher struct {
 	mu      sync.Mutex
 	events  []call.Event
 	inbound []call.InboundCallEvent
-	// order records "inbound" or a call.Event's type in the sequence both
-	// PublishInbound and PublishCall are actually invoked, since events and
-	// inbound live in separate slices and neither alone proves which method
-	// fired first.
-	order []string
+	order   []string
 }
 
 func (p *memPublisher) PublishCall(_ context.Context, evt call.Event) error {
@@ -45,8 +41,6 @@ func (p *memPublisher) inboundEvents() []call.InboundCallEvent {
 	return append([]call.InboundCallEvent(nil), p.inbound...)
 }
 
-// sequence returns the order publish calls actually landed in, "inbound" or a
-// call.Event's type per entry.
 func (p *memPublisher) sequence() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -89,12 +83,6 @@ func (c *fakeClock) advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
-// newTestManager's identity function derives PhoneNumberID from the channel
-// id, mirroring gateway.callIdentity in production: the backend finds a
-// gateway channel by that field holding the channel's own id, not a phone
-// number. Deriving it here means a test that asserts PhoneNumberID against
-// the channel id it attached is pinned to that relationship, not to a
-// fixture constant that would mask a regression back to the device JID.
 func newTestManager(t *testing.T, pub call.Publisher, store call.RecordingStore, now func() time.Time) *call.Manager {
 	t.Helper()
 	m := call.NewManager(pub, store,
@@ -106,10 +94,6 @@ func newTestManager(t *testing.T, pub call.Publisher, store call.RecordingStore,
 		call.Options{TmpDir: t.TempDir(), Record: true, Now: now},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
-	// Registered after t.TempDir, so it runs before it: an upload still in
-	// flight is still holding its temp files, and removing the directory out
-	// from under it fails the test for a reason that has nothing to do with
-	// what the test was checking.
 	t.Cleanup(func() { m.WaitForRecordings(10 * time.Second) })
 	return m
 }
@@ -136,9 +120,6 @@ func TestManagerPublishesIncomingCall(t *testing.T) {
 	if !evt.IsVideo {
 		t.Error("IsVideo = false, want true for a video offer")
 	}
-	// From is the resolved phone-number user, not the raw peer JID string --
-	// the same shape an inbound message's From takes, since both derive from
-	// senderid.Resolve/From on the same JID.
 	if evt.From != "5511888888888" {
 		t.Errorf("From = %q, want the resolved phone number", evt.From)
 	}
@@ -150,13 +131,6 @@ func TestManagerPublishesIncomingCall(t *testing.T) {
 	}
 }
 
-// PhoneNumberID must track the channel id on both the call.Event and the
-// inbound-message-shaped call event: the backend resolves a channel by that
-// field holding the channel's own id, not a phone number or device JID. Two
-// different channel ids are attached here so the assertion actually pins the
-// relationship to whatever channel produced the event -- a fixture that
-// returned one fixed PhoneNumberID regardless of channel would pass a
-// same-channel-only check without proving the mapping is right.
 func TestPhoneNumberIDMatchesChannelID(t *testing.T) {
 	pub := &memPublisher{}
 	m := newTestManager(t, pub, newMemStore(), time.Now)
@@ -198,7 +172,6 @@ func TestPhoneNumberIDMatchesChannelID(t *testing.T) {
 	}
 }
 
-// Talk time is measured from the answer, not from the offer.
 func TestManagerEndedCarriesAnsweredDuration(t *testing.T) {
 	pub := &memPublisher{}
 	clock := &fakeClock{now: time.Unix(1_754_300_000, 0)}
@@ -209,9 +182,9 @@ func TestManagerEndedCarriesAnsweredDuration(t *testing.T) {
 	lc := &fakeCall{id: "C1", peer: "5511888888888@s.whatsapp.net"}
 	caller.fireIncoming(lc)
 
-	clock.advance(40 * time.Second) // ringing
+	clock.advance(40 * time.Second)
 	lc.fireReady()
-	clock.advance(10 * time.Second) // talking
+	clock.advance(10 * time.Second)
 	lc.fireEnd("hangup")
 
 	ended := pub.typed(call.EventEnded)
@@ -229,8 +202,6 @@ func TestManagerEndedCarriesAnsweredDuration(t *testing.T) {
 	}
 }
 
-// A call that was never answered ends with zero duration, not with the ring
-// time.
 func TestManagerUnansweredCallHasZeroDuration(t *testing.T) {
 	pub := &memPublisher{}
 	clock := &fakeClock{now: time.Unix(1_754_300_000, 0)}
@@ -249,9 +220,6 @@ func TestManagerUnansweredCallHasZeroDuration(t *testing.T) {
 	}
 }
 
-// The recording is a by-product of the call, not a gate on it: the ended
-// event must never carry media, and the recording arrives later as its own
-// event once the upload finishes.
 func TestManagerEndedCarriesRecording(t *testing.T) {
 	pub := &memPublisher{}
 	store := newMemStore()
@@ -278,8 +246,6 @@ func TestManagerEndedCarriesRecording(t *testing.T) {
 	if len(recording) != 1 {
 		t.Fatalf("got %d recording events, want 1", len(recording))
 	}
-	// All three audio tracks ride on the one event: the mix for the chat's
-	// player, and one per side for transcription to attribute.
 	for field, wantKey := range map[string]struct {
 		got  *call.Media
 		want string
@@ -322,7 +288,6 @@ func TestManagerEndedCarriesVideoRecording(t *testing.T) {
 	}
 }
 
-// Losing the recording must not hide the end of the call from the backend.
 func TestManagerPublishesEndedEvenWhenUploadFails(t *testing.T) {
 	pub := &memPublisher{}
 	store := newMemStore()
@@ -354,9 +319,6 @@ func TestManagerPublishesEndedEvenWhenUploadFails(t *testing.T) {
 	}
 }
 
-// A slow object store must never delay the event that tells the backend the
-// call is over: ended goes out synchronously, before the upload even has a
-// chance to finish.
 func TestManagerPublishesEndedBeforeRecordingUploadCompletes(t *testing.T) {
 	pub := &memPublisher{}
 	store := newMemStore()
@@ -372,9 +334,6 @@ func TestManagerPublishesEndedBeforeRecordingUploadCompletes(t *testing.T) {
 	lc.feedAudio([]float32{0.5})
 	lc.fireEnd("hangup")
 
-	// The upload is still blocked on the store: ended must already be out,
-	// and the recording must not be, proving the ordering rather than timing
-	// it.
 	if ended := pub.typed(call.EventEnded); len(ended) != 1 {
 		t.Fatalf("got %d ended events before the upload unblocked, want 1", len(ended))
 	}
@@ -390,8 +349,6 @@ func TestManagerPublishesEndedBeforeRecordingUploadCompletes(t *testing.T) {
 		t.Fatalf("recording events = %+v, want one carrying media", recordingEvents)
 	}
 
-	// Confirm the relative order in the raw event stream: ended must precede
-	// recording, never the reverse.
 	endedIdx, recordingIdx := -1, -1
 	for i, e := range pub.events {
 		switch e.Type {
@@ -406,8 +363,6 @@ func TestManagerPublishesEndedBeforeRecordingUploadCompletes(t *testing.T) {
 	}
 }
 
-// The recording upload must survive shutdown: WaitForRecordings has to
-// actually wait for an in-flight upload rather than returning immediately.
 func TestManagerWaitForRecordingsWaitsForInFlightUpload(t *testing.T) {
 	pub := &memPublisher{}
 	store := newMemStore()
@@ -432,7 +387,6 @@ func TestManagerWaitForRecordingsWaitsForInFlightUpload(t *testing.T) {
 	case <-waitDone:
 		t.Fatal("WaitForRecordings returned before the upload finished")
 	case <-time.After(200 * time.Millisecond):
-		// Still blocked, as expected.
 	}
 
 	release()
@@ -448,16 +402,11 @@ func TestManagerWaitForRecordingsWaitsForInFlightUpload(t *testing.T) {
 	}
 }
 
-// WaitForRecordings must not hang forever on an upload that never finishes;
-// it is a bounded wait, not a guarantee.
 func TestManagerWaitForRecordingsRespectsDeadline(t *testing.T) {
 	pub := &memPublisher{}
 	store := newMemStore()
 	release := store.blockPuts()
 	m := newTestManager(t, pub, store, time.Now)
-	// Registered after the manager, so it runs before the manager's own
-	// cleanup: that one waits for uploads to finish, and this is what lets
-	// the deliberately stuck one finish.
 	t.Cleanup(release)
 	caller := &fakeCaller{}
 	m.Attach("chan-a", caller)
@@ -523,7 +472,6 @@ func TestManagerAbortChannelEndsLiveCalls(t *testing.T) {
 	}
 }
 
-// A call must never end twice, whichever path gets there first.
 func TestManagerEndIsIdempotent(t *testing.T) {
 	pub := &memPublisher{}
 	m := newTestManager(t, pub, newMemStore(), time.Now)
@@ -572,16 +520,12 @@ func TestManagerPublishesVideoStateAndReaction(t *testing.T) {
 	}
 }
 
-// A client built without a calling stack must not take the channel down.
 func TestManagerAttachToleratesNilCaller(t *testing.T) {
 	m := newTestManager(t, &memPublisher{}, newMemStore(), time.Now)
 
-	// Must not panic.
 	m.Attach("chan-a", nil)
 }
 
-// A callback runs on the library's media goroutine. A panic there must not take
-// the gateway down with it.
 func TestManagerSurvivesPanickingPublish(t *testing.T) {
 	m := call.NewManager(panicPublisher{}, newMemStore(),
 		func(string) call.Identity { return call.Identity{} },
@@ -593,6 +537,5 @@ func TestManagerSurvivesPanickingPublish(t *testing.T) {
 	caller := &fakeCaller{}
 	m.Attach("chan-a", caller)
 
-	// Must not panic.
 	caller.fireIncoming(&fakeCall{id: "C1"})
 }

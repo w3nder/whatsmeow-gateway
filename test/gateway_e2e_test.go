@@ -374,9 +374,6 @@ func TestGatewayEndToEnd(t *testing.T) {
 	if statusEvt.DisplayName != "E2E Business" {
 		t.Errorf("expected displayName=%q on the connected event, got %+v", "E2E Business", statusEvt)
 	}
-	// The fake WAClient answers a profile-picture query as an account with no photo
-	// does, so this also pins that a missing photo is not an error: name and number
-	// still went out.
 	if statusEvt.ProfilePicture != nil {
 		t.Errorf("expected no profile picture on a channel whose account has none, got %+v", statusEvt.ProfilePicture)
 	}

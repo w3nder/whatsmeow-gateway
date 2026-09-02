@@ -30,8 +30,6 @@ type lookupCall struct {
 	params *whatsmeow.GetProfilePictureParams
 }
 
-// stubLookup answers GetProfilePictureInfo from fn, which receives the
-// zero-based call number so a test can script a different answer per call.
 type stubLookup struct {
 	mu    sync.Mutex
 	calls []lookupCall
@@ -180,13 +178,9 @@ func TestForAsksAboutThePersonRatherThanTheDeviceThatMessaged(t *testing.T) {
 
 	pic := cache.For(context.Background(), lookup, channelID, tenantID, fromPhone)
 
-	// A profile photo belongs to the account, not to one of its phones, and
-	// WhatsApp will not answer a query aimed at a single device.
 	if got := lookup.call(0).jid.Device; got != 0 {
 		t.Errorf("queried device %d, want the bare user", got)
 	}
-	// The key must not vary by device either, or the same photo would be
-	// stored once per phone the contact answers from.
 	if pic == nil || !strings.HasPrefix(pic.Key, "profile-pictures/") {
 		t.Errorf("picture = %+v, want the device-free key", pic)
 	}
@@ -216,8 +210,6 @@ func TestForRechecksWithExistingIDOnceTheEntryIsStale(t *testing.T) {
 		if n == 0 {
 			return &types.ProfilePictureInfo{URL: "https://pps.example/photo", ID: "pic-1"}, nil
 		}
-		// whatsmeow answers a matching ExistingID with no info and no error:
-		// the photo has not changed.
 		return nil, nil
 	}}
 	store := &stubStore{}
@@ -369,8 +361,6 @@ func TestForKeepsChannelsApart(t *testing.T) {
 	cache.For(context.Background(), lookup, "channel-a", tenantID, peerJID())
 	cache.For(context.Background(), lookup, "channel-b", tenantID, peerJID())
 
-	// Photo visibility is a privacy setting evaluated against the asking
-	// account, so what one channel sees says nothing about what another does.
 	if lookup.count() != 2 {
 		t.Errorf("lookups = %d, want 2: each channel asks for itself", lookup.count())
 	}
@@ -415,8 +405,6 @@ func TestForQueriesOnceWhenEventsForOneContactArriveTogether(t *testing.T) {
 func TestForWithoutALookupReturnsNothing(t *testing.T) {
 	cache := newCache(t, &stubStore{}, fetchBytes([]byte("jpeg-bytes")), newClock())
 
-	// A channel with no live client hands the resolver nothing, exactly as the
-	// gateway's sender resolution does; that must not panic.
 	if pic := cache.For(context.Background(), nil, channelID, tenantID, peerJID()); pic != nil {
 		t.Errorf("picture = %+v, want nil", pic)
 	}

@@ -87,8 +87,6 @@ func TestBuildInboundLooksUpTheLIDSenderProfilePicture(t *testing.T) {
 	if len(avatars.jids) != 1 {
 		t.Fatalf("avatar lookups = %d, want 1", len(avatars.jids))
 	}
-	// The photo is asked for under the identity WhatsApp itself addressed the
-	// message from, not the phone number we resolved it to.
 	if got := avatars.jids[0]; got.User != "173907587899617" || got.Server != types.HiddenUserServer {
 		t.Errorf("looked up %s, want the @lid sender 173907587899617", got)
 	}
@@ -209,8 +207,6 @@ func TestBuildInboundDoesNotLookUpAProfilePictureForAnUnmappableMessage(t *testi
 		t.Fatal("expected ErrSkip for a protocol message")
 	}
 
-	// Nothing is published for a skipped message, so paying for its photo
-	// would be pure waste on a message type that arrives constantly.
 	if len(avatars.jids) != 0 {
 		t.Errorf("avatar lookups = %d, want 0", len(avatars.jids))
 	}

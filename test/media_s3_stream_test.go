@@ -13,9 +13,6 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/media"
 )
 
-// TestS3StorePutStreamRoundTrip covers the path call recordings take. The body
-// is deliberately past the uploader's single-part threshold, so this exercises
-// the multipart upload that Put's []byte path never reaches.
 func TestS3StorePutStreamRoundTrip(t *testing.T) {
 	ctx := context.Background()
 

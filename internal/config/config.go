@@ -48,34 +48,20 @@ func Load() (Config, error) {
 		SendTimeout:          30 * time.Second,
 		ShutdownDrainTimeout: 20 * time.Second,
 		CallTmpDir:           os.Getenv("GATEWAY_CALL_TMPDIR"),
-		// Recording is on by default: a call the backend cannot hear afterwards
-		// is of little use to it. GATEWAY_CALL_RECORD=false turns it off.
-		CallRecord: os.Getenv("GATEWAY_CALL_RECORD") != "false",
-		// Empty leaves the media websocket off, which is today's behaviour: an
-		// instance that never sets CALL_MEDIA_ADDR runs exactly as it did before
-		// this listener existed. Operators who want it set it to, e.g., :8081.
+		CallRecord:           os.Getenv("GATEWAY_CALL_RECORD") != "false",
 		CallMediaAddr:        os.Getenv("CALL_MEDIA_ADDR"),
 		CallMediaTokenSecret: os.Getenv("CALL_MEDIA_TOKEN_SECRET"),
-		// The operator connects from the frontend's origin, not this
-		// listener's, so without an explicit allowlist the websocket library's
-		// default same-origin check refuses every real browser connection.
-		// Comma separated host patterns, e.g. "app.example.com".
-		CallMediaOrigins: splitCSV(os.Getenv("CALL_MEDIA_ALLOWED_ORIGINS")),
+		CallMediaOrigins:     splitCSV(os.Getenv("CALL_MEDIA_ALLOWED_ORIGINS")),
 	}
 	if c.AMQPURL == "" || c.SessionDSN == "" || c.RedisURL == "" || c.InstanceID == "" {
 		return Config{}, fmt.Errorf("missing required env (GATEWAY_INSTANCE_ID, AMQP_URL, SESSION_DATABASE_URL, REDIS_URL)")
 	}
-	// The secret authenticates every media-socket request; a listener with no
-	// secret would accept any token, signed by anyone, for any call.
 	if c.CallMediaAddr != "" && c.CallMediaTokenSecret == "" {
 		return Config{}, fmt.Errorf("CALL_MEDIA_TOKEN_SECRET is required when CALL_MEDIA_ADDR is set")
 	}
 	return c, nil
 }
 
-// splitCSV parses a comma separated env var, trimming whitespace and
-// dropping empty entries -- "" and " " both mean "nothing configured" rather
-// than a single blank pattern.
 func splitCSV(v string) []string {
 	if v == "" {
 		return nil

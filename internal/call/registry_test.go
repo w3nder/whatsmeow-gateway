@@ -14,7 +14,6 @@ func TestRegistryIsolatesChannels(t *testing.T) {
 	r.Insert(a)
 	r.Insert(b)
 
-	// The same call-id on two channels must not collide.
 	if got, ok := r.Get("chan-a", "C1"); !ok || got != a {
 		t.Errorf("Get(chan-a, C1) = %v,%v, want the chan-a call", got, ok)
 	}
@@ -53,8 +52,6 @@ func TestRegistryRemoveIsIdempotent(t *testing.T) {
 	}
 }
 
-// A channel may hold more than one call at a time -- a group call and a 1:1,
-// say -- so nothing may assume a single call per channel.
 func TestRegistryHoldsSeveralCallsPerChannel(t *testing.T) {
 	r := call.NewRegistry()
 	r.Insert(&call.Tracked{CallID: "C1", ChannelID: "chan-a"})

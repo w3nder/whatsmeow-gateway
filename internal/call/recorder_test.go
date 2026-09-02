@@ -15,7 +15,6 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/call"
 )
 
-// memStore is a RecordingStore that keeps uploads in memory.
 type memStore struct {
 	mu      sync.Mutex
 	objects map[string][]byte
@@ -28,9 +27,6 @@ func newMemStore() *memStore {
 	return &memStore{objects: map[string][]byte{}, mimes: map[string]string{}}
 }
 
-// blockPuts makes every PutStream call wait until release is called. It
-// stands in for a slow object store, so a test can observe what happens while
-// an upload is still in flight.
 func (m *memStore) blockPuts() (release func()) {
 	gate := make(chan struct{})
 	var once sync.Once
@@ -89,17 +85,12 @@ func (m *memStore) fail(err error) {
 	m.mu.Unlock()
 }
 
-// frameBytes is one frame of s16le on the wire: what a whole tick of one track
-// takes up.
 const frameBytes = call.FrameSamples * 2
 
-// wavSample reads sample i out of a wav body, header included.
 func wavSample(body []byte, i int) int16 {
 	return int16(binary.LittleEndian.Uint16(body[44+i*2:]))
 }
 
-// wavData is the wav's declared data length, which must match what is actually
-// there.
 func wavData(t *testing.T, body []byte) int {
 	t.Helper()
 	declared := int(binary.LittleEndian.Uint32(body[40:44]))
@@ -112,8 +103,6 @@ func wavData(t *testing.T, body []byte) int {
 	return declared
 }
 
-// operatorFrame builds one full frame of s16le at a constant level, the shape
-// the outbound source hands the recorder.
 func operatorFrame(level int16) []byte {
 	frame := make([]byte, frameBytes)
 	for i := 0; i < len(frame); i += 2 {
@@ -134,7 +123,6 @@ func TestRecorderWritesCanonicalWAV(t *testing.T) {
 	dir := t.TempDir()
 	rec := call.NewRecorder(dir, "chan1", "CALL1")
 
-	// Full-scale positive, silence, full-scale negative.
 	rec.WritePeerAudio([]float32{1, 0, -1})
 
 	store := newMemStore()
@@ -153,9 +141,6 @@ func TestRecorderWritesCanonicalWAV(t *testing.T) {
 	if !ok {
 		t.Fatal("the wav was never uploaded")
 	}
-	// The recorder is on a frame grid now, so three samples buy a whole frame:
-	// the remaining 957 are the silence that keeps this track lined up with the
-	// other two.
 	if wavData(t, body) < frameBytes {
 		t.Fatalf("len(wav data) = %d, want at least one %d-byte frame", len(body)-44, frameBytes)
 	}
@@ -180,7 +165,6 @@ func TestRecorderWritesCanonicalWAV(t *testing.T) {
 			t.Errorf("sample[%d] = %d, want %d", i, got, want[i])
 		}
 	}
-	// And the rest of the frame is the silence that pads it out.
 	for i := 3; i < call.FrameSamples; i++ {
 		if got := wavSample(body, i); got != 0 {
 			t.Fatalf("sample[%d] = %d, want the frame padded with silence", i, got)
@@ -188,7 +172,6 @@ func TestRecorderWritesCanonicalWAV(t *testing.T) {
 	}
 }
 
-// float32 outside [-1,1] must clamp, not wrap around into the opposite sign.
 func TestRecorderClampsOutOfRangeSamples(t *testing.T) {
 	dir := t.TempDir()
 	rec := call.NewRecorder(dir, "chan1", "CALL1")
@@ -207,8 +190,6 @@ func TestRecorderClampsOutOfRangeSamples(t *testing.T) {
 	}
 }
 
-// Both sides spoke: three objects, three keys, one mime, and one length --
-// they are one recording cut three ways, not three recordings.
 func TestRecorderUploadsAllThreeTracks(t *testing.T) {
 	dir := t.TempDir()
 	rec := call.NewRecorder(dir, "chan1", "CALL1")
@@ -260,7 +241,6 @@ func TestRecorderUploadsAllThreeTracks(t *testing.T) {
 			len(mix), len(peer), len(operator))
 	}
 
-	// Each side is on its own track and only its own track.
 	if got := wavSample(peer, 0); got < 16382 || got > 16384 {
 		t.Errorf("peer sample = %d, want the customer's 0.5", got)
 	}
@@ -272,13 +252,6 @@ func TestRecorderUploadsAllThreeTracks(t *testing.T) {
 	}
 }
 
-// A call where only one side ever spoke still produces three objects. The
-// silent side is silence, not a missing object: a transcription pipeline that
-// fetches -operator.wav and gets a 404 cannot tell "the operator said nothing"
-// from "the upload failed" or "this gateway is too old to produce it", whereas
-// a silent track of exactly the right length says it unambiguously. The
-// "nothing captured, nothing uploaded" rule is about a call with no audio at
-// all, and that one still holds -- see TestRecorderUploadsNothingWhenNoFrames.
 func TestRecorderUploadsASilentTrackForTheSideThatNeverSpoke(t *testing.T) {
 	dir := t.TempDir()
 	rec := call.NewRecorder(dir, "chan1", "CALL1")
@@ -336,15 +309,10 @@ func TestRecorderWritesVideoVerbatim(t *testing.T) {
 	}
 }
 
-// A call that captured nothing must not leave an empty object in the bucket --
-// and must not have started a clock that would have filled three of them with
-// silence.
 func TestRecorderUploadsNothingWhenNoFrames(t *testing.T) {
 	dir := t.TempDir()
 	rec := call.NewRecorder(dir, "chan1", "CALL1")
 
-	// Long enough that a clock running from construction would have ticked
-	// many times over.
 	time.Sleep(200 * time.Millisecond)
 
 	store := newMemStore()
@@ -367,8 +335,6 @@ func TestRecorderUploadsNothingWhenNoFrames(t *testing.T) {
 	}
 }
 
-// The temp files must go away even when the upload fails, or a long-running
-// gateway fills its disk with dead recordings. There are four of them now.
 func TestRecorderRemovesTempFilesOnUploadError(t *testing.T) {
 	dir := t.TempDir()
 	rec := call.NewRecorder(dir, "chan1", "CALL1")
@@ -394,9 +360,6 @@ func TestRecorderRemovesTempFilesOnUploadError(t *testing.T) {
 	}
 }
 
-// Recording runs on the library's media goroutines -- the relay's decoder on
-// one side, the transmit loop on the other -- so both writes must be safe to
-// call concurrently, and concurrently with the clock draining them.
 func TestRecorderIsSafeForConcurrentWrites(t *testing.T) {
 	dir := t.TempDir()
 	rec := call.NewRecorder(dir, "chan1", "CALL1")
@@ -439,14 +402,10 @@ func TestRecorderIsSafeForConcurrentWrites(t *testing.T) {
 	}
 }
 
-// A ticker per call that outlives the call is a leak that only shows up under
-// load: it costs nothing on one call and everything on a thousand.
 func TestRecorderClockDoesNotOutliveTheCall(t *testing.T) {
 	dir := t.TempDir()
 	store := newMemStore()
 
-	// A baseline taken after one full cycle, so the runtime's own goroutines
-	// are already up and the comparison is about ours.
 	warmup := call.NewRecorder(dir, "chan1", "WARMUP")
 	warmup.WritePeerAudio([]float32{0.5})
 	if _, err := warmup.Finish(context.Background(), store); err != nil {

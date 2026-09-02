@@ -8,14 +8,11 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
 )
 
-// defaultVideoFrameRate paces video playback when the command does not say
-// otherwise. 30 fps is what WhatsApp's own clients negotiate.
 const defaultVideoFrameRate = 30
 
-// NAL unit types that matter for finding access-unit boundaries.
 const (
-	nalSlice      = 1 // non-IDR coded slice
-	nalIDR        = 5 // IDR coded slice
+	nalSlice      = 1
+	nalIDR        = 5
 	nalSEI        = 6
 	nalSPS        = 7
 	nalPPS        = 8
@@ -24,11 +21,6 @@ const (
 	minNALPayload = 1
 )
 
-// SplitAnnexB slices an Annex-B H.264 stream into access units, one per frame.
-//
-// Each returned unit keeps its leading start code, which is the form SendVideo
-// expects. Parameter sets stay attached to the picture that follows them: a
-// decoder handed an IDR without its SPS and PPS cannot start.
 func SplitAnnexB(stream []byte) [][]byte {
 	starts := nalStarts(stream)
 	if len(starts) == 0 {
@@ -63,9 +55,6 @@ func SplitAnnexB(stream []byte) [][]byte {
 	return units
 }
 
-// boundary reports whether a NAL of this type opens a new access unit. A
-// delimiter, parameter set or SEI only opens one once the current unit already
-// carries a picture; a slice opens one for the same reason.
 func boundary(nalType byte, hasSlice bool) bool {
 	switch nalType {
 	case nalDelimiter, nalSPS, nalPPS, nalSEI, nalSlice, nalIDR:
@@ -80,8 +69,6 @@ type nalStart struct {
 	nalType byte
 }
 
-// nalStarts finds every start code in the stream, recording where it begins and
-// what kind of NAL follows it.
 func nalStarts(stream []byte) []nalStart {
 	var starts []nalStart
 	for i := 0; i+3 < len(stream)+1; i++ {
@@ -105,8 +92,6 @@ func nalStarts(stream []byte) []nalStart {
 	return starts
 }
 
-// PlayAnnexB feeds access units into a call at frameRate, stopping on
-// cancellation or on the first send error.
 func PlayAnnexB(ctx context.Context, lc LiveCall, units [][]byte, frameRate int) error {
 	if frameRate <= 0 {
 		frameRate = defaultVideoFrameRate
@@ -136,11 +121,6 @@ func PlayAnnexB(ctx context.Context, lc LiveCall, units [][]byte, frameRate int)
 	return nil
 }
 
-// playVideo streams an already-encoded H.264 file into the call.
-//
-// The gateway never encodes video: the calling library carries access units and
-// nothing in this image can produce them, so the backend supplies a file that
-// is already Annex-B H.264.
 func (m *Manager) playVideo(
 	ctx context.Context,
 	t *Tracked,
@@ -161,8 +141,6 @@ func (m *Manager) playVideo(
 		return fetchError{fmt.Errorf("call: %s carries no H.264 access unit", cmd.MediaURL)}
 	}
 
-	// Streaming outlives the command: blocking the AMQP consumer for the length
-	// of a video would stall every other call command behind it.
 	go func() {
 		if err := PlayAnnexB(context.Background(), t.Live, units, defaultVideoFrameRate); err != nil {
 			m.log.Error("call: video playback stopped",

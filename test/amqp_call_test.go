@@ -34,7 +34,6 @@ func TestConsumerDeliversCallCommand(t *testing.T) {
 		t.Fatalf("StartCall failed: %v", err)
 	}
 
-	// Every field, so a rename on either side of the contract shows up here.
 	want := gatewayamqp.GatewayCallCommand{
 		TenantID:    "tenant-1",
 		ChannelID:   "channel-1",

@@ -20,9 +20,6 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
 )
 
-// identityClient is the minimum WAClient connectedIdentity's tests need: a device JID
-// and display name to publish, and a controllable profile-picture answer. Every other
-// method on the interface is dead weight these tests never touch.
 type identityClient struct {
 	jid         *types.JID
 	displayName string
@@ -78,8 +75,6 @@ func (c *identityClient) AddEventHandler(func(any)) uint32 { return 0 }
 func (c *identityClient) Calls() call.Caller               { return nil }
 func (c *identityClient) Disconnect()                      {}
 
-// identityStore is avatar.Store faked in memory, so these tests exercise the real
-// upload path without an object store.
 type identityStore struct {
 	mu   sync.Mutex
 	puts map[string][]byte
@@ -102,9 +97,6 @@ func (s *identityStore) get(key string) ([]byte, bool) {
 	return data, ok
 }
 
-// newIdentityGateway builds just enough of a gateway to exercise connectedIdentity: a
-// manager holding one channel's session and the avatar cache it feeds, with no broker,
-// registry or ownership store -- none of those are on the path being tested.
 func newIdentityGateway(t *testing.T, store avatar.Store, fetch avatar.Fetch, client session.WAClient) *gateway {
 	t.Helper()
 
@@ -130,9 +122,6 @@ func newIdentityGateway(t *testing.T, store avatar.Store, fetch avatar.Fetch, cl
 	}
 }
 
-// The connected event is the account's identity card: the phone number was already
-// there, and the backend needs the display name and the photo key alongside it to
-// show which WhatsApp account a channel is connected to.
 func TestConnectedIdentityCarriesNamePhoneAndPhotoKey(t *testing.T) {
 	jid := types.NewJID("5511999990000", types.DefaultUserServer)
 	client := &identityClient{
@@ -161,9 +150,6 @@ func TestConnectedIdentityCarriesNamePhoneAndPhotoKey(t *testing.T) {
 	}
 }
 
-// An account with no photo -- or one whose privacy settings hide it from this channel
-// -- is a normal, settled answer, not a failure: the rest of the identity must still
-// go out.
 func TestConnectedIdentityWithNoPhotoStillCarriesNameAndPhone(t *testing.T) {
 	jid := types.NewJID("5511988887777", types.DefaultUserServer)
 	client := &identityClient{
@@ -189,9 +175,6 @@ func TestConnectedIdentityWithNoPhotoStillCarriesNameAndPhone(t *testing.T) {
 	}
 }
 
-// A channel coming up is what the operator is waiting for; a profile photo is
-// decoration on that event. A photo lookup that fails must not turn into an error
-// that could hold the connected event back, and must not block on it either.
 func TestConnectedIdentityPhotoLookupFailureDoesNotBlock(t *testing.T) {
 	jid := types.NewJID("5511977776666", types.DefaultUserServer)
 	client := &identityClient{
@@ -214,9 +197,6 @@ func TestConnectedIdentityPhotoLookupFailureDoesNotBlock(t *testing.T) {
 	if picture != nil {
 		t.Errorf("picture = %+v, want nil when the photo lookup failed", picture)
 	}
-	// Generous relative to the underlying lookup, which returns immediately here: this
-	// pins that nothing in the connected-identity path adds its own wait on top of the
-	// avatar cache's own bounded timeout.
 	if elapsed > time.Second {
 		t.Errorf("connectedIdentity took %s for a lookup that fails immediately -- it must not add delay of its own", elapsed)
 	}

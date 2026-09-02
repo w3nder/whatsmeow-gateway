@@ -13,8 +13,6 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/senderid"
 )
 
-// fakeSenderResolver stands in for the channel's whatsmeow client's LID store
-// lookup -- the same one an inbound message's sender resolution goes through.
 type fakeSenderResolver struct {
 	pn    types.JID
 	found bool
@@ -24,8 +22,6 @@ func (f fakeSenderResolver) PNForLID(context.Context, types.JID) (types.JID, boo
 	return f.pn, f.found, nil
 }
 
-// newIdentityTestManager builds a manager with a fixed sender resolver, for
-// the tests below that only ever attach one channel.
 func newIdentityTestManager(t *testing.T, pub call.Publisher, resolver senderid.Resolver) *call.Manager {
 	t.Helper()
 	return call.NewManager(pub, newMemStore(),
@@ -39,9 +35,6 @@ func newIdentityTestManager(t *testing.T, pub call.Publisher, resolver senderid.
 	)
 }
 
-// assertSenderIdentity checks From/SenderLid/SenderPn together so a failure
-// names which of the two events (call.Event or InboundCallEvent) disagreed
-// with the expectation, and how.
 func assertSenderIdentity(t *testing.T, label, from, senderLid, senderPn, wantFrom, wantLid, wantPn string) {
 	t.Helper()
 	if from != wantFrom {
@@ -55,12 +48,6 @@ func assertSenderIdentity(t *testing.T, label, from, senderLid, senderPn, wantFr
 	}
 }
 
-// A call from a @lid peer whose phone number the LID store knows must carry
-// the same senderLid/senderPn/from an inbound message from that same person
-// would -- otherwise the backend's contact lookup, keyed on those strings,
-// cannot find the contact a call just rang for. This is the exact shape of
-// the real-call bug: peer "173907587899617:14@lid" resolving to phone number
-// "5511988887777".
 func TestManagerResolvesLIDPeerWithKnownPhoneNumber(t *testing.T) {
 	pub := &memPublisher{}
 	resolver := fakeSenderResolver{pn: types.NewJID("5511988887777", types.DefaultUserServer), found: true}
@@ -85,9 +72,6 @@ func TestManagerResolvesLIDPeerWithKnownPhoneNumber(t *testing.T) {
 		"5511988887777", "173907587899617", "5511988887777")
 }
 
-// A @lid peer the LID store has no mapping for falls back to the lid itself
-// as from, with senderPn left empty -- the fallback that keeps a call
-// resolvable even when the store lookup comes up empty.
 func TestManagerResolvesLIDPeerWithNoKnownPhoneNumber(t *testing.T) {
 	pub := &memPublisher{}
 	m := newIdentityTestManager(t, pub, fakeSenderResolver{found: false})
@@ -111,9 +95,6 @@ func TestManagerResolvesLIDPeerWithNoKnownPhoneNumber(t *testing.T) {
 		"173907587899617", "173907587899617", "")
 }
 
-// A peer that is already a phone JID needs no resolution: from is the phone
-// number and senderLid stays empty, matching a message from a phone-JID
-// sender with no lid alt.
 func TestManagerPeerAlreadyPhoneJIDNeedsNoResolution(t *testing.T) {
 	pub := &memPublisher{}
 	m := newIdentityTestManager(t, pub, fakeSenderResolver{found: false})
@@ -137,9 +118,6 @@ func TestManagerPeerAlreadyPhoneJIDNeedsNoResolution(t *testing.T) {
 		"5511888888888", "", "5511888888888")
 }
 
-// hookResolver runs before answering, so a test can make something happen
-// while Track is inside the store lookup -- the one window in Track where the
-// call is real but its callbacks are not wired yet.
 type hookResolver struct{ during func() }
 
 func (h hookResolver) PNForLID(context.Context, types.JID) (types.JID, bool, error) {
@@ -149,11 +127,6 @@ func (h hookResolver) PNForLID(context.Context, types.JID) (types.JID, bool, err
 	return types.JID{}, false, nil
 }
 
-// M2: the identity lookup is a real database round trip, and the calling
-// library does not replay an end to an OnEnd registered after the fact. A call
-// that ends inside that window used to be stuck forever -- never removed from
-// the registry, never reported as ended, its recorder's temp files left on
-// disk until the channel was aborted or the process shut down.
 func TestCallEndingDuringTheIdentityLookupIsStillReported(t *testing.T) {
 	pub := &memPublisher{}
 	lc := &fakeCall{id: "C1", peer: "173907587899617:14@lid"}
@@ -163,7 +136,6 @@ func TestCallEndingDuringTheIdentityLookupIsStillReported(t *testing.T) {
 			return call.Identity{PhoneNumberID: channelID, TenantID: "t1"}
 		},
 		func(string) senderid.Resolver {
-			// The peer gives up while the gateway is still in the store.
 			return hookResolver{during: func() { lc.fireEnd("cancelled") }}
 		},
 		nil,
@@ -183,15 +155,11 @@ func TestCallEndingDuringTheIdentityLookupIsStillReported(t *testing.T) {
 		t.Errorf("reason = %q, want cancelled", ended[0].Reason)
 	}
 
-	// And it must not be left behind in the registry, where no command could
-	// reach it and nothing would ever clean it up.
 	if _, ok := m.Get("chan-a", "C1"); ok {
 		t.Error("the call is still registered after it ended")
 	}
 }
 
-// The arrival has to reach the backend before the end does: a chat row that
-// does not exist yet cannot be updated to say the call is over.
 func TestAnEarlyEndIsReportedAfterTheCallsArrival(t *testing.T) {
 	pub := &memPublisher{}
 	lc := &fakeCall{id: "C1", peer: "173907587899617:14@lid"}

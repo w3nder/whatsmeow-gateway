@@ -14,8 +14,6 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
 )
 
-// drainPairUpdates collects everything a pair session reports, so a test can assert on
-// the whole sequence rather than on whichever update happened to arrive first.
 func drainPairUpdates(t *testing.T, updates <-chan session.PairUpdate, timeout time.Duration) []session.PairUpdate {
 	t.Helper()
 
@@ -44,10 +42,6 @@ func qrCodes(updates []session.PairUpdate) []string {
 	return codes
 }
 
-// TestManagerPairReplaysStillValidQRToSecondRequest is the reopened dialog: the operator
-// closes the pairing dialog and opens it again while the code on the wire is still good.
-// The second command must be answered with that code, not with silence until whatsmeow
-// rotates.
 func TestManagerPairReplaysStillValidQRToSecondRequest(t *testing.T) {
 	fake := newFakeWAClient()
 	fake.qrFeed = make(chan whatsmeow.QRChannelItem)
@@ -89,9 +83,6 @@ func TestManagerPairReplaysStillValidQRToSecondRequest(t *testing.T) {
 	drainPairUpdates(t, first, 2*time.Second)
 }
 
-// TestManagerPairDoesNotReplayExpiredQR pins the other half of replaying: a code whose
-// window has passed is dead, and handing it back would send the operator to scan
-// something WhatsApp refuses with no explanation.
 func TestManagerPairDoesNotReplayExpiredQR(t *testing.T) {
 	fake := newFakeWAClient()
 	fake.qrFeed = make(chan whatsmeow.QRChannelItem)
@@ -126,13 +117,6 @@ func TestManagerPairDoesNotReplayExpiredQR(t *testing.T) {
 	drainPairUpdates(t, first, 2*time.Second)
 }
 
-// TestManagerPairSkipsQRThatExpiredInWhatsmeowsBuffer covers the emitter as whatsmeow
-// actually wrote it: the codes go into a channel buffered at eight on the emitter's own
-// timer, sent whether or not anybody is reading. A loop held up publishing one code
-// therefore comes back to a code that was released while it was away and may already be
-// dead. Handing that one to the operator is the same broken scan as replaying an expired
-// code, only harder to see, so it is dropped and the loop moves on to the live one
-// behind it.
 func TestManagerPairSkipsQRThatExpiredInWhatsmeowsBuffer(t *testing.T) {
 	fake := newFakeWAClient()
 	fake.qrFeed = make(chan whatsmeow.QRChannelItem)
@@ -146,8 +130,6 @@ func TestManagerPairSkipsQRThatExpiredInWhatsmeowsBuffer(t *testing.T) {
 		t.Fatalf("Pair failed: %v", err)
 	}
 
-	// Collected off to the side so a code the loop should have dropped cannot deadlock
-	// the feed below and turn a wrong answer into a hung test.
 	var (
 		codesMu sync.Mutex
 		codes   []string
@@ -174,8 +156,6 @@ func TestManagerPairSkipsQRThatExpiredInWhatsmeowsBuffer(t *testing.T) {
 
 	fake.qrFeed <- whatsmeow.QRChannelItem{Event: "code", Code: "qr-first", Timeout: lifetime}
 
-	// Long enough that the code the emitter released next -- at one lifetime after the
-	// first, on its schedule -- has itself run out before this loop gets to read it.
 	time.Sleep(lifetime * 5 / 2)
 
 	fake.qrFeed <- whatsmeow.QRChannelItem{Event: "code", Code: "qr-expired-in-buffer", Timeout: lifetime}
@@ -194,11 +174,6 @@ func TestManagerPairSkipsQRThatExpiredInWhatsmeowsBuffer(t *testing.T) {
 	}
 }
 
-// TestManagerPairReplayJudgesTheRetainedQRFromWhenItWasEmitted is the same fact seen
-// from the reopened dialog. A code read late is already part spent, so its window ends
-// one lifetime after the emitter released it, not one lifetime after this process
-// noticed it. Dating it from the read would keep replaying it past the point the phone
-// stops accepting it.
 func TestManagerPairReplayJudgesTheRetainedQRFromWhenItWasEmitted(t *testing.T) {
 	fake := newFakeWAClient()
 	fake.qrFeed = make(chan whatsmeow.QRChannelItem)
@@ -221,8 +196,6 @@ func TestManagerPairReplayJudgesTheRetainedQRFromWhenItWasEmitted(t *testing.T) 
 		t.Fatalf("expected the pair session to report qr-first, got %+v", got)
 	}
 
-	// The next code went out one lifetime in, so by the time it is read half its window
-	// is already gone.
 	time.Sleep(lifetime * 3 / 2)
 	fake.qrFeed <- whatsmeow.QRChannelItem{Event: "code", Code: "qr-half-spent", Timeout: lifetime}
 	if got := <-first; got.QR != "qr-half-spent" {
@@ -234,8 +207,6 @@ func TestManagerPairReplayJudgesTheRetainedQRFromWhenItWasEmitted(t *testing.T) 
 		t.Fatalf("expected the reopened dialog to get the code that is still on the wire, got %+v", replayed)
 	}
 
-	// Past the code's own window, but not past a window measured from the read -- which
-	// is exactly where dating it from the read would go on replaying a dead code.
 	time.Sleep(lifetime * 7 / 10)
 	if replayed := drainPairUpdates(t, mustPair(t, mgr, channelID), 2*time.Second); len(replayed) != 0 {
 		t.Fatalf("expected a code past its own window never to be replayed, got %+v", replayed)
@@ -245,9 +216,6 @@ func TestManagerPairReplayJudgesTheRetainedQRFromWhenItWasEmitted(t *testing.T) 
 	drainPairUpdates(t, first, 2*time.Second)
 }
 
-// TestManagerPairAfterTimeoutPairsFromCleanClient covers the retry after a failed
-// pairing: the timed-out client is gone, the next command builds a fresh device, and the
-// dead code from the previous attempt is never replayed.
 func TestManagerPairAfterTimeoutPairsFromCleanClient(t *testing.T) {
 	timedOut := newFakeWAClient()
 	timedOut.qrItems = []whatsmeow.QRChannelItem{
@@ -292,9 +260,6 @@ func TestManagerPairAfterTimeoutPairsFromCleanClient(t *testing.T) {
 	}
 }
 
-// TestManagerPairAfterErrorDoesNotReplayQR is the same rule for the outcomes whatsmeow
-// reports as errors rather than as a timeout -- and those leave the socket up, which is
-// what makes reusing the client fail outright instead of merely being stale.
 func TestManagerPairAfterErrorDoesNotReplayQR(t *testing.T) {
 	failed := newFakeWAClient()
 	failed.qrItems = []whatsmeow.QRChannelItem{
@@ -329,9 +294,6 @@ func TestManagerPairAfterErrorDoesNotReplayQR(t *testing.T) {
 	}
 }
 
-// TestManagerPairAfterSuccessRetainsNoQR: once the channel is paired, the last code is
-// meaningless. A pair command for a paired channel reports the connection and nothing
-// else -- least of all a QR the operator might try to scan.
 func TestManagerPairAfterSuccessRetainsNoQR(t *testing.T) {
 	paired := newFakeWAClient()
 	paired.qrFeed = make(chan whatsmeow.QRChannelItem)
@@ -375,8 +337,6 @@ func TestManagerPairAfterSuccessRetainsNoQR(t *testing.T) {
 		t.Fatalf("expected a pair command for a paired channel to report only the connection, got %+v", second)
 	}
 
-	// Unlinking from the phone sends the channel back through the QR flow. Whatever the
-	// successful pairing left behind must not follow it there.
 	paired.emit(&events.LoggedOut{})
 	waitForNoSession(t, mgr, channelID)
 
@@ -387,9 +347,6 @@ func TestManagerPairAfterSuccessRetainsNoQR(t *testing.T) {
 	}
 }
 
-// waitForNoSession blocks until the manager has let go of a channel. Dropping a session
-// runs off the client's event handler, so it is not done the instant the event is
-// emitted.
 func waitForNoSession(t *testing.T, mgr *session.Manager, channelID string) {
 	t.Helper()
 
@@ -406,8 +363,6 @@ func waitForNoSession(t *testing.T, mgr *session.Manager, channelID string) {
 	}
 }
 
-// TestManagerConcurrentPairRequestsRunOneQRLoop: two commands landing together must not
-// leave two loops fighting over the same client and publishing every rotation twice.
 func TestManagerConcurrentPairRequestsRunOneQRLoop(t *testing.T) {
 	fake := newFakeWAClient()
 	fake.qrFeed = make(chan whatsmeow.QRChannelItem)
@@ -432,9 +387,6 @@ func TestManagerConcurrentPairRequestsRunOneQRLoop(t *testing.T) {
 	started.Add(2)
 	finished.Add(2)
 
-	// Both callers must have claimed (or failed to claim) the channel before any code
-	// is fed, so the assertion below counts rotations only -- never a replay that the
-	// scheduler happened to allow.
 	sessions := make(chan (<-chan session.PairUpdate), 2)
 	for range 2 {
 		go func() {

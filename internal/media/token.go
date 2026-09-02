@@ -6,8 +6,6 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// CallClaims identifies the operator and call a media-stream request is
-// scoped to.
 type CallClaims struct {
 	TenantID  string
 	ChannelID string
@@ -15,17 +13,10 @@ type CallClaims struct {
 	UserID    string
 }
 
-// VerifyCallToken checks an HS256 token minted by the API and returns its
-// claims. The token authorises an operator to open a single call's media
-// stream, so every claim it carries must be trustworthy: forged or expired
-// tokens must fail here, not deeper in the media pipeline.
 func VerifyCallToken(token, secret string) (CallClaims, error) {
 	parsed, err := jwt.Parse(token, func(*jwt.Token) (interface{}, error) {
 		return []byte(secret), nil
 	},
-		// Without pinning the method, a token declaring alg=none (no
-		// signature) or an asymmetric alg (verified against secret as a
-		// public key) would both be accepted -- the classic JWT bypass.
 		jwt.WithValidMethods([]string{"HS256"}),
 		jwt.WithExpirationRequired(),
 	)

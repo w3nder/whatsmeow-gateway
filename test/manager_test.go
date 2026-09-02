@@ -139,8 +139,6 @@ func TestManagerEnsureConnectedReconnectsAfterSocketDrop(t *testing.T) {
 		t.Fatalf("expected Connect once during Resume, got %d", fake.connectCallCount())
 	}
 
-	// Network dies: the socket is gone but whatsmeow still reports IsLoggedIn, since
-	// it only clears that flag on a stream error.
 	fake.dropSocket()
 
 	if err := mgr.EnsureConnected("channel-drop-1"); err != nil {
@@ -165,8 +163,6 @@ func TestManagerEnsureConnectedToleratesConcurrentAutoReconnect(t *testing.T) {
 		t.Fatalf("Resume failed: %v", err)
 	}
 
-	// whatsmeow's own auto-reconnect got there first: our Connect loses the race and
-	// reports ErrAlreadyConnected, which means the socket is up, not that we failed.
 	fake.dropSocket()
 	fake.connectErr = whatsmeow.ErrAlreadyConnected
 	fake.connected = true

@@ -79,7 +79,6 @@ func TestGatewaySendHandlerDedupesRedeliveredCommand(t *testing.T) {
 	}
 	t.Cleanup(registryStore.Close)
 
-	// A send only reaches a paired channel: the gateway resumes it from the stored JID.
 	storedJID := types.NewJID("15550008888", types.DefaultUserServer)
 	if err := registryStore.Save(context.Background(), "channel-dedupe-1", storedJID.String(), "tenant-dedupe-1"); err != nil {
 		t.Fatalf("registry.Save failed: %v", err)

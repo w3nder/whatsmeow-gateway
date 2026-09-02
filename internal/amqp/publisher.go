@@ -18,18 +18,12 @@ type ChannelQREvent struct {
 }
 
 type ChannelStatusEvent struct {
-	TenantID  string `json:"tenantId"`
-	UserID    string `json:"userId,omitempty"`
-	ChannelID string `json:"channelId"`
-	Status    string `json:"status"`
-	Reason    string `json:"reason,omitempty"`
-	// Numero conectado, so no status "connected". Vazio quando a sessao ainda nao existe.
-	PhoneNumber string `json:"phoneNumber,omitempty"`
-	// DisplayName e ProfilePicture identificam a conta conectada, mesma regra do
-	// PhoneNumber acima: preenchidos so no status "connected", e nunca o motivo de o
-	// evento atrasar ou deixar de ser publicado. A foto viaja como chave do object
-	// store, nunca como bytes nem como URL resolvida -- o backend ja sabe resolver
-	// uma chave, exatamente como faz para midia de mensagem e gravacao de chamada.
+	TenantID       string          `json:"tenantId"`
+	UserID         string          `json:"userId,omitempty"`
+	ChannelID      string          `json:"channelId"`
+	Status         string          `json:"status"`
+	Reason         string          `json:"reason,omitempty"`
+	PhoneNumber    string          `json:"phoneNumber,omitempty"`
 	DisplayName    string          `json:"displayName,omitempty"`
 	ProfilePicture *avatar.Picture `json:"profilePicture,omitempty"`
 }

@@ -10,9 +10,6 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/call"
 )
 
-// fakeCall stands in for a live call: it records the actions taken on it and
-// lets a test drive the callbacks the library would otherwise fire from its
-// media loop.
 type fakeCall struct {
 	id    string
 	peer  string
@@ -74,10 +71,6 @@ func (f *fakeCall) sentVideo() [][]byte {
 	return append([][]byte(nil), f.videoOut...)
 }
 
-// playedSrc returns the reader from the most recent Play call, or nil if Play
-// was never called. It is the seam every outbound-audio test reads through:
-// asserting that Play happened proves nothing, since Manager.Track subscribes
-// the call's source before anyone has written a byte into it.
 func (f *fakeCall) playedSrc() io.ReadCloser {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -127,10 +120,6 @@ func (f *fakeCall) SendVideo(au []byte, _ time.Duration) error {
 	return nil
 }
 
-// Play records the source it was handed. It deliberately does not record an
-// action: Play is call setup now, not a command, so counting it among the
-// actions would make every recordedActions assertion in the suite fire on
-// something no command asked for.
 func (f *fakeCall) Play(src io.ReadCloser) error {
 	f.mu.Lock()
 	f.played = append(f.played, src)
@@ -138,8 +127,6 @@ func (f *fakeCall) Play(src io.ReadCloser) error {
 	return nil
 }
 
-// playCount reports how many times Play was called. One per call is the
-// invariant: a second subscribe silently orphans the first player.
 func (f *fakeCall) playCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -230,8 +217,6 @@ func (f *fakeCall) OnVideoKeyframeRequest(fn func()) {
 	f.mu.Unlock()
 }
 
-// The fire* helpers stand in for the library's media loop firing a callback.
-
 func (f *fakeCall) fireReady() {
 	f.mu.Lock()
 	fn := f.onReady
@@ -306,7 +291,6 @@ func (f *fakeCall) feedVideo(accessUnit []byte) {
 
 var _ call.LiveCall = (*fakeCall)(nil)
 
-// fakeCaller stands in for the calling client of one channel.
 type fakeCaller struct {
 	mu       sync.Mutex
 	incoming func(call.LiveCall)

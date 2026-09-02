@@ -9,12 +9,6 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/call"
 )
 
-// The call fakes in internal/call live in _test.go files, which Go cannot
-// import, so the end-to-end test carries its own -- the same arrangement as
-// fakeWAClient.
-
-// fakeCaller stands in for a channel's calling client, exposing the
-// incoming-call handler the gateway registers so the test can fire a call.
 type fakeCaller struct {
 	mu       sync.Mutex
 	incoming func(call.LiveCall)
@@ -64,8 +58,6 @@ func (f *fakeCaller) JoinCallLink(context.Context, string, bool) (call.LiveCall,
 
 var _ call.Caller = (*fakeCaller)(nil)
 
-// fakeLiveCall records what the gateway does to a call and lets the test drive
-// the call's lifecycle and its inbound audio.
 type fakeLiveCall struct {
 	callID string
 	peer   string
@@ -112,9 +104,6 @@ func (f *fakeLiveCall) fireEnd(reason string) {
 	}
 }
 
-// playedSrc returns the reader from the most recent Play call, or nil if Play
-// was never called. Lets a test read back what the operator actually wrote,
-// rather than only observing that Play was wired up.
 func (f *fakeLiveCall) playedSrc() io.ReadCloser {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -151,9 +140,6 @@ func (f *fakeLiveCall) SetHandRaised(bool) error              { return f.record(
 func (f *fakeLiveCall) StartScreenShare(*uint32) error        { return f.record("screenshare.start") }
 func (f *fakeLiveCall) StopScreenShare() error                { return f.record("screenshare.stop") }
 
-// Play records the source it was handed, and deliberately not an action: the
-// gateway subscribes a call's outbound audio at Track time, so counting it as
-// an action would show up in every assertion about what a command did.
 func (f *fakeLiveCall) Play(src io.ReadCloser) error {
 	f.mu.Lock()
 	f.played = append(f.played, src)
@@ -221,8 +207,6 @@ func (f *fakeLiveCall) OnVideoKeyframeRequest(fn func()) {
 	f.mu.Unlock()
 }
 
-// fireVideoKeyframeRequest stands in for WhatsApp's PLI/FIR feedback asking
-// our outgoing video for a fresh IDR.
 func (f *fakeLiveCall) fireVideoKeyframeRequest() {
 	f.mu.Lock()
 	fn := f.onKeyframeRequest

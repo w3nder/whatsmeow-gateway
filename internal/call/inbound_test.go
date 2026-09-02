@@ -39,8 +39,6 @@ func TestInboundCallEventShape(t *testing.T) {
 	}
 }
 
-// The chat message and the call event must carry the same id, or the backend
-// cannot correlate the state updates with the message it created.
 func TestInboundCallEventUsesTheCallIDAsProviderMessageID(t *testing.T) {
 	pub := &memPublisher{}
 	m := newTestManager(t, pub, newMemStore(), time.Now)

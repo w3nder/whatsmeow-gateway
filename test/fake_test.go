@@ -25,14 +25,9 @@ type fakeWAClient struct {
 	loggedIn    bool
 	connected   bool
 
-	// staysDown keeps the fake disconnected after Connect, standing in for a socket
-	// that whatsmeow is still retrying in the background.
 	staysDown bool
 
-	qrItems []whatsmeow.QRChannelItem
-	// qrFeed, when set, is handed out by QRChannel as-is, so a test can hold a pairing
-	// session open and decide when each item lands. qrItems stays for the tests that
-	// only need a fixed script played out at once.
+	qrItems    []whatsmeow.QRChannelItem
 	qrFeed     chan whatsmeow.QRChannelItem
 	connectErr error
 
@@ -53,7 +48,6 @@ type fakeWAClient struct {
 
 	handlers []func(any)
 
-	// caller stands in for the channel's calling client; nil unless a test wires one.
 	caller call.Caller
 }
 
@@ -63,9 +57,6 @@ func newFakeWAClient() *fakeWAClient {
 	return &fakeWAClient{}
 }
 
-// QRChannel mirrors whatsmeow's GetQRChannel, refusal included: a client whose socket
-// is up gets no QR channel at all. Reusing a client that already went through the QR
-// flow is exactly the case that refusal catches, so the fake has to reproduce it.
 func (f *fakeWAClient) QRChannel(ctx context.Context) (<-chan whatsmeow.QRChannelItem, error) {
 	f.mu.Lock()
 	f.qrChannelCalls++
@@ -190,9 +181,6 @@ func (f *fakeWAClient) DecryptPollVote(ctx context.Context, evt *events.Message)
 	return nil, nil
 }
 
-// GetProfilePictureInfo answers as a contact with no photo does. These
-// end-to-end tests assert on the events a channel publishes, and a profile
-// photo is decoration on those events rather than part of their shape.
 func (f *fakeWAClient) GetProfilePictureInfo(ctx context.Context, jid types.JID, params *whatsmeow.GetProfilePictureParams) (*types.ProfilePictureInfo, error) {
 	return nil, whatsmeow.ErrProfilePictureNotSet
 }
@@ -221,9 +209,6 @@ func (f *fakeWAClient) Disconnect() {
 	f.mu.Unlock()
 }
 
-// dropSocket simulates the network dying under the client: the socket is gone but
-// whatsmeow still reports the device as logged in, because it only clears that flag
-// on a stream error.
 func (f *fakeWAClient) dropSocket() {
 	f.mu.Lock()
 	f.connected = false
@@ -231,8 +216,6 @@ func (f *fakeWAClient) dropSocket() {
 	f.mu.Unlock()
 }
 
-// markPaired stands in for whatsmeow writing the device's JID to the store on
-// PairSuccess, which a test feeding items through qrFeed has to do for itself.
 func (f *fakeWAClient) markPaired() {
 	jid := types.NewJID("15550000000", types.DefaultUserServer)
 	f.mu.Lock()

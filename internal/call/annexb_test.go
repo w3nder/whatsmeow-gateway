@@ -10,14 +10,12 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/call"
 )
 
-// A decoder handed an IDR without its parameter sets cannot start, so SPS and
-// PPS must stay attached to the picture that follows them.
 func TestSplitAnnexBKeepsParameterSetsWithTheirPicture(t *testing.T) {
 	stream := []byte{
-		0, 0, 0, 1, 0x67, 0xAA, // SPS
-		0, 0, 0, 1, 0x68, 0xBB, // PPS
-		0, 0, 0, 1, 0x65, 0xCC, // IDR
-		0, 0, 0, 1, 0x41, 0xDD, // non-IDR slice
+		0, 0, 0, 1, 0x67, 0xAA,
+		0, 0, 0, 1, 0x68, 0xBB,
+		0, 0, 0, 1, 0x65, 0xCC,
+		0, 0, 0, 1, 0x41, 0xDD,
 	}
 	units := call.SplitAnnexB(stream)
 	if len(units) != 2 {
@@ -54,13 +52,12 @@ func TestSplitAnnexBOnThreeByteStartCodes(t *testing.T) {
 	}
 }
 
-// An access-unit delimiter opens the next frame.
 func TestSplitAnnexBSplitsOnAccessUnitDelimiter(t *testing.T) {
 	stream := []byte{
-		0, 0, 0, 1, 0x09, 0xF0, // AUD
-		0, 0, 0, 1, 0x65, 0xAA, // IDR
-		0, 0, 0, 1, 0x09, 0xF0, // AUD
-		0, 0, 0, 1, 0x41, 0xBB, // slice
+		0, 0, 0, 1, 0x09, 0xF0,
+		0, 0, 0, 1, 0x65, 0xAA,
+		0, 0, 0, 1, 0x09, 0xF0,
+		0, 0, 0, 1, 0x41, 0xBB,
 	}
 	units := call.SplitAnnexB(stream)
 	if len(units) != 2 {
@@ -77,7 +74,6 @@ func TestSplitAnnexBRejectsGarbage(t *testing.T) {
 	}
 }
 
-// The whole stream must survive the split: no byte dropped, none duplicated.
 func TestSplitAnnexBIsLossless(t *testing.T) {
 	stream := []byte{
 		0, 0, 0, 1, 0x67, 0xAA,

@@ -11,10 +11,6 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/logging"
 )
 
-// TestNewCallLoggerPreservesLevelAndMessage is the pure, testable half of the fix: a
-// line the calling library logs at a given zerolog level must come out on the gateway's
-// slog logger at the matching level, with its message intact. The wiring that actually
-// constructs a real meowcaller client is not something worth faking here.
 func TestNewCallLoggerPreservesLevelAndMessage(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -59,9 +55,6 @@ func TestNewCallLoggerPreservesLevelAndMessage(t *testing.T) {
 	}
 }
 
-// TestNewCallLoggerCarriesExtraFields checks that structured fields the library attaches
-// (e.g. call_id) survive the bridge instead of being silently dropped, since those are
-// exactly what makes a call's log lines useful for diagnosis.
 func TestNewCallLoggerCarriesExtraFields(t *testing.T) {
 	var buf bytes.Buffer
 	slogger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -79,10 +72,6 @@ func TestNewCallLoggerCarriesExtraFields(t *testing.T) {
 	}
 }
 
-// TestNewCallLoggerBelowHandlerLevelIsFiltered confirms trace/debug from the library
-// stay silent by default: the bridge maps them to slog.LevelDebug and lets the
-// gateway's existing handler level decide whether they surface, rather than forcing
-// everything up to Info.
 func TestNewCallLoggerBelowHandlerLevelIsFiltered(t *testing.T) {
 	var buf bytes.Buffer
 	slogger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))

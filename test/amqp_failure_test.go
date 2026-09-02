@@ -8,9 +8,6 @@ import (
 	gatewayamqp "github.com/w3nder/whatsmeow-gateway/internal/amqp"
 )
 
-// A broker restart closes the delivery channel, which ends the consumer's range loop.
-// That used to happen silently and leave the gateway running while consuming nothing,
-// so the consumer has to report it.
 func TestConsumerReportsFailureWhenBrokerConnectionDies(t *testing.T) {
 	conn := startRabbitMQ(t)
 
@@ -31,7 +28,6 @@ func TestConsumerReportsFailureWhenBrokerConnectionDies(t *testing.T) {
 		t.Fatalf("StartPair failed: %v", err)
 	}
 
-	// The broker going away looks exactly like this from the client's side.
 	if err := conn.Close(); err != nil {
 		t.Fatalf("failed to close the rabbitmq connection: %v", err)
 	}

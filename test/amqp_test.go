@@ -291,12 +291,6 @@ func TestConsumerHandlerErrorRoutesToDLQAndDoesNotRetryLocally(t *testing.T) {
 	}
 }
 
-// TestConsumerAdmitsPairCommandsWhileASessionIsInFlight: a pairing waits on a person,
-// so it holds its handler for the whole minute the operator has to scan. Consuming pair
-// commands one at a time meant the next one -- the same operator reopening the dialog,
-// or an entirely different channel -- sat unread on the queue for that minute. The
-// close at the end pins the other half: a session admitted this way is still waited for
-// on the way down rather than abandoned mid-pairing.
 func TestConsumerAdmitsPairCommandsWhileASessionIsInFlight(t *testing.T) {
 	conn := startRabbitMQ(t)
 
@@ -311,7 +305,6 @@ func TestConsumerAdmitsPairCommandsWhileASessionIsInFlight(t *testing.T) {
 	err = consumer.StartPair(context.Background(), func(_ context.Context, cmd gatewayamqp.PairCommand, accept func()) error {
 		accept()
 		admitted <- cmd.ChannelID
-		// Stands in for the QR loop: nothing more happens until the operator acts.
 		<-release
 		atomic.AddInt32(&finished, 1)
 		return nil
@@ -352,8 +345,6 @@ func TestConsumerAdmitsPairCommandsWhileASessionIsInFlight(t *testing.T) {
 		select {
 		case channelID := <-admitted:
 			seen[channelID] = true
-		// Generous on purpose: a command held behind the session ahead of it is not
-		// admitted late, it is never admitted, so the slack cannot mask the bug.
 		case <-time.After(30 * time.Second):
 			t.Fatalf("only %v was admitted: a pair command must not wait out the pairing session ahead of it", seen)
 		}
@@ -386,11 +377,6 @@ func TestConsumerAdmitsPairCommandsWhileASessionIsInFlight(t *testing.T) {
 	}
 }
 
-// TestConsumerAdmitsManyPairCommandsConcurrently pins that nothing here caps how many
-// pairings run at once. It publishes more channels than the old fixed cap ever allowed
-// concurrently and holds every one of them open on its own release gate; if a cap were
-// still in place, the channels past it would never be admitted and this test would time
-// out waiting for them.
 func TestConsumerAdmitsManyPairCommandsConcurrently(t *testing.T) {
 	const channelCount = 40
 
@@ -407,8 +393,6 @@ func TestConsumerAdmitsManyPairCommandsConcurrently(t *testing.T) {
 	err = consumer.StartPair(context.Background(), func(_ context.Context, cmd gatewayamqp.PairCommand, accept func()) error {
 		accept()
 		admitted <- cmd.ChannelID
-		// Every session parks here until the test lets them all go, so none can finish
-		// early and free up room for one still waiting to be admitted.
 		<-release
 		atomic.AddInt32(&finished, 1)
 		return nil

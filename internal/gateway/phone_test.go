@@ -6,10 +6,6 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-// The channel list showed the channel's name where the connected number belongs, because the
-// number never left the gateway: it lives in the device JID and the status event had no field
-// for it. Reading it must never be able to break the status publish, so a session that is not
-// there yet yields an empty number rather than an error.
 func TestPhoneFromJID(t *testing.T) {
 	withDevice := types.NewJID("5511999990000", types.DefaultUserServer)
 	withDevice.Device = 12

@@ -27,7 +27,6 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/store"
 )
 
-// waitFor polls cond until it holds or the deadline passes.
 func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -40,8 +39,6 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-// waitForCallEvent drains call events until one of the wanted type arrives.
-// Other types on the same routing key are skipped rather than failed on.
 func waitForCallEvent(t *testing.T, deliveries <-chan rabbitmq.Delivery, wantType string, timeout time.Duration) call.Event {
 	t.Helper()
 	deadline := time.After(timeout)
@@ -64,13 +61,6 @@ func waitForCallEvent(t *testing.T, deliveries <-chan rabbitmq.Delivery, wantTyp
 	}
 }
 
-// waitForIncomingCallAndInboundEvent drains the probe channel until it has
-// seen both the "incoming" call.Event and the call.InboundCallEvent an
-// arriving call publishes, regardless of which order they land in. Anything
-// else on the channel (a channel.status delivery from pairing, an unrelated
-// call event type) is ignored rather than consumed and lost, since a single
-// pass has to serve both waits without racing a second reader against this
-// one for the same messages.
 func waitForIncomingCallAndInboundEvent(t *testing.T, deliveries <-chan rabbitmq.Delivery, timeout time.Duration) (call.Event, call.InboundCallEvent) {
 	t.Helper()
 	var incoming call.Event
@@ -103,10 +93,6 @@ func waitForIncomingCallAndInboundEvent(t *testing.T, deliveries <-chan rabbitmq
 	return incoming, inbound
 }
 
-// TestGatewayInboundCallRecordsAndPublishes drives a whole inbound call through
-// a running gateway: the call arrives, the backend answers it over
-// gateway.call, the peer's audio is captured, the call ends, and the recording
-// has to be in the bucket with its key on the ended event.
 func TestGatewayInboundCallRecordsAndPublishes(t *testing.T) {
 	ctx := context.Background()
 
@@ -239,7 +225,6 @@ func TestGatewayInboundCallRecordsAndPublishes(t *testing.T) {
 	const channelID = "channel-call-e2e"
 	const tenantID = "tenant-call-e2e"
 
-	// Pair, so the channel has a live session with the caller attached.
 	fake.qrItems = []whatsmeow.QRChannelItem{whatsmeow.QRChannelSuccess}
 	pairBody, err := json.Marshal(gatewayamqp.PairCommand{
 		TenantID: tenantID, ChannelID: channelID, UserID: "user-call-e2e",
@@ -263,13 +248,6 @@ func TestGatewayInboundCallRecordsAndPublishes(t *testing.T) {
 	lc := &fakeLiveCall{callID: "CALL1", peer: "5511888888888@s.whatsapp.net"}
 	caller.fireIncoming(lc)
 
-	// The arriving call publishes two deliveries on two routing keys: the
-	// call.Event on CallRoutingKey, and the inbound-message-shaped
-	// call.InboundCallEvent on InboundRoutingKey (see call.NewInboundCallEvent),
-	// which is how the backend's message pipeline creates the chat row. Both
-	// have to be drained from one loop over the shared probe channel --
-	// waitForCallEvent alone would silently discard whichever one it isn't
-	// looking for, since a channel read can't be put back.
 	incoming, inboundCall := waitForIncomingCallAndInboundEvent(t, deliveries, 15*time.Second)
 	if incoming.CallID != "CALL1" || incoming.Direction != call.DirectionInbound {
 		t.Fatalf("incoming event = %+v, want inbound CALL1", incoming)
@@ -277,24 +255,13 @@ func TestGatewayInboundCallRecordsAndPublishes(t *testing.T) {
 	if incoming.TenantID != tenantID || incoming.ChannelID != channelID {
 		t.Fatalf("incoming identity = %+v, want %s/%s", incoming, tenantID, channelID)
 	}
-	// PhoneNumberID must be the channel id, not the device JID the fake pair
-	// establishes ("15550000000" -- see fakeWAClient.QRChannel): the backend
-	// looks a gateway channel up by that field holding the channel's own id,
-	// so a device-JID value would make it match no channel and the event
-	// would be dropped, exactly as it was on the real call this test guards.
 	if incoming.PhoneNumberID != channelID {
 		t.Fatalf("incoming PhoneNumberID = %q, want the channel id %q", incoming.PhoneNumberID, channelID)
 	}
-	// From is the resolved phone-number user, matching the shape an inbound
-	// message's From takes -- not the raw peer JID string.
 	if incoming.From != "5511888888888" {
 		t.Errorf("From = %q, want the resolved phone number", incoming.From)
 	}
 
-	// This is the exact delivery the reported bug dropped: the backend's
-	// ConsumeInbound logged "no channel found for phoneNumberId ..., dropping
-	// inbound message" for it, because PhoneNumberID carried the device's
-	// phone number instead of the channel id.
 	if inboundCall.PhoneNumberID != channelID {
 		t.Fatalf("inbound call PhoneNumberID = %q, want the channel id %q", inboundCall.PhoneNumberID, channelID)
 	}
@@ -335,10 +302,6 @@ func TestGatewayInboundCallRecordsAndPublishes(t *testing.T) {
 		t.Fatalf("ended media = %+v, want nil: the recording arrives on its own event", ended.Media)
 	}
 
-	// The upload runs off the call's teardown path, so the recording's keys
-	// arrive on a later, separate event rather than on ended itself. All three
-	// audio tracks ride on that one event: the mix the chat plays, plus one per
-	// side for transcription to attribute.
 	recording := waitForCallEvent(t, deliveries, call.EventRecording, 15*time.Second)
 	tracks := []struct {
 		field string
@@ -360,8 +323,6 @@ func TestGatewayInboundCallRecordsAndPublishes(t *testing.T) {
 	}
 }
 
-// assertWAVInBucket reads an uploaded recording back and checks it is a real
-// RIFF/WAVE file rather than an empty or half-written object.
 func assertWAVInBucket(ctx context.Context, t *testing.T, client *s3.Client, bucket, key string) {
 	t.Helper()
 

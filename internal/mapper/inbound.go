@@ -30,8 +30,6 @@ var (
 	debugRawEnabled bool
 )
 
-// rawDebugEnabled reads GATEWAY_DEBUG_RAW lazily so it sees values loaded from
-// .env by godotenv in main() (package-init would run before that load).
 func rawDebugEnabled() bool {
 	debugRawOnce.Do(func() {
 		v := strings.ToLower(strings.TrimSpace(os.Getenv("GATEWAY_DEBUG_RAW")))
@@ -46,18 +44,12 @@ type Downloader interface {
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
 }
 
-// PNResolver is senderid.Resolver under the name this package's callers
-// already know it by.
 type PNResolver = senderid.Resolver
 
 type MediaStore interface {
 	Put(ctx context.Context, key, mime string, data []byte) error
 }
 
-// AvatarSource resolves the profile photo of the contact an event is with.
-// The caller binds it to a channel and tenant before handing it over, so this
-// package stays out of a lookup that is neither about mapping nor about the
-// message it is mapping. A nil source simply leaves events without photos.
 type AvatarSource interface {
 	For(ctx context.Context, jid types.JID) *avatar.Picture
 }
@@ -71,20 +63,15 @@ type MessageSecrets interface {
 	DecryptPollVote(ctx context.Context, evt *events.Message) (*waE2E.PollVoteMessage, error)
 }
 
-// InboundDeps is everything BuildInbound reaches for beyond the event itself.
-// It is a struct rather than a parameter list because the list had already
-// grown past the point where a reader could tell the arguments apart at a
-// call site.
 type InboundDeps struct {
 	Downloader Downloader
 	Resolver   PNResolver
 	Media      MediaStore
-	// Avatars is optional: nil publishes events without a profile picture.
-	Avatars   AvatarSource
-	Groups    GroupNamer
-	Secrets   MessageSecrets
-	ChannelID string
-	TenantID  string
+	Avatars    AvatarSource
+	Groups     GroupNamer
+	Secrets    MessageSecrets
+	ChannelID  string
+	TenantID   string
 }
 
 type InboundText struct {
@@ -293,14 +280,6 @@ type StatusEvent struct {
 	Error             *StatusError `json:"error,omitempty"`
 }
 
-// BuildInbound maps a whatsmeow message into the event the backend consumes.
-//
-// The contact's profile photo is resolved last, and only for an event that is
-// actually going out: a message this mapper skips publishes nothing, so
-// paying an IQ round trip for its photo would be pure waste on the protocol
-// messages that arrive constantly. A message we sent resolves no photo at
-// all -- the contact it is with already has one from their own messages, and
-// our own photo is not what the event is about.
 func BuildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (InboundEvent, error) {
 	out, err := buildInbound(ctx, deps, evt)
 	if err != nil {
@@ -350,10 +329,6 @@ func applyGroup(ctx context.Context, deps InboundDeps, evt *events.Message, out 
 	out.ProfileName = ""
 }
 
-// identityJIDs picks the pair naming the person an event is with: the sender
-// and their alternate identity, or the chat and the recipient's when the
-// message is one of ours. Every identity this package stamps -- sender ids
-// and profile photo alike -- starts from this one choice.
 func identityJIDs(evt *events.Message) (jid, alt types.JID) {
 	if evt.Info.IsFromMe {
 		return evt.Info.Chat, evt.Info.RecipientAlt
@@ -971,9 +946,6 @@ type paymentParams struct {
 	Order           paymentOrder     `json:"order"`
 }
 
-// classifyPaymentKind maps the native-flow button name to the WhatsApp payment
-// card variant: payment_info shares a Pix key, review_and_pay is a charge,
-// review_order is an order receipt.
 func classifyPaymentKind(buttonName string) string {
 	switch strings.ToLower(buttonName) {
 	case "payment_info":
@@ -1043,8 +1015,6 @@ func firstPixStaticCode(settings []paymentSetting) *pixStaticCode {
 	return nil
 }
 
-// formatPaymentMoney renders a Meta money object (value scaled by offset) as
-// pt-BR currency text; a zero value or offset yields no text.
 func formatPaymentMoney(m paymentMoney, currency string) string {
 	if m.Value == 0 || m.Offset == 0 {
 		return ""
@@ -1052,8 +1022,6 @@ func formatPaymentMoney(m paymentMoney, currency string) string {
 	return formatProductPriceText(m.Value*1000/m.Offset, currency)
 }
 
-// formatPixKeyDisplay formats a phone Pix key as a Brazilian number for display;
-// other key types are shown as-is (the raw key is kept for copy).
 func formatPixKeyDisplay(key, keyType string) string {
 	if strings.EqualFold(keyType, "PHONE") {
 		return formatBrazilPhone(key)

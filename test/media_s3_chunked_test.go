@@ -11,10 +11,6 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/media"
 )
 
-// TestS3StorePutWithoutAWSChunkedEncoding guards against regressing to the SDK
-// default of streaming PutObject bodies with `Content-Encoding: aws-chunked`
-// plus a trailing checksum. S3-compatible providers such as Magalu Cloud reject
-// that with `501 NotImplemented: AWS chunked encoding not supported`.
 func TestS3StorePutWithoutAWSChunkedEncoding(t *testing.T) {
 	ctx := context.Background()
 
@@ -34,7 +30,6 @@ func TestS3StorePutWithoutAWSChunkedEncoding(t *testing.T) {
 		gotChecksum = r.Header.Get("X-Amz-Checksum-Crc32")
 		gotAlgorithm = r.Header.Get("X-Amz-Sdk-Checksum-Algorithm")
 
-		// Mimic Magalu Cloud / other providers that do not implement aws-chunked.
 		if strings.Contains(gotEncoding, "aws-chunked") || gotTrailer != "" {
 			w.Header().Set("Content-Type", "application/xml")
 			w.WriteHeader(http.StatusNotImplemented)
@@ -76,9 +71,6 @@ func TestS3StorePutWithoutAWSChunkedEncoding(t *testing.T) {
 	if gotTrailer != "" {
 		t.Fatalf("expected no x-amz-trailer header, got %q", gotTrailer)
 	}
-	// Over TLS the SDK turns opt-in checksums into an aws-chunked trailer; over
-	// plain HTTP the same setting surfaces as these headers. Asserting on them
-	// pins the underlying RequestChecksumCalculation setting without needing TLS.
 	if gotAlgorithm != "" || gotChecksum != "" {
 		t.Fatalf("expected no SDK-computed checksum headers, got algorithm=%q crc32=%q", gotAlgorithm, gotChecksum)
 	}

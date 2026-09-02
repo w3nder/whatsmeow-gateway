@@ -36,7 +36,6 @@ func TestConfigureAutoReconnectKeepsRetryingWithCappedBackoff(t *testing.T) {
 		t.Fatal("expected the hook to keep retrying so an unstable network recovers without re-pairing")
 	}
 
-	// whatsmeow sleeps AutoReconnectErrors*2s between attempts (client.go autoReconnect).
 	backoff := time.Duration(client.AutoReconnectErrors) * 2 * time.Second
 	if backoff > session.MaxAutoReconnectDelay {
 		t.Fatalf("expected reconnect backoff capped at %s, got %s", session.MaxAutoReconnectDelay, backoff)

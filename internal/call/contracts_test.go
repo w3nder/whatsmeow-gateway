@@ -24,15 +24,12 @@ func TestPhaseString(t *testing.T) {
 	}
 }
 
-// A phase the library gains later must not crash a channel.
 func TestPhaseStringUnknown(t *testing.T) {
 	if got := call.Phase(99).String(); got != "unknown" {
 		t.Errorf("Phase(99).String() = %q, want unknown", got)
 	}
 }
 
-// The event JSON is the backend's contract. Absent fields must stay absent so a
-// consumer can tell "no recording" from "empty recording".
 func TestEventOmitsAbsentFields(t *testing.T) {
 	body, err := json.Marshal(call.Event{
 		PhoneNumberID: "5511999999999",
@@ -54,12 +51,6 @@ func TestEventOmitsAbsentFields(t *testing.T) {
 	}
 }
 
-// Every recording travels on the recording event, never on ended: the upload
-// runs off the call's teardown path, so ended must be free to go out before
-// the upload even starts.
-//
-// The four field names are the contract the backend matches on -- see
-// docs/call-contract.md -- so they are pinned here by name, not by struct.
 func TestEventRecordingCarriesEveryTrack(t *testing.T) {
 	body, err := json.Marshal(call.Event{
 		CallID:        "ABCDEF",
@@ -94,9 +85,6 @@ func TestEventRecordingCarriesEveryTrack(t *testing.T) {
 	}
 }
 
-// The two per-side tracks are omitted when absent, like every other optional
-// field, so a consumer can tell "this gateway sent no separate tracks" from
-// "the tracks were empty".
 func TestEventOmitsAbsentPerSideRecordings(t *testing.T) {
 	body, err := json.Marshal(call.Event{
 		CallID:    "ABCDEF",

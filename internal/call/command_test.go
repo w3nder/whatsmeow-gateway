@@ -14,8 +14,6 @@ import (
 
 func noFetch(context.Context, string) ([]byte, error) { return nil, nil }
 
-// dispatchOnLiveCall sets up a manager with one live inbound call and runs cmd
-// against it.
 func dispatchOnLiveCall(t *testing.T, cmd amqp.GatewayCallCommand) (*memPublisher, *fakeCall) {
 	t.Helper()
 	pub := &memPublisher{}
@@ -90,9 +88,6 @@ func TestDispatchPassesArgumentsThrough(t *testing.T) {
 	}
 }
 
-// An unknown call-id must fail loudly and must not be retried: requeueing it
-// would loop until the DLQ. This holds for any action that is not hangup or
-// reject, which are idempotent instead -- see TestDispatchHangupOnUnknownCallAcks.
 func TestDispatchUnknownCallFails(t *testing.T) {
 	pub := &memPublisher{}
 	m := newTestManager(t, pub, newMemStore(), time.Now)
@@ -111,9 +106,6 @@ func TestDispatchUnknownCallFails(t *testing.T) {
 	}
 }
 
-// hangup and reject express a desired end state. When the call has already
-// ended -- a normal race with the peer's own hangup -- that state already
-// holds, so the command is satisfied rather than failed.
 func TestDispatchHangupOnUnknownCallAcks(t *testing.T) {
 	pub := &memPublisher{}
 	m := newTestManager(t, pub, newMemStore(), time.Now)
@@ -156,8 +148,6 @@ func TestDispatchRejectOnUnknownCallAcks(t *testing.T) {
 	}
 }
 
-// Unlike hangup/reject, an absent call genuinely means the command cannot be
-// carried out: answer has nothing to make idempotent.
 func TestDispatchAnswerOnUnknownCallStillFails(t *testing.T) {
 	pub := &memPublisher{}
 	m := newTestManager(t, pub, newMemStore(), time.Now)
@@ -189,7 +179,6 @@ func TestDispatchUnknownActionFails(t *testing.T) {
 	}
 }
 
-// A failing action is reported, not retried.
 func TestDispatchActionErrorIsReported(t *testing.T) {
 	pub := &memPublisher{}
 	m := newTestManager(t, pub, newMemStore(), time.Now)
@@ -235,12 +224,6 @@ func TestDispatchDialTracksTheOutboundCall(t *testing.T) {
 	}
 }
 
-// Dialling must land the call in the operator's chat exactly the way an
-// inbound call does: an inbound-shaped event, fromMe set since the gateway
-// placed it, and the sender fields naming the party called -- not our own
-// device, mirroring how mapper.BuildInbound keys a from-me message to the
-// chat contact -- published before ringing so the chat row exists before any
-// lifecycle transition arrives to update it.
 func TestDispatchDialPublishesInboundCallEventBeforeRinging(t *testing.T) {
 	pub := &memPublisher{}
 	m := newTestManager(t, pub, newMemStore(), time.Now)
@@ -260,8 +243,6 @@ func TestDispatchDialPublishesInboundCallEventBeforeRinging(t *testing.T) {
 	}
 	evt := inbound[0]
 
-	// The call id, not a message id: the backend correlates the ringing/
-	// accepted/ended events that follow with the chat row this event creates.
 	if evt.ProviderMessageID != "OUT1" {
 		t.Errorf("providerMessageId = %q, want the call id OUT1", evt.ProviderMessageID)
 	}
@@ -435,7 +416,6 @@ func TestDispatchLinkJoinTracksTheCall(t *testing.T) {
 	}
 }
 
-// record:false turns recording off for one call without touching the default.
 func TestDispatchDialHonoursRecordFalse(t *testing.T) {
 	pub := &memPublisher{}
 	m := newTestManager(t, pub, newMemStore(), time.Now)
@@ -458,10 +438,6 @@ func TestDispatchDialHonoursRecordFalse(t *testing.T) {
 	}
 }
 
-// The fetched bytes have to actually reach the call's outbound audio.
-// Asserting that Play was called proves nothing: Track subscribes the call's
-// source before any command runs, so a play that queued nothing at all would
-// still look identical from the outside.
 func TestDispatchPlayFetchesAndStreamsAudio(t *testing.T) {
 	pub := &memPublisher{}
 	m := newTestManager(t, pub, newMemStore(), time.Now)
@@ -491,8 +467,6 @@ func TestDispatchPlayFetchesAndStreamsAudio(t *testing.T) {
 		t.Errorf("outbound audio = %x, want the fetched announcement %x", got, want)
 	}
 
-	// One subscribe for the whole call: a second Play would replace the
-	// library's player and orphan an attached operator's microphone.
 	if count := lc.playCount(); count != 1 {
 		t.Errorf("Play was called %d times, want 1", count)
 	}

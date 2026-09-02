@@ -56,9 +56,6 @@ func (f *fakeMediaStore) Put(ctx context.Context, key, mime string, data []byte)
 	return nil
 }
 
-// testDeps is the deps every mapping test shares. Tests that care about one
-// dependency override that field; the rest read as they did when BuildInbound
-// took these positionally.
 func testDeps(dl mapper.Downloader, resolver mapper.PNResolver, store mapper.MediaStore) mapper.InboundDeps {
 	return mapper.InboundDeps{
 		Downloader: dl,

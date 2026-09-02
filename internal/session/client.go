@@ -18,10 +18,6 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/logging"
 )
 
-// MaxAutoReconnectDelay caps the gap between reconnect attempts. whatsmeow sleeps
-// AutoReconnectErrors*2s before each retry and never bounds it, so a long outage would
-// push attempts hours apart and a channel would look dead well after the network came
-// back. whatsmeow resets the counter on every successful connection.
 const MaxAutoReconnectDelay = 5 * time.Minute
 
 const maxAutoReconnectErrors = int(MaxAutoReconnectDelay / (2 * time.Second))
@@ -33,9 +29,6 @@ type WAClient interface {
 	IsConnected() bool
 	WaitForConnection(timeout time.Duration) bool
 	DeviceJID() *types.JID
-	// DisplayName is the account's own name, as WhatsApp shows it to other people --
-	// not a peer's, the device's own. It comes from the store rather than an IQ, so it
-	// is never a reason a "connected" event could be slow or fail.
 	DisplayName() string
 	SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID, nodes []waBinary.Node) (whatsmeow.SendResponse, error)
 	BuildEdit(chat types.JID, id types.MessageID, newContent *waE2E.Message) *waE2E.Message
@@ -62,25 +55,11 @@ func NewWAClient(channelID string, device *store.Device, log waLog.Logger, slogg
 	client := whatsmeow.NewClient(device, log)
 	ConfigureAutoReconnect(client)
 
-	// The calling client installs the low-level <call>/<ack> interception, so it
-	// has to exist before the receive loop starts -- that is, before Connect.
-	//
-	// meowcaller defaults to a no-op logger, which would leave it (including its own
-	// startup failures) completely silent; bridge its zerolog output into the
-	// gateway's slog so a dead calling stack is visible instead of indistinguishable
-	// from no call ever arriving.
 	caller := newCallerAdapter(meowcaller.NewClient(client, meowcaller.WithLogger(logging.NewCallLogger(slogger, channelID))))
 
 	return &waClient{client: client, caller: caller}
 }
 
-// ConfigureAutoReconnect turns on whatsmeow's socket recovery for a paired device.
-//
-// EnableAutoReconnect alone only covers sockets that die after a successful connect:
-// whatsmeow returns a retryable network error straight from Connect unless
-// InitialAutoReconnect is set, which would leave a channel down for good whenever the
-// network happened to be unstable at boot or resume time. The hook keeps retrying
-// indefinitely (a flaky network must never require re-pairing) with a bounded backoff.
 func ConfigureAutoReconnect(client *whatsmeow.Client) {
 	client.EnableAutoReconnect = true
 	client.InitialAutoReconnect = true
