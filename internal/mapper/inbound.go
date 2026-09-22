@@ -397,6 +397,10 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		}
 	}
 
+	if isSilentNotice(msg) {
+		return InboundEvent{}, ErrSkip
+	}
+
 	switch {
 	case msg.GetConversation() != "":
 		out.Type = "text"
@@ -571,14 +575,8 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		out.InteractiveReplyID = parseNativeFlowButtonParams(resp.GetNativeFlowResponseMessage().GetParamsJSON()).ID
 		applyContextInfo(&out, resp.GetContextInfo())
 
-	case msg.GetPollCreationMessage() != nil, msg.GetPollCreationMessageV2() != nil, msg.GetPollCreationMessageV3() != nil:
-		poll := msg.GetPollCreationMessage()
-		if poll == nil {
-			poll = msg.GetPollCreationMessageV2()
-		}
-		if poll == nil {
-			poll = msg.GetPollCreationMessageV3()
-		}
+	case pollCreationOf(msg) != nil:
+		poll := pollCreationOf(msg)
 		rich := buildPollRich(poll)
 		if rich == nil {
 			return InboundEvent{}, ErrSkip
@@ -593,6 +591,13 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 			return InboundEvent{}, err
 		}
 		applyContextInfo(&out, btn.GetContextInfo())
+
+	case msg.GetTemplateMessage() != nil:
+		tm := msg.GetTemplateMessage()
+		if err := applyRichOrFallback(&out, msg, buildTemplateRich(tm)); err != nil {
+			return InboundEvent{}, err
+		}
+		applyContextInfo(&out, tm.GetContextInfo())
 
 	case msg.GetListMessage() != nil:
 		list := msg.GetListMessage()
@@ -667,11 +672,101 @@ func unwrapMessage(msg *waE2E.Message) *waE2E.Message {
 			msg = msg.GetViewOnceMessageV2Extension().GetMessage()
 		case msg.GetDocumentWithCaptionMessage().GetMessage() != nil:
 			msg = msg.GetDocumentWithCaptionMessage().GetMessage()
+		case msg.GetAssociatedChildMessage().GetMessage() != nil:
+			msg = msg.GetAssociatedChildMessage().GetMessage()
+		case msg.GetBotForwardedMessage().GetMessage() != nil:
+			msg = msg.GetBotForwardedMessage().GetMessage()
+		case msg.GetGroupMentionedMessage().GetMessage() != nil:
+			msg = msg.GetGroupMentionedMessage().GetMessage()
+		case msg.GetLottieStickerMessage().GetMessage() != nil:
+			msg = msg.GetLottieStickerMessage().GetMessage()
+		case msg.GetPollCreationMessageV4().GetMessage() != nil:
+			msg = msg.GetPollCreationMessageV4().GetMessage()
 		default:
 			return msg
 		}
 	}
 	return msg
+}
+
+func isSilentNotice(msg *waE2E.Message) bool {
+	switch {
+	case msg.GetMessageHistoryNotice() != nil,
+		msg.GetMessageHistoryBundle() != nil,
+		msg.GetEncReactionMessage() != nil,
+		msg.GetEncCommentMessage() != nil,
+		msg.GetEncEventResponseMessage() != nil,
+		msg.GetPinInChatMessage() != nil,
+		msg.GetPlaceholderMessage() != nil,
+		msg.GetAlbumMessage() != nil,
+		msg.GetGroupStatusMessageV2() != nil,
+		msg.GetGroupStatusMentionMessage() != nil,
+		msg.GetStatusMentionMessage() != nil:
+		return true
+	case msg.Conversation != nil && msg.GetConversation() == "":
+		return true
+	}
+	return false
+}
+
+func pollCreationOf(msg *waE2E.Message) *waE2E.PollCreationMessage {
+	for _, poll := range []*waE2E.PollCreationMessage{
+		msg.GetPollCreationMessage(),
+		msg.GetPollCreationMessageV2(),
+		msg.GetPollCreationMessageV3(),
+		msg.GetPollCreationMessageV5(),
+		msg.GetPollCreationMessageV6(),
+	} {
+		if poll != nil {
+			return poll
+		}
+	}
+	return nil
+}
+
+func buildTemplateRich(tm *waE2E.TemplateMessage) *InboundRichContent {
+	if interactive := tm.GetInteractiveMessageTemplate(); interactive != nil {
+		return buildInteractiveRich(interactive)
+	}
+	hydrated := tm.GetHydratedTemplate()
+	if hydrated == nil {
+		hydrated = tm.GetHydratedFourRowTemplate()
+	}
+	if hydrated == nil {
+		return nil
+	}
+
+	body := hydrated.GetHydratedContentText()
+	if title := hydrated.GetHydratedTitleText(); title != "" {
+		if body == "" {
+			body = title
+		} else {
+			body = title + "\n\n" + body
+		}
+	}
+	footer := hydrated.GetHydratedFooterText()
+
+	buttons := make([]InboundRichButton, 0, len(hydrated.GetHydratedButtons()))
+	for _, b := range hydrated.GetHydratedButtons() {
+		switch {
+		case b.GetQuickReplyButton() != nil:
+			buttons = append(buttons, InboundRichButton{ID: b.GetQuickReplyButton().GetID(), Text: b.GetQuickReplyButton().GetDisplayText()})
+		case b.GetUrlButton() != nil:
+			buttons = append(buttons, InboundRichButton{Text: b.GetUrlButton().GetDisplayText(), Name: "cta_url", URL: b.GetUrlButton().GetURL()})
+		case b.GetCallButton() != nil:
+			buttons = append(buttons, InboundRichButton{Text: b.GetCallButton().GetDisplayText(), Name: "cta_call", URL: "tel:" + b.GetCallButton().GetPhoneNumber()})
+		}
+	}
+
+	if body == "" && footer == "" && len(buttons) == 0 {
+		return nil
+	}
+	return &InboundRichContent{
+		Kind:    "buttons",
+		Body:    body,
+		Footer:  footer,
+		Buttons: buttons,
+	}
 }
 
 func extractText(msg *waE2E.Message) string {
