@@ -2413,3 +2413,101 @@ func TestBuildInboundOrderWithoutAStatusOmitsIt(t *testing.T) {
 		t.Fatalf("expected the status key to be absent from the wire payload, got %s", raw)
 	}
 }
+
+func TestBuildInboundSilentNoticesAreSkipped(t *testing.T) {
+	empty := ""
+	notices := map[string]*waE2E.Message{
+		"messageHistoryNotice": {MessageHistoryNotice: &waE2E.MessageHistoryNotice{}},
+		"messageHistoryBundle": {MessageHistoryBundle: &waE2E.MessageHistoryBundle{}},
+		"encReactionMessage":   {EncReactionMessage: &waE2E.EncReactionMessage{}},
+		"encCommentMessage":    {EncCommentMessage: &waE2E.EncCommentMessage{}},
+		"encEventResponse":     {EncEventResponseMessage: &waE2E.EncEventResponseMessage{}},
+		"pinInChatMessage":     {PinInChatMessage: &waE2E.PinInChatMessage{}},
+		"placeholderMessage":   {PlaceholderMessage: &waE2E.PlaceholderMessage{}},
+		"albumMessage":         {AlbumMessage: &waE2E.AlbumMessage{}},
+		"groupStatusMessageV2": {GroupStatusMessageV2: &waE2E.FutureProofMessage{}},
+		"groupStatusMention":   {GroupStatusMentionMessage: &waE2E.FutureProofMessage{}},
+		"statusMentionMessage": {StatusMentionMessage: &waE2E.FutureProofMessage{}},
+		"emptyConversation":    {Conversation: &empty},
+	}
+	for name, msg := range notices {
+		evt := &events.Message{Info: baseInfo("wamid."+name, "5511999999999"), Message: msg}
+		_, err := mapper.BuildInbound(context.Background(), testDeps(fakeDownloader{}, nil, &fakeMediaStore{}), evt)
+		if !errors.Is(err, mapper.ErrSkip) {
+			t.Fatalf("%s: expected mapper.ErrSkip, got %v", name, err)
+		}
+	}
+}
+
+func TestBuildInboundUnwrapsChildBotMentionAndPollV4(t *testing.T) {
+	inner := &waE2E.Message{Conversation: proto.String("oi de dentro")}
+	wrappers := map[string]*waE2E.Message{
+		"associatedChildMessage": {AssociatedChildMessage: &waE2E.FutureProofMessage{Message: inner}},
+		"botForwardedMessage":    {BotForwardedMessage: &waE2E.FutureProofMessage{Message: inner}},
+		"groupMentionedMessage":  {GroupMentionedMessage: &waE2E.FutureProofMessage{Message: inner}},
+	}
+	for name, msg := range wrappers {
+		evt := &events.Message{Info: baseInfo("wamid."+name, "5511999999999"), Message: msg}
+		out, err := mapper.BuildInbound(context.Background(), testDeps(fakeDownloader{}, nil, &fakeMediaStore{}), evt)
+		if err != nil {
+			t.Fatalf("%s: BuildInbound: %v", name, err)
+		}
+		if out.Type != "text" || out.Text == nil || out.Text.Body != "oi de dentro" {
+			t.Fatalf("%s: expected the wrapped text, got %+v", name, out)
+		}
+	}
+
+	poll := &waE2E.PollCreationMessage{Name: proto.String("Qual?"), Options: []*waE2E.PollCreationMessage_Option{{OptionName: proto.String("A")}}}
+	for name, msg := range map[string]*waE2E.Message{
+		"pollCreationMessageV4": {PollCreationMessageV4: &waE2E.FutureProofMessage{Message: &waE2E.Message{PollCreationMessage: poll}}},
+		"pollCreationMessageV5": {PollCreationMessageV5: poll},
+		"pollCreationMessageV6": {PollCreationMessageV6: poll},
+	} {
+		evt := &events.Message{Info: baseInfo("wamid."+name, "5511999999999"), Message: msg}
+		out, err := mapper.BuildInbound(context.Background(), testDeps(fakeDownloader{}, nil, &fakeMediaStore{}), evt)
+		if err != nil {
+			t.Fatalf("%s: BuildInbound: %v", name, err)
+		}
+		if out.Type != "poll" || out.RichContent == nil || out.RichContent.Poll == nil || out.RichContent.Poll.Question != "Qual?" {
+			t.Fatalf("%s: expected a poll, got %+v", name, out)
+		}
+	}
+}
+
+func TestBuildInboundTemplateMessageBecomesButtons(t *testing.T) {
+	evt := &events.Message{
+		Info: baseInfo("wamid.template-1", "5511999999999"),
+		Message: &waE2E.Message{
+			TemplateMessage: &waE2E.TemplateMessage{
+				HydratedTemplate: &waE2E.TemplateMessage_HydratedFourRowTemplate{
+					Title:               &waE2E.TemplateMessage_HydratedFourRowTemplate_HydratedTitleText{HydratedTitleText: "Sua fatura chegou"},
+					HydratedContentText: proto.String("Vence dia 10."),
+					HydratedFooterText:  proto.String("Banco X"),
+					HydratedButtons: []*waE2E.HydratedTemplateButton{
+						{HydratedButton: &waE2E.HydratedTemplateButton_QuickReplyButton{QuickReplyButton: &waE2E.HydratedTemplateButton_HydratedQuickReplyButton{DisplayText: proto.String("Já paguei"), ID: proto.String("paid")}}},
+						{HydratedButton: &waE2E.HydratedTemplateButton_UrlButton{UrlButton: &waE2E.HydratedTemplateButton_HydratedURLButton{DisplayText: proto.String("Ver fatura"), URL: proto.String("https://x.com/f")}}},
+						{HydratedButton: &waE2E.HydratedTemplateButton_CallButton{CallButton: &waE2E.HydratedTemplateButton_HydratedCallButton{DisplayText: proto.String("Ligar"), PhoneNumber: proto.String("+5511999999999")}}},
+					},
+				},
+			},
+		},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), testDeps(fakeDownloader{}, nil, &fakeMediaStore{}), evt)
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "buttons" || out.RichContent == nil {
+		t.Fatalf("expected Type=buttons with rich content, got %+v", out)
+	}
+	rc := out.RichContent
+	if rc.Body != "Sua fatura chegou\n\nVence dia 10." || rc.Footer != "Banco X" {
+		t.Fatalf("unexpected body/footer: %q / %q", rc.Body, rc.Footer)
+	}
+	if len(rc.Buttons) != 3 || rc.Buttons[0].ID != "paid" || rc.Buttons[0].Text != "Já paguei" {
+		t.Fatalf("unexpected buttons: %+v", rc.Buttons)
+	}
+	if rc.Buttons[1].Name != "cta_url" || rc.Buttons[1].URL != "https://x.com/f" || rc.Buttons[2].URL != "tel:+5511999999999" {
+		t.Fatalf("unexpected url/call buttons: %+v", rc.Buttons[1:])
+	}
+}
