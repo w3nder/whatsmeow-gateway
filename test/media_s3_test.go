@@ -15,7 +15,7 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/media"
 )
 
-const minioImage = "minio/minio:RELEASE.2024-01-16T16-07-38Z"
+const minioImage = "quay.io/minio/minio:RELEASE.2024-01-16T16-07-38Z"
 
 func TestS3StorePutRoundTrip(t *testing.T) {
 	ctx := context.Background()
