@@ -91,6 +91,38 @@ func (f *recordingClient) GetGroupInfo(ctx context.Context, jid types.JID) (*typ
 	return nil, nil
 }
 
+func (f *recordingClient) CreateGroup(ctx context.Context, req whatsmeow.ReqCreateGroup) (*types.GroupInfo, error) {
+	return nil, nil
+}
+
+func (f *recordingClient) GetGroupInviteLink(ctx context.Context, jid types.JID, reset bool) (string, error) {
+	return "", nil
+}
+
+func (f *recordingClient) SetGroupAnnounce(ctx context.Context, jid types.JID, announce bool) error {
+	return nil
+}
+
+func (f *recordingClient) SetGroupName(ctx context.Context, jid types.JID, name string) error {
+	return nil
+}
+
+func (f *recordingClient) SetGroupTopic(ctx context.Context, jid types.JID, topic string) error {
+	return nil
+}
+
+func (f *recordingClient) SetGroupPhoto(ctx context.Context, jid types.JID, jpeg []byte) (string, error) {
+	return "", nil
+}
+
+func (f *recordingClient) UpdateGroupParticipants(ctx context.Context, jid types.JID, participants []types.JID, change whatsmeow.ParticipantChange) ([]types.GroupParticipant, error) {
+	return nil, nil
+}
+
+func (f *recordingClient) GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, error) {
+	return nil, nil
+}
+
 func (f *recordingClient) AddEventHandler(handler func(any)) uint32 {
 	return 0
 }
