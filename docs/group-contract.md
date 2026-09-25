@@ -214,13 +214,19 @@ Paralelismo, ritmo e interrupção:
     líder): o gateway **segura a entrega original e tenta de novo** com o mesmo número,
     com espera crescente de 200 ms até 5 s, até conseguir. Só devolve a original à fila
     (nack com requeue) se o canal AMQP fechar ou o consumidor estiver parando; nesses
-    casos a numeração da instância recomeça do zero de qualquer forma.
+    casos a numeração da instância recomeça do zero de qualquer forma. Ao parar, as
+    cópias que ainda esperam na fila interna voltam para `gateway.group` na hora, sem
+    nova tentativa de publicação. Um retorno do broker deixado por uma tentativa
+    anterior é descartado antes de cada publicação, para não ser atribuído à seguinte.
   - Cópia com nonce de outra instância (outro pod, ou a mesma depois de reiniciar) é
     tratada como comando novo: entra se o canal não tem transbordo aqui, ou vai para o
     fim com um número desta instância.
   - Trava de segurança: um canal com transbordo que não deixa entrar nenhuma cópia por
     30 s tem o controle de ordem descartado e volta a aceitar comandos na chegada — nunca
-    fica preso para sempre esperando uma cópia que outra instância consumiu.
+    fica preso para sempre esperando uma cópia que outra instância consumiu. A trava só
+    age quando esta instância não tem nenhuma cópia daquele canal ainda por publicar:
+    durante uma indisponibilidade de publicação mais longa que 30 s, a ordem continua
+    garantida, e ela só é abandonada depois que todas as cópias pendentes saíram.
 - Entre dois grupos do mesmo canal o gateway espera de 300 a 800 ms (sorteado), mesmo
   quando são de comandos seguidos, para não disparar dezenas de alterações no WhatsApp
   em rajada. Grupos já concluídos numa reentrega não esperam.
