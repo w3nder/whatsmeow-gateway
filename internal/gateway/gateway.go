@@ -598,9 +598,7 @@ func (g *gateway) handleSessionEvent(channelID string, evt any) {
 	case *events.Receipt:
 		g.handleReceipt(channelID, e)
 	case *events.GroupInfo:
-		if e.Name != nil {
-			g.groups.Invalidate(channelID, e.JID)
-		}
+		g.handleGroupInfo(channelID, e)
 	case *events.LoggedOut:
 		g.clearTenant(channelID)
 		if err := g.registry.Delete(g.workCtx, channelID); err != nil {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
 	"github.com/w3nder/whatsmeow-gateway/internal/groups"
@@ -115,6 +116,22 @@ func (g *gateway) groupClient(ctx context.Context, tenantID, channelID string) (
 		return nil, amqp.RpcUnavailable(err.Error())
 	}
 	return client, nil
+}
+
+func (g *gateway) handleGroupInfo(channelID string, e *events.GroupInfo) {
+	if e.Name != nil {
+		g.groups.Invalidate(channelID, e.JID)
+	}
+	client, err := g.waClientFor(channelID)
+	if err != nil {
+		g.logger.Error("gateway: resolve client for group info", "channel_id", channelID, "error", err)
+		return
+	}
+	for _, evt := range BuildGroupParticipants(g.workCtx, client, g.tenantFor(channelID), channelID, e) {
+		if err := g.publisher.PublishGroupParticipants(g.workCtx, evt); err != nil {
+			g.logger.Error("gateway: publish group participants", "channel_id", channelID, "group_jid", evt.GroupJID, "type", evt.Type, "error", err)
+		}
+	}
 }
 
 func parseGroupJID(raw string) (types.JID, error) {
