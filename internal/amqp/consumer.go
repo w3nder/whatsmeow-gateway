@@ -158,12 +158,12 @@ func (c *Consumer) StartGroup(ctx context.Context, handler GroupHandler) error {
 	}
 	c.groupStarted = true
 	c.wg.Add(1)
-	go c.consumeSerially(GatewayGroupQueue, deliveries, func(d rabbitmq.Delivery) error {
+	go c.consumePerChannel(GatewayGroupQueue, deliveries, func(d rabbitmq.Delivery) (string, func() error, error) {
 		var cmd GatewayGroupCommand
 		if err := json.Unmarshal(d.Body, &cmd); err != nil {
-			return err
+			return "", nil, err
 		}
-		return handler(ctx, cmd)
+		return cmd.ChannelID, func() error { return handler(ctx, cmd) }, nil
 	})
 	return nil
 }
@@ -244,6 +244,80 @@ func (c *Consumer) consumeSerially(queue string, deliveries <-chan rabbitmq.Deli
 		_ = d.Nack(false, true)
 	}
 	c.reportFailure(fmt.Errorf("amqp: %s consumer stopped: broker closed the delivery channel", queue))
+}
+
+func (c *Consumer) consumePerChannel(queue string, deliveries <-chan rabbitmq.Delivery, decode func(rabbitmq.Delivery) (string, func() error, error)) {
+	defer c.wg.Done()
+	var (
+		mu      sync.Mutex
+		requeue []rabbitmq.Delivery
+		lanes   = newLanes()
+	)
+	for d := range deliveries {
+		channelID, handle, err := decode(d)
+		if err != nil {
+			settle(d, err)
+			continue
+		}
+		lanes.run(channelID, func() {
+			err := handle()
+			if errors.Is(err, ErrRequeue) {
+				mu.Lock()
+				requeue = append(requeue, d)
+				mu.Unlock()
+				return
+			}
+			settle(d, err)
+		})
+	}
+	lanes.wait()
+	for _, d := range requeue {
+		_ = d.Nack(false, true)
+	}
+	c.reportFailure(fmt.Errorf("amqp: %s consumer stopped: broker closed the delivery channel", queue))
+}
+
+type lanes struct {
+	mu      sync.Mutex
+	pending map[string][]func()
+	workers sync.WaitGroup
+}
+
+func newLanes() *lanes {
+	return &lanes{pending: make(map[string][]func())}
+}
+
+func (l *lanes) run(key string, job func()) {
+	l.mu.Lock()
+	queued, busy := l.pending[key]
+	l.pending[key] = append(queued, job)
+	l.mu.Unlock()
+	if busy {
+		return
+	}
+	l.workers.Add(1)
+	go l.drain(key)
+}
+
+func (l *lanes) drain(key string) {
+	defer l.workers.Done()
+	for {
+		l.mu.Lock()
+		queued := l.pending[key]
+		if len(queued) == 0 {
+			delete(l.pending, key)
+			l.mu.Unlock()
+			return
+		}
+		job := queued[0]
+		l.pending[key] = queued[1:]
+		l.mu.Unlock()
+		job()
+	}
+}
+
+func (l *lanes) wait() {
+	l.workers.Wait()
 }
 
 func settle(d rabbitmq.Delivery, err error) {

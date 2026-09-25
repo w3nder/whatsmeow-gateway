@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"sync"
 	"time"
 
 	"go.mau.fi/whatsmeow/types"
@@ -243,7 +244,42 @@ type groupCommandRun struct {
 	client   session.WAClient
 	setupErr error
 	photo    []byte
-	touched  bool
+}
+
+type channelPacer struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+func newChannelPacer() *channelPacer {
+	return &channelPacer{last: make(map[string]time.Time)}
+}
+
+func (p *channelPacer) wait(ctx context.Context, channelID string) error {
+	p.mu.Lock()
+	last, touched := p.last[channelID]
+	p.mu.Unlock()
+	if !touched {
+		return nil
+	}
+	remaining := time.Until(last.Add(groupGapMin + rand.N(groupGapJitter)))
+	if remaining <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return errShuttingDown
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (p *channelPacer) touch(channelID string) {
+	p.mu.Lock()
+	p.last[channelID] = time.Now()
+	p.mu.Unlock()
 }
 
 func (g *gateway) GroupHandler(ctx context.Context, cmd amqp.GatewayGroupCommand) error {
@@ -302,15 +338,13 @@ func (g *gateway) applyGroupAction(ctx, work context.Context, run *groupCommandR
 	if err != nil {
 		return fail(err)
 	}
-	if run.touched {
-		if err := pauseBetweenGroups(ctx); err != nil {
-			return result, err
-		}
+	if err := g.pacer.wait(ctx, run.cmd.ChannelID); err != nil {
+		return result, err
 	}
-	run.touched = true
 	itemCtx, cancel := context.WithTimeout(work, groupItemTimeout)
 	defer cancel()
 	applied, err := groups.Apply(itemCtx, run.client, run.cmd.Action, jid, run.cmd.Params, run.photo, g.logger)
+	g.pacer.touch(run.cmd.ChannelID)
 	if groups.IsUnavailable(err) && ctx.Err() != nil {
 		return result, errShuttingDown
 	}
@@ -325,17 +359,6 @@ func (g *gateway) applyGroupAction(ctx, work context.Context, run *groupCommandR
 		g.logger.Error("gateway: mark group action done", "command_id", run.cmd.CommandID, "group_jid", raw, "error", err)
 	}
 	return result, nil
-}
-
-func pauseBetweenGroups(ctx context.Context) error {
-	timer := time.NewTimer(groupGapMin + rand.N(groupGapJitter))
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return errShuttingDown
-	case <-timer.C:
-		return nil
-	}
 }
 
 func infoResponse(info groups.Info) groupInfoResponse {

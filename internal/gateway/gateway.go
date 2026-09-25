@@ -61,6 +61,7 @@ type gateway struct {
 	mediaStore           mapper.MediaStore
 	avatars              *avatar.Cache
 	groups               *groupinfo.Cache
+	pacer                *channelPacer
 	calls                *call.Manager
 	instanceID           string
 	shardLockTTL         time.Duration
@@ -88,6 +89,7 @@ func Run(ctx context.Context, deps Deps) error {
 		mediaStore:           deps.MediaStore,
 		avatars:              avatar.New(deps.MediaStore, fetchMediaURL, avatar.Options{}, deps.Logger),
 		groups:               groupinfo.New(groupinfo.Options{}, deps.Logger),
+		pacer:                newChannelPacer(),
 		instanceID:           deps.InstanceID,
 		shardLockTTL:         deps.ShardLockTTL,
 		sendTimeout:          sendTimeout(deps.SendTimeout),
