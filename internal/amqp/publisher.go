@@ -72,6 +72,17 @@ func (p *Publisher) PublishChannelStatus(ctx context.Context, evt ChannelStatusE
 	return p.publish(ctx, ChannelStatusRoutingKey, evt)
 }
 
+func (p *Publisher) PublishGroupAction(ctx context.Context, evt GroupActionEvent) error {
+	return p.publish(ctx, GroupActionRoutingKey, evt)
+}
+
+func (p *Publisher) PublishGroupParticipants(ctx context.Context, evt GroupParticipantsEvent) error {
+	if evt.Participants == nil {
+		evt.Participants = []GroupParticipant{}
+	}
+	return p.publish(ctx, GroupParticipantsRoutingKey, evt)
+}
+
 func (p *Publisher) publish(ctx context.Context, routingKey string, payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
