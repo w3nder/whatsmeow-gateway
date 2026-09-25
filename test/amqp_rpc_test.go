@@ -157,4 +157,47 @@ func TestRpcServerSkipsRequestsThatAlreadyExpired(t *testing.T) {
 	}
 }
 
+func TestRpcServerRecoversFromHandlerPanic(t *testing.T) {
+	conn := startRabbitMQ(t)
+	server := gatewayamqp.NewRpcServer(conn, 4)
+	t.Cleanup(func() { _ = server.Close() })
+
+	err := server.Handle(context.Background(), "panic.test", func(context.Context, json.RawMessage) (any, error) {
+		panic("boom")
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	probe := newRpcProbe(t, conn)
+	first := probe.call(t, "panic.test", "corr-panic-1", `{}`, 5*time.Second)
+	if first["ok"] != false || first["error"].(map[string]any)["code"] != "internal" {
+		t.Fatalf("panic reply %v", first)
+	}
+
+	second := probe.call(t, "panic.test", "corr-panic-2", `{}`, 5*time.Second)
+	if second["ok"] != false || second["error"].(map[string]any)["code"] != "internal" {
+		t.Fatalf("second panic reply %v", second)
+	}
+}
+
+func TestRpcServerRepliesInternalWhenResultIsNotSerializable(t *testing.T) {
+	conn := startRabbitMQ(t)
+	server := gatewayamqp.NewRpcServer(conn, 4)
+	t.Cleanup(func() { _ = server.Close() })
+
+	err := server.Handle(context.Background(), "unserializable.test", func(context.Context, json.RawMessage) (any, error) {
+		return map[string]any{"ch": make(chan int)}, nil
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	probe := newRpcProbe(t, conn)
+	reply := probe.call(t, "unserializable.test", "corr-unserializable", `{}`, 5*time.Second)
+	if reply["ok"] != false || reply["error"].(map[string]any)["code"] != "internal" {
+		t.Fatalf("unserializable reply %v", reply)
+	}
+}
+
 var errBoom = errors.New("boom")

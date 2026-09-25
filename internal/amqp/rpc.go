@@ -123,7 +123,10 @@ func (s *RpcServer) serve(ctx context.Context, ch *rabbitmq.Channel, d rabbitmq.
 
 	reply := answer(callCtx, d.Body, handler)
 	if d.ReplyTo != "" {
-		body, _ := json.Marshal(reply)
+		body, err := json.Marshal(reply)
+		if err != nil {
+			body, _ = json.Marshal(rpcReply{OK: false, Error: &rpcErrorBody{Code: RpcCodeInternal, Message: "reply is not serializable: " + err.Error()}})
+		}
 		if err := ch.PublishWithContext(ctx, "", d.ReplyTo, false, false, rabbitmq.Publishing{
 			ContentType:   "application/json",
 			CorrelationId: d.CorrelationId,
@@ -137,10 +140,15 @@ func (s *RpcServer) serve(ctx context.Context, ch *rabbitmq.Channel, d rabbitmq.
 	_ = d.Ack(false)
 }
 
-func answer(ctx context.Context, body []byte, handler RpcHandler) rpcReply {
+func answer(ctx context.Context, body []byte, handler RpcHandler) (reply rpcReply) {
 	if !json.Valid(body) {
 		return rpcReply{OK: false, Error: &rpcErrorBody{Code: RpcCodeInvalidRequest, Message: "request is not valid JSON"}}
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			reply = rpcReply{OK: false, Error: &rpcErrorBody{Code: RpcCodeInternal, Message: fmt.Sprintf("handler panicked: %v", r)}}
+		}
+	}()
 	result, err := handler(ctx, body)
 	if err == nil {
 		return rpcReply{OK: true, Result: result}
