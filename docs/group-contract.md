@@ -29,7 +29,7 @@ sem resposta (`ack` silencioso) — republicar depois do timeout não adianta.
 |---|---|
 | `invalid_request` | Payload não é JSON válido, falta campo obrigatório ou `groupJid` não é um JID de grupo |
 | `not_found` | O canal não tem sessão pareada nesta instância |
-| `unavailable` | O canal está pareado mas não está conectado agora |
+| `unavailable` | O canal está pareado mas não está conectado agora, ou o WhatsApp respondeu com limite de taxa (429) ou erro de servidor (500/503) — transitório, vale tentar de novo depois |
 | `bad_gateway` | O WhatsApp recusou o pedido (ex.: grupo inexistente, sem permissão) |
 | `internal` | O handler entrou em pânico ou a resposta não pôde ser serializada |
 
@@ -58,7 +58,14 @@ Resposta:
 {"groupJid":"120363422547615282@g.us","inviteUrl":"https://chat.whatsapp.com/ABCDEFGHIJKLMNOPQRSTUV","participantCount":1,"createdAt":"2026-09-24T12:00:00Z"}
 ```
 
-Timeout sugerido: **10 s** (cria o grupo e já busca o link de convite).
+`inviteUrl` pode vir **vazio** com `ok: true`: o grupo foi criado e `groupJid` é o real,
+mas o WhatsApp não entregou o link mesmo depois de três novas tentativas (200 ms, 500 ms
+e 1 s, dentro do prazo do pedido). Nesse caso o cliente guarda o grupo como criado e
+busca o link depois com `group.invite_link` (`reset: false`) — nunca chama
+`group.create` de novo, que criaria um segundo grupo.
+
+Timeout sugerido: **30 s** (cria o grupo, aplica descrição e foto e busca o link de
+convite, com as novas tentativas).
 
 ### `group.invite_link`
 
@@ -131,7 +138,7 @@ Resposta — lista todos os grupos em que o canal está, cada um no mesmo format
 {"groups":[{"groupJid":"120363422547615282@g.us","name":"G","announce":false,"participantCount":1,"createdAt":"2026-09-24T12:00:00Z"}]}
 ```
 
-Timeout sugerido: **15 s** — a lista pode ter muitos grupos.
+Timeout sugerido: **10 s**.
 
 ## Comando
 
@@ -163,20 +170,36 @@ o mesmo grupo não repete a ação no WhatsApp — o gateway republica o mesmo
 `whatsapp.group.action.v1` (com o mesmo `removed`, quando houver) sem chamar a API de
 novo.
 
+Ritmo e interrupção:
+
+- Entre um grupo e o próximo o gateway espera de 300 a 800 ms (sorteado), para não
+  disparar dezenas de alterações no WhatsApp em rajada. Grupos já concluídos numa
+  reentrega não esperam.
+- Cada grupo tem prazo de 30 s. Em `set_photo` a imagem é baixada e convertida **uma
+  vez** por comando, antes do primeiro grupo (download limitado a 20 s e 8 MiB).
+- Se o WhatsApp responder `unavailable` (limite de taxa, erro 500/503, timeout) o
+  gateway **para o comando** e o manda para a DLQ `gateway.group.dlq`, sem publicar
+  falso `ok: false`; quando for reinjetado, os grupos já concluídos só republicam o
+  resultado e os pendentes são aplicados.
+- Se o gateway for desligado no meio do comando, o grupo em andamento termina e o
+  comando volta para a fila `gateway.group` (nack com requeue depois de cancelar o
+  consumidor); a próxima instância retoma do mesmo ponto pelo ledger.
+
 ### Ações
 
 | Ação | `params` usados | Efeito |
 |---|---|---|
 | `lock` | — | Liga "somente admin envia mensagem" (`announce`) |
 | `unlock` | — | Desliga "somente admin envia mensagem" |
-| `remove_participants` | `phones` (obrigatório) | Remove os números listados; participantes não encontrados no grupo são ignorados, sem erro |
+| `remove_participants` | `phones` (obrigatório) | Remove os números listados; participantes não encontrados no grupo são ignorados, sem erro; o próprio número do canal nunca é removido |
 | `set_name` | `name` (obrigatório) | Renomeia o grupo; `invalid_request` se vazio |
 | `set_description` | `description` | Define o tópico do grupo (aceita string vazia, que limpa o tópico) |
 | `set_photo` | `photoUrl` (obrigatório) | Baixa a imagem, converte para JPEG e define como foto do grupo; `invalid_request` se a URL não vier ou a imagem não converter |
 
 `phones` aceita o número com ou sem `+`; a correspondência tenta o `phoneNumber` do
 participante, o `user` do JID e, quando o participante só tem LID, resolve o PN antes de
-comparar.
+comparar. Número brasileiro (`55` com 12 ou 13 dígitos) casa também com a forma irmã do
+nono dígito: `551188887777` encontra `5511988887777` e vice-versa.
 
 ## Eventos
 
@@ -198,10 +221,11 @@ feita, no caso de reentrega).
 | `action` | string | sempre |
 | `ok` | bool | sempre |
 | `error` | string | só quando `ok` é `false` |
-| `removed` | int | só em `remove_participants` — quantos participantes foram de fato removidos (pode ser `0` se nenhum telefone bateu com o grupo) |
+| `removed` | int | só em `remove_participants` — quantos participantes o WhatsApp aceitou remover (entradas sem erro na resposta; pode ser `0` se nenhum telefone bateu com o grupo) |
 
 `ok: false` não derruba o consumidor: o gateway registra o `error` e segue para o
-próximo `groupJid` da lista. Não há reentrega automática de uma falha de negócio (ex.:
+próximo `groupJid` da lista. Com o canal offline no início do comando, cada grupo sai
+com `ok: false` e `error` começando por `unavailable:`, e o comando é confirmado. Não há reentrega automática de uma falha de negócio (ex.:
 `set_name` num grupo em que o canal não é admin) — quem decide se tenta de novo é o
 backend, com um novo `commandId`.
 
