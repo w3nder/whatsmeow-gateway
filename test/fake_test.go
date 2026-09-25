@@ -55,7 +55,7 @@ type fakeWAClient struct {
 	groups           map[string]*types.GroupInfo
 	createdGroups    []whatsmeow.ReqCreateGroup
 	announceCalls    map[string]bool
-	nameCalls        map[string]string
+	nameCalls        map[string][]string
 	topicCalls       map[string]string
 	photoCalls       map[string][]byte
 	participantCalls []participantCall
@@ -273,9 +273,9 @@ func (f *fakeWAClient) SetGroupName(ctx context.Context, jid types.JID, name str
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.nameCalls == nil {
-		f.nameCalls = map[string]string{}
+		f.nameCalls = map[string][]string{}
 	}
-	f.nameCalls[jid.String()] = name
+	f.nameCalls[jid.String()] = append(f.nameCalls[jid.String()], name)
 	return f.groupErr
 }
 

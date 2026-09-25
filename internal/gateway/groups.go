@@ -209,6 +209,51 @@ func (g *gateway) rpcGroupJoined(ctx context.Context, payload json.RawMessage) (
 	return out, nil
 }
 
+func (g *gateway) GroupHandler(ctx context.Context, cmd amqp.GatewayGroupCommand) error {
+	g.setTenant(cmd.ChannelID, cmd.TenantID)
+	g.logger.Info("gateway: group command received", "command_id", cmd.CommandID, "channel_id", cmd.ChannelID, "action", cmd.Action, "groups", len(cmd.GroupJIDs))
+
+	client, clientErr := g.groupClient(ctx, cmd.TenantID, cmd.ChannelID)
+	for _, raw := range cmd.GroupJIDs {
+		alreadyDone, err := g.dedupe.BeginAction(ctx, cmd.CommandID, raw)
+		if err != nil {
+			return fmt.Errorf("gateway: begin action %s/%s: %w", cmd.CommandID, raw, err)
+		}
+		result := amqp.GroupActionEvent{TenantID: cmd.TenantID, ChannelID: cmd.ChannelID, CommandID: cmd.CommandID, GroupJID: raw, Action: cmd.Action, OK: true}
+		if !alreadyDone {
+			result = g.applyGroupAction(ctx, client, clientErr, cmd, raw, result)
+		}
+		if err := g.publisher.PublishGroupAction(ctx, result); err != nil {
+			return fmt.Errorf("gateway: publish group action %s/%s: %w", cmd.CommandID, raw, err)
+		}
+	}
+	return nil
+}
+
+func (g *gateway) applyGroupAction(ctx context.Context, client session.WAClient, clientErr error, cmd amqp.GatewayGroupCommand, raw string, result amqp.GroupActionEvent) amqp.GroupActionEvent {
+	fail := func(err error) amqp.GroupActionEvent {
+		result.OK = false
+		result.Error = err.Error()
+		return result
+	}
+	if clientErr != nil {
+		return fail(clientErr)
+	}
+	jid, err := parseGroupJID(raw)
+	if err != nil {
+		return fail(err)
+	}
+	applied, err := groups.Apply(ctx, client, fetchMediaURL, cmd.Action, jid, cmd.Params)
+	if err != nil {
+		return fail(err)
+	}
+	result.Removed = applied.Removed
+	if err := g.dedupe.MarkActionDone(ctx, cmd.CommandID, raw); err != nil {
+		g.logger.Error("gateway: mark group action done", "command_id", cmd.CommandID, "group_jid", raw, "error", err)
+	}
+	return result
+}
+
 func infoResponse(info groups.Info) groupInfoResponse {
 	return groupInfoResponse{
 		GroupJID:         info.GroupJID,

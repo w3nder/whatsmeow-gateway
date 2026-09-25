@@ -228,6 +228,11 @@ func (g *gateway) run(ctx context.Context) error {
 		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
 		return fmt.Errorf("gateway: start call consumer: %w", err)
 	}
+	if err := g.consumer.StartGroup(g.workCtx, g.GroupHandler); err != nil {
+		g.closeConsumerForFailedBoot()
+		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
+		return fmt.Errorf("gateway: start group consumer: %w", err)
+	}
 	if err := g.registerGroupRpc(g.workCtx); err != nil {
 		g.closeConsumerForFailedBoot()
 		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
