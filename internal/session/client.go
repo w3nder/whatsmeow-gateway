@@ -29,6 +29,7 @@ type WAClient interface {
 	IsConnected() bool
 	WaitForConnection(timeout time.Duration) bool
 	DeviceJID() *types.JID
+	DeviceLID() types.JID
 	DisplayName() string
 	SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID, nodes []waBinary.Node) (whatsmeow.SendResponse, error)
 	BuildEdit(chat types.JID, id types.MessageID, newContent *waE2E.Message) *waE2E.Message
@@ -41,6 +42,14 @@ type WAClient interface {
 	DecryptPollVote(ctx context.Context, evt *events.Message) (*waE2E.PollVoteMessage, error)
 	GetProfilePictureInfo(ctx context.Context, jid types.JID, params *whatsmeow.GetProfilePictureParams) (*types.ProfilePictureInfo, error)
 	GetGroupInfo(ctx context.Context, jid types.JID) (*types.GroupInfo, error)
+	CreateGroup(ctx context.Context, req whatsmeow.ReqCreateGroup) (*types.GroupInfo, error)
+	GetGroupInviteLink(ctx context.Context, jid types.JID, reset bool) (string, error)
+	SetGroupAnnounce(ctx context.Context, jid types.JID, announce bool) error
+	SetGroupName(ctx context.Context, jid types.JID, name string) error
+	SetGroupTopic(ctx context.Context, jid types.JID, previousID, topic string) error
+	SetGroupPhoto(ctx context.Context, jid types.JID, jpeg []byte) (string, error)
+	UpdateGroupParticipants(ctx context.Context, jid types.JID, participants []types.JID, change whatsmeow.ParticipantChange) ([]types.GroupParticipant, error)
+	GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, error)
 	AddEventHandler(handler func(any)) uint32
 	Calls() call.Caller
 	Disconnect()
@@ -93,6 +102,10 @@ func (w *waClient) WaitForConnection(timeout time.Duration) bool {
 
 func (w *waClient) DeviceJID() *types.JID {
 	return w.client.Store.ID
+}
+
+func (w *waClient) DeviceLID() types.JID {
+	return w.client.Store.GetLID()
 }
 
 func (w *waClient) DisplayName() string {
@@ -153,6 +166,38 @@ func (w *waClient) GetProfilePictureInfo(ctx context.Context, jid types.JID, par
 
 func (w *waClient) GetGroupInfo(ctx context.Context, jid types.JID) (*types.GroupInfo, error) {
 	return w.client.GetGroupInfo(ctx, jid)
+}
+
+func (w *waClient) CreateGroup(ctx context.Context, req whatsmeow.ReqCreateGroup) (*types.GroupInfo, error) {
+	return w.client.CreateGroup(ctx, req)
+}
+
+func (w *waClient) GetGroupInviteLink(ctx context.Context, jid types.JID, reset bool) (string, error) {
+	return w.client.GetGroupInviteLink(ctx, jid, reset)
+}
+
+func (w *waClient) SetGroupAnnounce(ctx context.Context, jid types.JID, announce bool) error {
+	return w.client.SetGroupAnnounce(ctx, jid, announce)
+}
+
+func (w *waClient) SetGroupName(ctx context.Context, jid types.JID, name string) error {
+	return w.client.SetGroupName(ctx, jid, name)
+}
+
+func (w *waClient) SetGroupTopic(ctx context.Context, jid types.JID, previousID, topic string) error {
+	return w.client.SetGroupTopic(ctx, jid, previousID, "", topic)
+}
+
+func (w *waClient) SetGroupPhoto(ctx context.Context, jid types.JID, jpeg []byte) (string, error) {
+	return w.client.SetGroupPhoto(ctx, jid, jpeg)
+}
+
+func (w *waClient) UpdateGroupParticipants(ctx context.Context, jid types.JID, participants []types.JID, change whatsmeow.ParticipantChange) ([]types.GroupParticipant, error) {
+	return w.client.UpdateGroupParticipants(ctx, jid, participants, change)
+}
+
+func (w *waClient) GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, error) {
+	return w.client.GetJoinedGroups(ctx)
 }
 
 func (w *waClient) AddEventHandler(handler func(any)) uint32 {

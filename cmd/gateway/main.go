@@ -74,10 +74,12 @@ func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *
 		}
 	}()
 
-	consumer, err := amqp.NewConsumer(conn, amqp.ConsumerConfig{Prefetch: cfg.Prefetch})
+	consumer, err := amqp.NewConsumer(conn, amqp.ConsumerConfig{Prefetch: cfg.Prefetch, GroupPrefetch: cfg.GroupPrefetch})
 	if err != nil {
 		return fmt.Errorf("main: new consumer: %w", err)
 	}
+
+	rpc := amqp.NewRpcServer(conn, cfg.Prefetch, logger)
 
 	publisher, err := amqp.NewPublisher(conn)
 	if err != nil {
@@ -133,6 +135,7 @@ func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *
 	manager := session.NewManager(gateway.NewWAClientFactory(sessionContainer, waLogger, logger))
 
 	return gateway.Run(ctx, gateway.Deps{
+		Rpc:                  rpc,
 		Consumer:             consumer,
 		Publisher:            publisher,
 		Manager:              manager,
@@ -144,6 +147,7 @@ func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *
 		ShardLockTTL:         cfg.ShardLockTTL,
 		SendTimeout:          cfg.SendTimeout,
 		ShutdownDrainTimeout: cfg.ShutdownDrainTimeout,
+		RpcDrainTimeout:      cfg.RpcDrainTimeout,
 		CallOptions: call.Options{
 			TmpDir: cfg.CallTmpDir,
 			Record: cfg.CallRecord,

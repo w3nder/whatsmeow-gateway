@@ -37,6 +37,7 @@ func (c *identityClient) IsLoggedIn() bool                     { return true }
 func (c *identityClient) IsConnected() bool                    { return true }
 func (c *identityClient) WaitForConnection(time.Duration) bool { return true }
 func (c *identityClient) DeviceJID() *types.JID                { return c.jid }
+func (c *identityClient) DeviceLID() types.JID                 { return types.EmptyJID }
 func (c *identityClient) DisplayName() string                  { return c.displayName }
 func (c *identityClient) SendMessage(context.Context, types.JID, *waE2E.Message, types.MessageID, []waBinary.Node) (whatsmeow.SendResponse, error) {
 	return whatsmeow.SendResponse{}, nil
@@ -69,6 +70,24 @@ func (c *identityClient) GetProfilePictureInfo(context.Context, types.JID, *what
 	return c.photoInfo, c.photoErr
 }
 func (c *identityClient) GetGroupInfo(context.Context, types.JID) (*types.GroupInfo, error) {
+	return nil, nil
+}
+func (c *identityClient) CreateGroup(context.Context, whatsmeow.ReqCreateGroup) (*types.GroupInfo, error) {
+	return nil, nil
+}
+func (c *identityClient) GetGroupInviteLink(context.Context, types.JID, bool) (string, error) {
+	return "", nil
+}
+func (c *identityClient) SetGroupAnnounce(context.Context, types.JID, bool) error        { return nil }
+func (c *identityClient) SetGroupName(context.Context, types.JID, string) error          { return nil }
+func (c *identityClient) SetGroupTopic(context.Context, types.JID, string, string) error { return nil }
+func (c *identityClient) SetGroupPhoto(context.Context, types.JID, []byte) (string, error) {
+	return "", nil
+}
+func (c *identityClient) UpdateGroupParticipants(context.Context, types.JID, []types.JID, whatsmeow.ParticipantChange) ([]types.GroupParticipant, error) {
+	return nil, nil
+}
+func (c *identityClient) GetJoinedGroups(context.Context) ([]*types.GroupInfo, error) {
 	return nil, nil
 }
 func (c *identityClient) AddEventHandler(func(any)) uint32 { return 0 }

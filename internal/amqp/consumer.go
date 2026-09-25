@@ -17,18 +17,27 @@ type PairHandler func(ctx context.Context, cmd PairCommand, accept func()) error
 
 type CallHandler func(ctx context.Context, cmd GatewayCallCommand) error
 
+type GroupHandler func(ctx context.Context, cmd GatewayGroupCommand) error
+
 type ConsumerConfig struct {
-	Prefetch int
+	Prefetch         int
+	GroupPrefetch    int
+	GroupLaneBacklog int
 }
 
 type Consumer struct {
-	sendCh *rabbitmq.Channel
-	pairCh *rabbitmq.Channel
-	callCh *rabbitmq.Channel
+	sendCh  *rabbitmq.Channel
+	pairCh  *rabbitmq.Channel
+	callCh  *rabbitmq.Channel
+	groupCh *rabbitmq.Channel
 
-	sendStarted bool
-	pairStarted bool
-	callStarted bool
+	sendStarted  bool
+	pairStarted  bool
+	callStarted  bool
+	groupStarted bool
+
+	groupPrefetch    int
+	groupLaneBacklog int
 
 	closing atomic.Bool
 	failed  chan error
@@ -99,11 +108,43 @@ func NewConsumer(conn *rabbitmq.Connection, cfg ConsumerConfig) (*Consumer, erro
 		return nil, fmt.Errorf("amqp: set qos on gateway.call channel: %w", err)
 	}
 
+	groupCh, err := conn.Channel()
+	if err != nil {
+		_ = sendCh.Close()
+		_ = pairCh.Close()
+		_ = callCh.Close()
+		return nil, fmt.Errorf("amqp: open gateway.group channel: %w", err)
+	}
+	if err := declareCommandTopology(groupCh, GatewayGroupExchange, GatewayGroupQueue, GatewayGroupDLX, GatewayGroupDLQ); err != nil {
+		_ = sendCh.Close()
+		_ = pairCh.Close()
+		_ = callCh.Close()
+		_ = groupCh.Close()
+		return nil, err
+	}
+	if err := groupCh.Qos(orDefault(cfg.GroupPrefetch, DefaultGroupPrefetch), 0, false); err != nil {
+		_ = sendCh.Close()
+		_ = pairCh.Close()
+		_ = callCh.Close()
+		_ = groupCh.Close()
+		return nil, fmt.Errorf("amqp: set qos on gateway.group channel: %w", err)
+	}
+	if err := groupCh.Confirm(false); err != nil {
+		_ = sendCh.Close()
+		_ = pairCh.Close()
+		_ = callCh.Close()
+		_ = groupCh.Close()
+		return nil, fmt.Errorf("amqp: enable confirms on gateway.group channel: %w", err)
+	}
+
 	return &Consumer{
-		sendCh: sendCh,
-		pairCh: pairCh,
-		callCh: callCh,
-		failed: make(chan error, 1),
+		sendCh:           sendCh,
+		pairCh:           pairCh,
+		callCh:           callCh,
+		groupCh:          groupCh,
+		groupPrefetch:    orDefault(cfg.GroupPrefetch, DefaultGroupPrefetch),
+		groupLaneBacklog: orDefault(cfg.GroupLaneBacklog, DefaultGroupLaneBacklog),
+		failed:           make(chan error, 1),
 	}, nil
 }
 
@@ -114,18 +155,30 @@ func (c *Consumer) StartCall(ctx context.Context, handler CallHandler) error {
 	}
 	c.callStarted = true
 	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		for d := range deliveries {
-			var cmd GatewayCallCommand
-			handlerErr := json.Unmarshal(d.Body, &cmd)
-			if handlerErr == nil {
-				handlerErr = handler(ctx, cmd)
-			}
-			settle(d, handlerErr)
+	go c.consumeSerially(GatewayCallQueue, deliveries, func(d rabbitmq.Delivery) error {
+		var cmd GatewayCallCommand
+		if err := json.Unmarshal(d.Body, &cmd); err != nil {
+			return err
 		}
-		c.reportFailure(fmt.Errorf("amqp: %s consumer stopped: broker closed the delivery channel", GatewayCallQueue))
-	}()
+		return handler(ctx, cmd)
+	})
+	return nil
+}
+
+func (c *Consumer) StartGroup(ctx context.Context, handler GroupHandler) error {
+	deliveries, err := c.groupCh.Consume(GatewayGroupQueue, GatewayGroupConsumer, false, false, false, false, nil)
+	if err != nil {
+		return fmt.Errorf("amqp: consume %s: %w", GatewayGroupQueue, err)
+	}
+	c.groupStarted = true
+	c.wg.Add(1)
+	go c.consumePerChannel(GatewayGroupQueue, deliveries, func(d rabbitmq.Delivery) (laneJob, error) {
+		var cmd GatewayGroupCommand
+		if err := json.Unmarshal(d.Body, &cmd); err != nil {
+			return laneJob{}, err
+		}
+		return laneJob{channelID: cmd.ChannelID, handle: func() error { return handler(ctx, cmd) }}, nil
+	})
 	return nil
 }
 
@@ -136,18 +189,13 @@ func (c *Consumer) StartSend(ctx context.Context, handler SendHandler) error {
 	}
 	c.sendStarted = true
 	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		for d := range deliveries {
-			var cmd GatewaySendCommand
-			handlerErr := json.Unmarshal(d.Body, &cmd)
-			if handlerErr == nil {
-				handlerErr = handler(ctx, cmd)
-			}
-			settle(d, handlerErr)
+	go c.consumeSerially(GatewaySendQueue, deliveries, func(d rabbitmq.Delivery) error {
+		var cmd GatewaySendCommand
+		if err := json.Unmarshal(d.Body, &cmd); err != nil {
+			return err
 		}
-		c.reportFailure(fmt.Errorf("amqp: %s consumer stopped: broker closed the delivery channel", GatewaySendQueue))
-	}()
+		return handler(ctx, cmd)
+	})
 	return nil
 }
 
@@ -193,6 +241,25 @@ func runPairSession(ctx context.Context, handler PairHandler, cmd PairCommand, d
 	settled.Do(func() { settle(d, err) })
 }
 
+var ErrRequeue = errors.New("amqp: return the delivery to the queue once this consumer stops")
+
+func (c *Consumer) consumeSerially(queue string, deliveries <-chan rabbitmq.Delivery, handle func(rabbitmq.Delivery) error) {
+	defer c.wg.Done()
+	var requeue []rabbitmq.Delivery
+	for d := range deliveries {
+		err := handle(d)
+		if errors.Is(err, ErrRequeue) {
+			requeue = append(requeue, d)
+			continue
+		}
+		settle(d, err)
+	}
+	for _, d := range requeue {
+		_ = d.Nack(false, true)
+	}
+	c.reportFailure(fmt.Errorf("amqp: %s consumer stopped: broker closed the delivery channel", queue))
+}
+
 func settle(d rabbitmq.Delivery, err error) {
 	if err != nil {
 		_ = d.Nack(false, false)
@@ -220,6 +287,11 @@ func (c *Consumer) Close() error {
 			errs = append(errs, fmt.Errorf("amqp: cancel %s consumer: %w", GatewayCallQueue, err))
 		}
 	}
+	if c.groupStarted {
+		if err := c.groupCh.Cancel(GatewayGroupConsumer, false); err != nil {
+			errs = append(errs, fmt.Errorf("amqp: cancel %s consumer: %w", GatewayGroupQueue, err))
+		}
+	}
 	c.wg.Wait()
 	if err := c.sendCh.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("amqp: close gateway.send channel: %w", err))
@@ -229,6 +301,9 @@ func (c *Consumer) Close() error {
 	}
 	if err := c.callCh.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("amqp: close gateway.call channel: %w", err))
+	}
+	if err := c.groupCh.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("amqp: close gateway.group channel: %w", err))
 	}
 	return errors.Join(errs...)
 }

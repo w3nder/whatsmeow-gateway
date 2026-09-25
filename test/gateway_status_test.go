@@ -8,6 +8,7 @@ import (
 	"time"
 
 	rabbitmq "github.com/rabbitmq/amqp091-go"
+	goredis "github.com/redis/go-redis/v9"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 
@@ -22,49 +23,21 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
 )
 
-func setupStatusRoundtripGateway(t *testing.T, fake *fakeWAClient, channelID string) (probeCh *rabbitmq.Channel, deliveries <-chan rabbitmq.Delivery, dedupeStore *dedupe.Store, cancel context.CancelFunc, runErrCh chan error) {
+type gatewayInfra struct {
+	conn     *rabbitmq.Connection
+	redis    *goredis.Client
+	dedupe   *dedupe.Store
+	registry *registry.Store
+}
+
+func startGatewayInfra(t *testing.T, channelID string) *gatewayInfra {
 	t.Helper()
 
 	conn := startRabbitMQ(t)
 	redisClient := startRedis(t)
 
-	consumer, err := gatewayamqp.NewConsumer(conn, gatewayamqp.ConsumerConfig{Prefetch: 10})
-	if err != nil {
-		t.Fatalf("NewConsumer failed: %v", err)
-	}
-
-	publisher, err := gatewayamqp.NewPublisher(conn)
-	if err != nil {
-		t.Fatalf("NewPublisher failed: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := publisher.Close(); err != nil {
-			t.Errorf("publisher.Close failed: %v", err)
-		}
-	})
-
-	const shardCount = 4
-	ownershipStore := ownership.NewStore(redisClient, shardCount)
-
-	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
-		return fake, nil
-	})
-
-	mediaStore, err := media.NewS3Store(context.Background(), media.S3Config{
-		Bucket:          "gateway-status-roundtrip-unused",
-		Region:          "us-east-1",
-		Endpoint:        "http://127.0.0.1:1",
-		AccessKeyID:     "unused",
-		SecretAccessKey: "unused",
-	})
-	if err != nil {
-		t.Fatalf("NewS3Store failed: %v", err)
-	}
-
-	_, logger := logging.New()
-
 	dsn := startPostgresForGateway(t)
-	dedupeStore, err = dedupe.Open(context.Background(), dsn)
+	dedupeStore, err := dedupe.Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatalf("dedupe.Open failed: %v", err)
 	}
@@ -81,6 +54,76 @@ func setupStatusRoundtripGateway(t *testing.T, fake *fakeWAClient, channelID str
 		t.Fatalf("registry.Save failed: %v", err)
 	}
 
+	return &gatewayInfra{conn: conn, redis: redisClient, dedupe: dedupeStore, registry: registryStore}
+}
+
+func gatewayDepsOn(t *testing.T, infra *gatewayInfra, fake *fakeWAClient, name string) gateway.Deps {
+	t.Helper()
+
+	consumer, err := gatewayamqp.NewConsumer(infra.conn, gatewayamqp.ConsumerConfig{Prefetch: 10})
+	if err != nil {
+		t.Fatalf("NewConsumer failed: %v", err)
+	}
+
+	publisher, err := gatewayamqp.NewPublisher(infra.conn)
+	if err != nil {
+		t.Fatalf("NewPublisher failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := publisher.Close(); err != nil {
+			t.Errorf("publisher.Close failed: %v", err)
+		}
+	})
+
+	const shardCount = 4
+	ownershipStore := ownership.NewStore(infra.redis, shardCount)
+
+	mgr := session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
+		return fake, nil
+	})
+
+	mediaStore, err := media.NewS3Store(context.Background(), media.S3Config{
+		Bucket:          name + "-unused",
+		Region:          "us-east-1",
+		Endpoint:        "http://127.0.0.1:1",
+		AccessKeyID:     "unused",
+		SecretAccessKey: "unused",
+	})
+	if err != nil {
+		t.Fatalf("NewS3Store failed: %v", err)
+	}
+
+	_, logger := logging.New()
+
+	return gateway.Deps{
+		Rpc:                  gatewayamqp.NewRpcServer(infra.conn, 4, logger),
+		Consumer:             consumer,
+		Publisher:            publisher,
+		Manager:              mgr,
+		Ownership:            ownershipStore,
+		Dedupe:               infra.dedupe,
+		Registry:             infra.registry,
+		MediaStore:           mediaStore,
+		InstanceID:           name + "-instance",
+		ShardLockTTL:         30 * time.Second,
+		ShutdownDrainTimeout: 10 * time.Second,
+		Logger:               logger,
+	}
+}
+
+func bootGatewayDeps(t *testing.T, fake *fakeWAClient, channelID, name string) (*rabbitmq.Connection, gateway.Deps) {
+	t.Helper()
+	infra := startGatewayInfra(t, channelID)
+	return infra.conn, gatewayDepsOn(t, infra, fake, name)
+}
+
+func setupStatusRoundtripGateway(t *testing.T, fake *fakeWAClient, channelID string) (probeCh *rabbitmq.Channel, deliveries <-chan rabbitmq.Delivery, dedupeStore *dedupe.Store, cancel context.CancelFunc, runErrCh chan error) {
+	t.Helper()
+
+	conn, deps := bootGatewayDeps(t, fake, channelID, "gateway-status-roundtrip")
+	dedupeStore = deps.Dedupe
+
+	var err error
 	probeCh, err = conn.Channel()
 	if err != nil {
 		t.Fatalf("failed to open probe channel: %v", err)
@@ -108,19 +151,7 @@ func setupStatusRoundtripGateway(t *testing.T, fake *fakeWAClient, channelID str
 
 	runErrCh = make(chan error, 1)
 	go func() {
-		runErrCh <- gateway.Run(ctx, gateway.Deps{
-			Consumer:             consumer,
-			Publisher:            publisher,
-			Manager:              mgr,
-			Ownership:            ownershipStore,
-			Dedupe:               dedupeStore,
-			Registry:             registryStore,
-			MediaStore:           mediaStore,
-			InstanceID:           "gateway-status-roundtrip-instance",
-			ShardLockTTL:         30 * time.Second,
-			ShutdownDrainTimeout: 10 * time.Second,
-			Logger:               logger,
-		})
+		runErrCh <- gateway.Run(ctx, deps)
 	}()
 
 	return probeCh, deliveries, dedupeStore, cancel, runErrCh

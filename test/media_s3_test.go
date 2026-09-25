@@ -10,17 +10,20 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/minio"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/media"
 )
 
-const minioImage = "quay.io/minio/minio:RELEASE.2024-01-16T16-07-38Z"
+const minioImage = "alpine/minio:RELEASE.2025-10-15T17-29-55Z"
+
+var minioServerOnUserDir = testcontainers.WithCmd("server", "/home/minio/data")
 
 func TestS3StorePutRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
-	container, err := minio.Run(ctx, minioImage)
+	container, err := minio.Run(ctx, minioImage, minioServerOnUserDir)
 	if err != nil {
 		t.Fatalf("failed to start minio container: %v", err)
 	}
@@ -87,7 +90,7 @@ func TestS3StorePutRoundTrip(t *testing.T) {
 func TestS3StorePutMissingBucketFails(t *testing.T) {
 	ctx := context.Background()
 
-	container, err := minio.Run(ctx, minioImage)
+	container, err := minio.Run(ctx, minioImage, minioServerOnUserDir)
 	if err != nil {
 		t.Fatalf("failed to start minio container: %v", err)
 	}

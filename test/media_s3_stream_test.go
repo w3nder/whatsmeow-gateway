@@ -16,7 +16,7 @@ import (
 func TestS3StorePutStreamRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
-	container, err := minio.Run(ctx, minioImage)
+	container, err := minio.Run(ctx, minioImage, minioServerOnUserDir)
 	if err != nil {
 		t.Fatalf("failed to start minio container: %v", err)
 	}

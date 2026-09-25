@@ -16,6 +16,9 @@ const (
 	ChannelStatusRoutingKey = "channel.status"
 	GroupInboundRoutingKey  = "whatsapp.group.inbound.v1"
 	GroupStatusRoutingKey   = "whatsapp.group.status.v1"
+
+	GroupActionRoutingKey       = "whatsapp.group.action.v1"
+	GroupParticipantsRoutingKey = "whatsapp.group.participants.v1"
 )
 
 const (
@@ -36,7 +39,19 @@ const (
 	GatewayPairDLX      = "gateway.pair.dlx"
 	GatewayPairDLQ      = "gateway.pair.dlq"
 	GatewayPairConsumer = "whatsmeow-gateway.pair"
+
+	GatewayGroupExchange = "whatsapp.gateway.group.v1"
+	GatewayGroupQueue    = "gateway.group"
+	GatewayGroupDLX      = "gateway.group.dlx"
+	GatewayGroupDLQ      = "gateway.group.dlq"
+	GatewayGroupConsumer = "whatsmeow-gateway.group"
 )
+
+const RpcQueuePrefix = "rpc.gateway."
+
+func RpcQueueName(operation string) string {
+	return RpcQueuePrefix + operation
+}
 
 func assertEventsExchange(ch *rabbitmq.Channel) error {
 	if err := ch.ExchangeDeclare(EventsExchange, "topic", true, false, false, false, nil); err != nil {

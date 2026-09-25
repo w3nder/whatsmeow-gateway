@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -31,6 +32,7 @@ import (
 )
 
 type Deps struct {
+	Rpc                  *amqp.RpcServer
 	Consumer             *amqp.Consumer
 	Publisher            *amqp.Publisher
 	Manager              *session.Manager
@@ -42,12 +44,14 @@ type Deps struct {
 	ShardLockTTL         time.Duration
 	SendTimeout          time.Duration
 	ShutdownDrainTimeout time.Duration
+	RpcDrainTimeout      time.Duration
 	CallOptions          call.Options
 	OnCallManager        func(*call.Manager)
 	Logger               *slog.Logger
 }
 
 type gateway struct {
+	rpc                  *amqp.RpcServer
 	consumer             *amqp.Consumer
 	publisher            *amqp.Publisher
 	manager              *session.Manager
@@ -57,14 +61,17 @@ type gateway struct {
 	mediaStore           mapper.MediaStore
 	avatars              *avatar.Cache
 	groups               *groupinfo.Cache
+	pacer                *channelPacer
 	calls                *call.Manager
 	instanceID           string
 	shardLockTTL         time.Duration
 	sendTimeout          time.Duration
 	shutdownDrainTimeout time.Duration
+	rpcDrainTimeout      time.Duration
 	logger               *slog.Logger
 
-	workCtx context.Context
+	workCtx  context.Context
+	stopping atomic.Bool
 
 	tenantMu        sync.RWMutex
 	tenantByChannel map[string]string
@@ -72,6 +79,7 @@ type gateway struct {
 
 func Run(ctx context.Context, deps Deps) error {
 	g := &gateway{
+		rpc:                  deps.Rpc,
 		consumer:             deps.Consumer,
 		publisher:            deps.Publisher,
 		manager:              deps.Manager,
@@ -81,10 +89,12 @@ func Run(ctx context.Context, deps Deps) error {
 		mediaStore:           deps.MediaStore,
 		avatars:              avatar.New(deps.MediaStore, fetchMediaURL, avatar.Options{}, deps.Logger),
 		groups:               groupinfo.New(groupinfo.Options{}, deps.Logger),
+		pacer:                newChannelPacer(),
 		instanceID:           deps.InstanceID,
 		shardLockTTL:         deps.ShardLockTTL,
 		sendTimeout:          sendTimeout(deps.SendTimeout),
 		shutdownDrainTimeout: deps.ShutdownDrainTimeout,
+		rpcDrainTimeout:      rpcDrainTimeout(deps.RpcDrainTimeout),
 		logger:               deps.Logger,
 		workCtx:              context.WithoutCancel(ctx),
 		tenantByChannel:      make(map[string]string),
@@ -201,6 +211,15 @@ func sendTimeout(d time.Duration) time.Duration {
 	return d
 }
 
+const defaultRpcDrainTimeout = 30 * time.Second
+
+func rpcDrainTimeout(d time.Duration) time.Duration {
+	if d <= 0 {
+		return defaultRpcDrainTimeout
+	}
+	return d
+}
+
 func (g *gateway) run(ctx context.Context) error {
 	if err := g.ownership.ClaimAll(ctx, g.instanceID, g.shardLockTTL); err != nil {
 		return fmt.Errorf("gateway: claim shards: %w", err)
@@ -225,6 +244,18 @@ func (g *gateway) run(ctx context.Context) error {
 		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
 		return fmt.Errorf("gateway: start call consumer: %w", err)
 	}
+	groupCtx, cancelGroups := context.WithCancel(ctx)
+	defer cancelGroups()
+	if err := g.consumer.StartGroup(groupCtx, g.GroupHandler); err != nil {
+		g.closeConsumerForFailedBoot()
+		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
+		return fmt.Errorf("gateway: start group consumer: %w", err)
+	}
+	if err := g.registerGroupRpc(g.workCtx); err != nil {
+		g.closeConsumerForFailedBoot()
+		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
+		return fmt.Errorf("gateway: start group rpc: %w", err)
+	}
 
 	g.logger.Info("gateway started", "instance_id", g.instanceID)
 
@@ -235,9 +266,14 @@ func (g *gateway) run(ctx context.Context) error {
 	case consumerErr := <-g.consumer.Failed():
 		fatal = fmt.Errorf("gateway: amqp consumer died: %w", consumerErr)
 		g.logger.Error("gateway: amqp consumer died, shutting down for restart", "error", consumerErr)
+	case rpcErr := <-g.rpc.Failed():
+		fatal = fmt.Errorf("gateway: rpc server died: %w", rpcErr)
+		g.logger.Error("gateway: rpc server died, shutting down for restart", "error", rpcErr)
 	}
 
-	g.closeConsumerWithDrainDeadline()
+	g.stopping.Store(true)
+	cancelGroups()
+	g.drainConsumers()
 
 	g.calls.AbortAll(g.workCtx, "gateway_shutdown")
 	g.calls.WaitForRecordings(g.shutdownDrainTimeout)
@@ -286,24 +322,38 @@ func (g *gateway) resumeOwnedSessions(ctx context.Context) {
 }
 
 func (g *gateway) closeConsumerForFailedBoot() {
-	if err := g.consumer.Close(); err != nil {
+	if err := errors.Join(g.consumer.Close(), g.rpc.Close()); err != nil {
 		g.logger.Error("gateway: close consumer after failed boot", "error", err)
 	}
 }
 
-func (g *gateway) closeConsumerWithDrainDeadline() {
-	done := make(chan error, 1)
+func (g *gateway) drainConsumers() {
+	var drains sync.WaitGroup
+	drains.Add(2)
 	go func() {
-		done <- g.consumer.Close()
+		defer drains.Done()
+		g.drainWithin("consumer", g.shutdownDrainTimeout, g.consumer.Close)
 	}()
+	go func() {
+		defer drains.Done()
+		g.drainWithin("rpc", g.rpcDrainTimeout, g.rpc.Close)
+	}()
+	drains.Wait()
+}
 
+func (g *gateway) drainWithin(name string, timeout time.Duration, closeFn func() error) {
+	done := make(chan error, 1)
+	go func() { done <- closeFn() }()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case err := <-done:
 		if err != nil {
-			g.logger.Error("gateway: close consumer", "error", err)
+			g.logger.Error("gateway: close "+name, "error", err)
 		}
-	case <-time.After(g.shutdownDrainTimeout):
-		g.logger.Error("gateway: consumer drain deadline exceeded, proceeding with shutdown", "timeout", g.shutdownDrainTimeout)
+	case <-timer.C:
+		g.logger.Error("gateway: "+name+" drain deadline exceeded, proceeding with shutdown", "timeout", timeout)
 	}
 }
 
@@ -582,9 +632,7 @@ func (g *gateway) handleSessionEvent(channelID string, evt any) {
 	case *events.Receipt:
 		g.handleReceipt(channelID, e)
 	case *events.GroupInfo:
-		if e.Name != nil {
-			g.groups.Invalidate(channelID, e.JID)
-		}
+		g.handleGroupInfo(channelID, e)
 	case *events.LoggedOut:
 		g.clearTenant(channelID)
 		if err := g.registry.Delete(g.workCtx, channelID); err != nil {
@@ -802,13 +850,29 @@ func NewWAClientFactory(container *sqlstore.Container, waLogger waLog.Logger, sl
 	}
 }
 
+const (
+	groupPhotoFetchTimeout = 20 * time.Second
+	maxGroupPhotoBytes     = 8 << 20
+)
+
+var groupPhotoHTTPClient = &http.Client{Timeout: groupPhotoFetchTimeout}
+
 func fetchMediaURL(ctx context.Context, url string) ([]byte, error) {
+	return fetchURL(ctx, http.DefaultClient, url, nil)
+}
+
+func fetchGroupPhoto(ctx context.Context, url string) ([]byte, error) {
+	limit := int64(maxGroupPhotoBytes)
+	return fetchURL(ctx, groupPhotoHTTPClient, url, &limit)
+}
+
+func fetchURL(ctx context.Context, client *http.Client, url string, limit *int64) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("gateway: build media fetch request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("gateway: fetch media %s: %w", url, err)
 	}
@@ -818,9 +882,16 @@ func fetchMediaURL(ctx context.Context, url string) ([]byte, error) {
 		return nil, fmt.Errorf("gateway: fetch media %s: unexpected status %d", url, resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	var body io.Reader = resp.Body
+	if limit != nil {
+		body = io.LimitReader(resp.Body, *limit+1)
+	}
+	data, err := io.ReadAll(body)
 	if err != nil {
 		return nil, fmt.Errorf("gateway: read media %s: %w", url, err)
+	}
+	if limit != nil && int64(len(data)) > *limit {
+		return nil, fmt.Errorf("gateway: media %s exceeds %d bytes", url, *limit)
 	}
 	return data, nil
 }

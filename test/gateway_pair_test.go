@@ -92,6 +92,7 @@ func setupPairGateway(t *testing.T, factory session.ClientFactory) (probeCh *rab
 	runErrCh = make(chan error, 1)
 	go func() {
 		runErrCh <- gateway.Run(ctx, gateway.Deps{
+			Rpc:                  gatewayamqp.NewRpcServer(conn, 4, logger),
 			Consumer:             consumer,
 			Publisher:            publisher,
 			Manager:              session.NewManager(factory),

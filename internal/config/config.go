@@ -3,8 +3,12 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
+	"github.com/w3nder/whatsmeow-gateway/internal/ownership"
 )
 
 type Config struct {
@@ -20,9 +24,11 @@ type Config struct {
 	ShardCount           int
 	SendPacePerSec       float64
 	Prefetch             int
+	GroupPrefetch        int
 	ShardLockTTL         time.Duration
 	SendTimeout          time.Duration
 	ShutdownDrainTimeout time.Duration
+	RpcDrainTimeout      time.Duration
 	CallTmpDir           string
 	CallRecord           bool
 	CallMediaAddr        string
@@ -41,12 +47,14 @@ func Load() (Config, error) {
 		S3Endpoint:           os.Getenv("S3_ENDPOINT"),
 		S3AccessKeyID:        os.Getenv("S3_ACCESS_KEY_ID"),
 		S3SecretAccessKey:    os.Getenv("S3_SECRET_ACCESS_KEY"),
-		ShardCount:           1024,
+		ShardCount:           ownership.DefaultShardCount,
 		SendPacePerSec:       1,
 		Prefetch:             32,
+		GroupPrefetch:        amqp.DefaultGroupPrefetch,
 		ShardLockTTL:         24 * time.Hour,
 		SendTimeout:          30 * time.Second,
 		ShutdownDrainTimeout: 20 * time.Second,
+		RpcDrainTimeout:      30 * time.Second,
 		CallTmpDir:           os.Getenv("GATEWAY_CALL_TMPDIR"),
 		CallRecord:           os.Getenv("GATEWAY_CALL_RECORD") != "false",
 		CallMediaAddr:        os.Getenv("CALL_MEDIA_ADDR"),
@@ -55,6 +63,13 @@ func Load() (Config, error) {
 	}
 	if c.AMQPURL == "" || c.SessionDSN == "" || c.RedisURL == "" || c.InstanceID == "" {
 		return Config{}, fmt.Errorf("missing required env (GATEWAY_INSTANCE_ID, AMQP_URL, SESSION_DATABASE_URL, REDIS_URL)")
+	}
+	if raw := os.Getenv("GROUP_PREFETCH"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			return Config{}, fmt.Errorf("GROUP_PREFETCH must be a positive integer, got %q", raw)
+		}
+		c.GroupPrefetch = n
 	}
 	if c.CallMediaAddr != "" && c.CallMediaTokenSecret == "" {
 		return Config{}, fmt.Errorf("CALL_MEDIA_TOKEN_SECRET is required when CALL_MEDIA_ADDR is set")

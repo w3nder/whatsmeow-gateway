@@ -99,7 +99,7 @@ func TestGatewayInboundCallRecordsAndPublishes(t *testing.T) {
 	conn := startRabbitMQ(t)
 	redisClient := startRedis(t)
 
-	minioContainer, err := minio.Run(ctx, minioImage)
+	minioContainer, err := minio.Run(ctx, minioImage, minioServerOnUserDir)
 	if err != nil {
 		t.Fatalf("failed to start minio container: %v", err)
 	}
@@ -196,6 +196,7 @@ func TestGatewayInboundCallRecordsAndPublishes(t *testing.T) {
 	runErrCh := make(chan error, 1)
 	go func() {
 		runErrCh <- gateway.Run(runCtx, gateway.Deps{
+			Rpc:                  gatewayamqp.NewRpcServer(conn, 4, logger),
 			Consumer:             consumer,
 			Publisher:            publisher,
 			Manager:              mgr,

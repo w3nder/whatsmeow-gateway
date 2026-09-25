@@ -2,6 +2,8 @@ package test
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -49,6 +51,31 @@ type fakeWAClient struct {
 	handlers []func(any)
 
 	caller call.Caller
+
+	groups           map[string]*types.GroupInfo
+	createdGroups    []whatsmeow.ReqCreateGroup
+	announceCalls    map[string]bool
+	nameCalls        map[string][]string
+	topicCalls       map[string]string
+	photoCalls       map[string][]byte
+	participantCalls []participantCall
+	inviteLinks      map[string]string
+	groupErr         error
+	nextGroupSeq     int
+	announceDelay    time.Duration
+	announceCount    int
+	announceEntered  int
+	announceStartsAt []time.Time
+	dropAfterLocks   int
+	topicSeq         int
+	createDelay      time.Duration
+	createEntered    int
+}
+
+type participantCall struct {
+	group        string
+	participants []types.JID
+	change       whatsmeow.ParticipantChange
 }
 
 var _ session.WAClient = (*fakeWAClient)(nil)
@@ -127,6 +154,10 @@ func (f *fakeWAClient) DeviceJID() *types.JID {
 	return f.deviceJID
 }
 
+func (f *fakeWAClient) DeviceLID() types.JID {
+	return types.EmptyJID
+}
+
 func (f *fakeWAClient) DisplayName() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -185,8 +216,152 @@ func (f *fakeWAClient) GetProfilePictureInfo(ctx context.Context, jid types.JID,
 	return nil, whatsmeow.ErrProfilePictureNotSet
 }
 
+func (f *fakeWAClient) CreateGroup(ctx context.Context, req whatsmeow.ReqCreateGroup) (*types.GroupInfo, error) {
+	f.mu.Lock()
+	f.createEntered++
+	delay := f.createDelay
+	f.mu.Unlock()
+	time.Sleep(delay)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.groupErr != nil {
+		return nil, f.groupErr
+	}
+	f.nextGroupSeq++
+	jid := types.NewJID(fmt.Sprintf("12036342254761%04d", f.nextGroupSeq), types.GroupServer)
+	info := &types.GroupInfo{JID: jid, GroupCreated: time.Now()}
+	info.Name = req.Name
+	info.IsAnnounce = req.IsAnnounce
+	info.Participants = []types.GroupParticipant{{JID: types.NewJID("15550000000", types.DefaultUserServer), IsSuperAdmin: true}}
+	if f.groups == nil {
+		f.groups = map[string]*types.GroupInfo{}
+	}
+	f.groups[jid.String()] = info
+	f.createdGroups = append(f.createdGroups, req)
+	return info, nil
+}
+
 func (f *fakeWAClient) GetGroupInfo(ctx context.Context, jid types.JID) (*types.GroupInfo, error) {
-	return nil, whatsmeow.ErrIQTimedOut
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if info, ok := f.groups[jid.String()]; ok {
+		return info, nil
+	}
+	return nil, whatsmeow.ErrGroupNotFound
+}
+
+func (f *fakeWAClient) GetGroupInviteLink(ctx context.Context, jid types.JID, reset bool) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.groupErr != nil {
+		return "", f.groupErr
+	}
+	if _, ok := f.groups[jid.String()]; !ok {
+		return "", whatsmeow.ErrGroupNotFound
+	}
+	if f.inviteLinks == nil {
+		f.inviteLinks = map[string]string{}
+	}
+	if link, ok := f.inviteLinks[jid.String()]; ok && !reset {
+		return link, nil
+	}
+	link := whatsmeow.InviteLinkPrefix + jid.User + "-" + strconv.Itoa(len(f.inviteLinks)+1)
+	f.inviteLinks[jid.String()] = link
+	return link, nil
+}
+
+func (f *fakeWAClient) SetGroupAnnounce(ctx context.Context, jid types.JID, announce bool) error {
+	f.mu.Lock()
+	f.announceEntered++
+	f.announceStartsAt = append(f.announceStartsAt, time.Now())
+	delay := f.announceDelay
+	f.mu.Unlock()
+	time.Sleep(delay)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.announceCount++
+	if f.groupErr != nil {
+		return f.groupErr
+	}
+	if !f.connected {
+		return whatsmeow.ErrNotConnected
+	}
+	if _, ok := f.groups[jid.String()]; !ok {
+		return whatsmeow.ErrGroupNotFound
+	}
+	if f.announceCalls == nil {
+		f.announceCalls = map[string]bool{}
+	}
+	f.announceCalls[jid.String()] = announce
+	if info, ok := f.groups[jid.String()]; ok {
+		info.IsAnnounce = announce
+	}
+	if f.dropAfterLocks > 0 && len(f.announceCalls) >= f.dropAfterLocks {
+		f.connected = false
+	}
+	return nil
+}
+
+func (f *fakeWAClient) SetGroupName(ctx context.Context, jid types.JID, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.nameCalls == nil {
+		f.nameCalls = map[string][]string{}
+	}
+	f.nameCalls[jid.String()] = append(f.nameCalls[jid.String()], name)
+	return f.groupErr
+}
+
+func (f *fakeWAClient) SetGroupTopic(ctx context.Context, jid types.JID, previousID, topic string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.topicCalls == nil {
+		f.topicCalls = map[string]string{}
+	}
+	f.topicCalls[jid.String()] = topic
+	if f.groupErr != nil {
+		return f.groupErr
+	}
+	if info, ok := f.groups[jid.String()]; ok {
+		if info.TopicID != previousID {
+			return fmt.Errorf("fake: topic of %s moved from %q, the caller sent %q", jid, info.TopicID, previousID)
+		}
+		info.Topic = topic
+		f.topicSeq++
+		info.TopicID = "topic-" + strconv.Itoa(f.topicSeq)
+	}
+	return nil
+}
+
+func (f *fakeWAClient) SetGroupPhoto(ctx context.Context, jid types.JID, jpeg []byte) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.photoCalls == nil {
+		f.photoCalls = map[string][]byte{}
+	}
+	f.photoCalls[jid.String()] = jpeg
+	return "pic-1", f.groupErr
+}
+
+func (f *fakeWAClient) UpdateGroupParticipants(ctx context.Context, jid types.JID, participants []types.JID, change whatsmeow.ParticipantChange) ([]types.GroupParticipant, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.participantCalls = append(f.participantCalls, participantCall{group: jid.String(), participants: participants, change: change})
+	out := make([]types.GroupParticipant, 0, len(participants))
+	for _, p := range participants {
+		out = append(out, types.GroupParticipant{JID: p})
+	}
+	return out, f.groupErr
+}
+
+func (f *fakeWAClient) GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]*types.GroupInfo, 0, len(f.groups))
+	for _, info := range f.groups {
+		out = append(out, info)
+	}
+	return out, f.groupErr
 }
 
 func (f *fakeWAClient) AddEventHandler(handler func(any)) uint32 {
@@ -221,6 +396,37 @@ func (f *fakeWAClient) markPaired() {
 	f.mu.Lock()
 	f.deviceJID = &jid
 	f.mu.Unlock()
+}
+
+func (f *fakeWAClient) addGroupParticipant(group string, participant types.GroupParticipant) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	info := f.groups[group]
+	info.Participants = append(info.Participants, participant)
+}
+
+func (f *fakeWAClient) announceStarts() []time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]time.Time{}, f.announceStartsAt...)
+}
+
+func (f *fakeWAClient) announceEnteredCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.announceEntered
+}
+
+func (f *fakeWAClient) createEnteredCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.createEntered
+}
+
+func (f *fakeWAClient) announceCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.announceCount
 }
 
 func (f *fakeWAClient) handlerCountAtConnect() int {
