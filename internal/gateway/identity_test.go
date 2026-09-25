@@ -78,9 +78,9 @@ func (c *identityClient) CreateGroup(context.Context, whatsmeow.ReqCreateGroup) 
 func (c *identityClient) GetGroupInviteLink(context.Context, types.JID, bool) (string, error) {
 	return "", nil
 }
-func (c *identityClient) SetGroupAnnounce(context.Context, types.JID, bool) error { return nil }
-func (c *identityClient) SetGroupName(context.Context, types.JID, string) error   { return nil }
-func (c *identityClient) SetGroupTopic(context.Context, types.JID, string) error  { return nil }
+func (c *identityClient) SetGroupAnnounce(context.Context, types.JID, bool) error        { return nil }
+func (c *identityClient) SetGroupName(context.Context, types.JID, string) error          { return nil }
+func (c *identityClient) SetGroupTopic(context.Context, types.JID, string, string) error { return nil }
 func (c *identityClient) SetGroupPhoto(context.Context, types.JID, []byte) (string, error) {
 	return "", nil
 }

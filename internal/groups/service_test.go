@@ -19,23 +19,24 @@ import (
 )
 
 type stubClient struct {
-	created        []whatsmeow.ReqCreateGroup
-	topics         map[string]string
-	photos         map[string][]byte
-	announce       map[string]bool
-	names          map[string]string
-	removed        map[string][]types.JID
-	info           map[string]*types.GroupInfo
-	inviteErr      error
-	inviteFailures int
-	inviteCalls    int
-	createErr      error
-	photoErr       error
-	own            *types.JID
-	ownLID         types.JID
-	refused        map[string]bool
-	bareCreate     bool
-	lidErr         error
+	created          []whatsmeow.ReqCreateGroup
+	topics           map[string]string
+	photos           map[string][]byte
+	announce         map[string]bool
+	names            map[string]string
+	removed          map[string][]types.JID
+	info             map[string]*types.GroupInfo
+	inviteErr        error
+	inviteFailures   int
+	inviteCalls      int
+	createErr        error
+	photoErr         error
+	own              *types.JID
+	ownLID           types.JID
+	refused          map[string]bool
+	bareCreate       bool
+	lidErr           error
+	previousTopicIDs []string
 }
 
 func newStub() *stubClient {
@@ -89,8 +90,9 @@ func (s *stubClient) SetGroupName(_ context.Context, jid types.JID, name string)
 	return nil
 }
 
-func (s *stubClient) SetGroupTopic(_ context.Context, jid types.JID, topic string) error {
+func (s *stubClient) SetGroupTopic(_ context.Context, jid types.JID, previousID, topic string) error {
 	s.topics[jid.String()] = topic
+	s.previousTopicIDs = append(s.previousTopicIDs, previousID)
 	return nil
 }
 
@@ -327,6 +329,7 @@ func TestApplyRemoveParticipantsWithNoMatchIsOkWithZero(t *testing.T) {
 func TestApplyLockUnlockNameDescriptionPhoto(t *testing.T) {
 	stub := newStub()
 	jid := types.NewJID("120363000000000009", types.GroupServer)
+	stub.info[jid.String()] = &types.GroupInfo{JID: jid}
 	ctx := context.Background()
 	if _, err := groups.Apply(ctx, stub, groups.ActionLock, jid, amqp.GroupActionParams{}, nil, slog.Default()); err != nil || !stub.announce[jid.String()] {
 		t.Fatalf("lock: %v %v", err, stub.announce)
@@ -352,6 +355,34 @@ func TestApplyLockUnlockNameDescriptionPhoto(t *testing.T) {
 	}
 	if _, err := groups.Apply(ctx, stub, "explode", jid, amqp.GroupActionParams{}, nil, slog.Default()); err == nil {
 		t.Fatal("unknown action must fail")
+	}
+}
+
+func TestApplySetDescriptionSendsTheCurrentTopicIDAndSkipsAnUnchangedTopic(t *testing.T) {
+	stub := newStub()
+	jid := types.NewJID("120363000000000009", types.GroupServer)
+	info := &types.GroupInfo{JID: jid}
+	info.Topic, info.TopicID = "Antiga", "topic-7"
+	stub.info[jid.String()] = info
+	ctx := context.Background()
+
+	if _, err := groups.Apply(ctx, stub, groups.ActionSetDescription, jid, amqp.GroupActionParams{Description: "Nova"}, nil, slog.Default()); err != nil {
+		t.Fatalf("set_description: %v", err)
+	}
+	if len(stub.previousTopicIDs) != 1 || stub.previousTopicIDs[0] != "topic-7" {
+		t.Fatalf("the current topic id must go as previousID, got %v", stub.previousTopicIDs)
+	}
+
+	info.Topic = "Nova"
+	if _, err := groups.Apply(ctx, stub, groups.ActionSetDescription, jid, amqp.GroupActionParams{Description: "Nova"}, nil, slog.Default()); err != nil {
+		t.Fatalf("set_description unchanged: %v", err)
+	}
+	if len(stub.previousTopicIDs) != 1 {
+		t.Fatalf("an unchanged topic must not be sent again, calls %v", stub.previousTopicIDs)
+	}
+
+	if _, err := groups.Apply(ctx, stub, groups.ActionSetDescription, types.NewJID("120363000000000404", types.GroupServer), amqp.GroupActionParams{Description: "x"}, nil, slog.Default()); err == nil {
+		t.Fatal("a group whatsapp does not know must fail before touching the topic")
 	}
 }
 

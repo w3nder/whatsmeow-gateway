@@ -111,7 +111,7 @@ func (f *recordingClient) SetGroupName(ctx context.Context, jid types.JID, name 
 	return nil
 }
 
-func (f *recordingClient) SetGroupTopic(ctx context.Context, jid types.JID, topic string) error {
+func (f *recordingClient) SetGroupTopic(ctx context.Context, jid types.JID, previousID, topic string) error {
 	return nil
 }
 

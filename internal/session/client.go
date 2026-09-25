@@ -46,7 +46,7 @@ type WAClient interface {
 	GetGroupInviteLink(ctx context.Context, jid types.JID, reset bool) (string, error)
 	SetGroupAnnounce(ctx context.Context, jid types.JID, announce bool) error
 	SetGroupName(ctx context.Context, jid types.JID, name string) error
-	SetGroupTopic(ctx context.Context, jid types.JID, topic string) error
+	SetGroupTopic(ctx context.Context, jid types.JID, previousID, topic string) error
 	SetGroupPhoto(ctx context.Context, jid types.JID, jpeg []byte) (string, error)
 	UpdateGroupParticipants(ctx context.Context, jid types.JID, participants []types.JID, change whatsmeow.ParticipantChange) ([]types.GroupParticipant, error)
 	GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, error)
@@ -184,8 +184,8 @@ func (w *waClient) SetGroupName(ctx context.Context, jid types.JID, name string)
 	return w.client.SetGroupName(ctx, jid, name)
 }
 
-func (w *waClient) SetGroupTopic(ctx context.Context, jid types.JID, topic string) error {
-	return w.client.SetGroupTopic(ctx, jid, "", "", topic)
+func (w *waClient) SetGroupTopic(ctx context.Context, jid types.JID, previousID, topic string) error {
+	return w.client.SetGroupTopic(ctx, jid, previousID, "", topic)
 }
 
 func (w *waClient) SetGroupPhoto(ctx context.Context, jid types.JID, jpeg []byte) (string, error) {

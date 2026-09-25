@@ -305,6 +305,34 @@ func TestGroupCommandSetPhotoFetchesOnceAndPacesTheGroups(t *testing.T) {
 	}
 }
 
+func TestGroupCommandSetDescriptionChainsTheTopicAndSkipsAnUnchangedOne(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.markPaired()
+	conn, cancel, runErrCh := setupGroupGateway(t, fake, "channel-groups")
+	defer shutdownStatusRoundtripGateway(t, cancel, runErrCh)
+	events := probeEvents(t, conn, gatewayamqp.GroupActionRoutingKey)
+
+	probe := newRpcProbe(t, conn)
+	g1 := probe.call(t, "group.create", "a", `{"tenantId":"t","channelId":"channel-groups","name":"G1","description":"Regras"}`, 10*time.Second)["result"].(map[string]any)["groupJid"].(string)
+
+	for _, commandID := range []string{"cmd-desc-1", "cmd-desc-2"} {
+		publishGroupCommand(t, conn, gatewayamqp.GatewayGroupCommand{CommandID: commandID, TenantID: "t", ChannelID: "channel-groups", Action: "set_description", GroupJIDs: []string{g1}, Params: gatewayamqp.GroupActionParams{Description: "Novas regras"}})
+		d := waitForDelivery(t, events, gatewayamqp.GroupActionRoutingKey, 10*time.Second)
+		var evt gatewayamqp.GroupActionEvent
+		if err := json.Unmarshal(d.Body, &evt); err != nil {
+			t.Fatal(err)
+		}
+		if !evt.OK {
+			t.Fatalf("%s: the description must replace the one set on create through its topic id, got %+v", commandID, evt)
+		}
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if info := fake.groups[g1]; info.Topic != "Novas regras" || fake.topicSeq != 2 {
+		t.Fatalf("want the topic set once on create and once by the first command, topic %q after %d changes", info.Topic, fake.topicSeq)
+	}
+}
+
 func drainEvents(events <-chan rabbitmq.Delivery, record func(rabbitmq.Delivery)) {
 	for {
 		select {

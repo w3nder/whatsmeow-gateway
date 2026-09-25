@@ -64,6 +64,7 @@ type fakeWAClient struct {
 	nextGroupSeq     int
 	announceDelay    time.Duration
 	announceCount    int
+	topicSeq         int
 }
 
 type participantCall struct {
@@ -293,14 +294,25 @@ func (f *fakeWAClient) SetGroupName(ctx context.Context, jid types.JID, name str
 	return f.groupErr
 }
 
-func (f *fakeWAClient) SetGroupTopic(ctx context.Context, jid types.JID, topic string) error {
+func (f *fakeWAClient) SetGroupTopic(ctx context.Context, jid types.JID, previousID, topic string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.topicCalls == nil {
 		f.topicCalls = map[string]string{}
 	}
 	f.topicCalls[jid.String()] = topic
-	return f.groupErr
+	if f.groupErr != nil {
+		return f.groupErr
+	}
+	if info, ok := f.groups[jid.String()]; ok {
+		if info.TopicID != previousID {
+			return fmt.Errorf("fake: topic of %s moved from %q, the caller sent %q", jid, info.TopicID, previousID)
+		}
+		info.Topic = topic
+		f.topicSeq++
+		info.TopicID = "topic-" + strconv.Itoa(f.topicSeq)
+	}
+	return nil
 }
 
 func (f *fakeWAClient) SetGroupPhoto(ctx context.Context, jid types.JID, jpeg []byte) (string, error) {

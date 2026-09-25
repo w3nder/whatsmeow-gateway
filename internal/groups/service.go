@@ -60,7 +60,7 @@ func Create(ctx context.Context, c GroupClient, fetch Fetch, req CreateRequest, 
 		return CreateResult{}, Classify(err)
 	}
 	if req.Description != "" {
-		if err := c.SetGroupTopic(ctx, info.JID, req.Description); err != nil {
+		if err := c.SetGroupTopic(ctx, info.JID, info.TopicID, req.Description); err != nil {
 			log.Warn("groups: set description after create", "group_jid", info.JID.String(), "error", err)
 		}
 	}
@@ -152,7 +152,7 @@ func Apply(ctx context.Context, c GroupClient, action string, jid types.JID, par
 		}
 		err = c.SetGroupName(ctx, jid, params.Name)
 	case ActionSetDescription:
-		err = c.SetGroupTopic(ctx, jid, params.Description)
+		return setDescription(ctx, c, jid, params.Description)
 	case ActionSetPhoto:
 		if len(photo) == 0 {
 			return ActionResult{}, amqp.RpcInvalidRequest("photo is required")
@@ -164,6 +164,20 @@ func Apply(ctx context.Context, c GroupClient, action string, jid types.JID, par
 		return ActionResult{}, amqp.RpcInvalidRequest(fmt.Sprintf("unknown action %q", action))
 	}
 	if err != nil {
+		return ActionResult{}, Classify(err)
+	}
+	return ActionResult{}, nil
+}
+
+func setDescription(ctx context.Context, c GroupClient, jid types.JID, description string) (ActionResult, error) {
+	info, err := c.GetGroupInfo(ctx, jid)
+	if err != nil {
+		return ActionResult{}, Classify(err)
+	}
+	if info.Topic == description {
+		return ActionResult{}, nil
+	}
+	if err := c.SetGroupTopic(ctx, jid, info.TopicID, description); err != nil {
 		return ActionResult{}, Classify(err)
 	}
 	return ActionResult{}, nil
