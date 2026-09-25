@@ -141,18 +141,13 @@ func (c *Consumer) StartCall(ctx context.Context, handler CallHandler) error {
 	}
 	c.callStarted = true
 	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		for d := range deliveries {
-			var cmd GatewayCallCommand
-			handlerErr := json.Unmarshal(d.Body, &cmd)
-			if handlerErr == nil {
-				handlerErr = handler(ctx, cmd)
-			}
-			settle(d, handlerErr)
+	go c.consumeSerially(GatewayCallQueue, deliveries, func(d rabbitmq.Delivery) error {
+		var cmd GatewayCallCommand
+		if err := json.Unmarshal(d.Body, &cmd); err != nil {
+			return err
 		}
-		c.reportFailure(fmt.Errorf("amqp: %s consumer stopped: broker closed the delivery channel", GatewayCallQueue))
-	}()
+		return handler(ctx, cmd)
+	})
 	return nil
 }
 
@@ -163,18 +158,13 @@ func (c *Consumer) StartGroup(ctx context.Context, handler GroupHandler) error {
 	}
 	c.groupStarted = true
 	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		for d := range deliveries {
-			var cmd GatewayGroupCommand
-			handlerErr := json.Unmarshal(d.Body, &cmd)
-			if handlerErr == nil {
-				handlerErr = handler(ctx, cmd)
-			}
-			settle(d, handlerErr)
+	go c.consumeSerially(GatewayGroupQueue, deliveries, func(d rabbitmq.Delivery) error {
+		var cmd GatewayGroupCommand
+		if err := json.Unmarshal(d.Body, &cmd); err != nil {
+			return err
 		}
-		c.reportFailure(fmt.Errorf("amqp: %s consumer stopped: broker closed the delivery channel", GatewayGroupQueue))
-	}()
+		return handler(ctx, cmd)
+	})
 	return nil
 }
 
@@ -185,18 +175,13 @@ func (c *Consumer) StartSend(ctx context.Context, handler SendHandler) error {
 	}
 	c.sendStarted = true
 	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		for d := range deliveries {
-			var cmd GatewaySendCommand
-			handlerErr := json.Unmarshal(d.Body, &cmd)
-			if handlerErr == nil {
-				handlerErr = handler(ctx, cmd)
-			}
-			settle(d, handlerErr)
+	go c.consumeSerially(GatewaySendQueue, deliveries, func(d rabbitmq.Delivery) error {
+		var cmd GatewaySendCommand
+		if err := json.Unmarshal(d.Body, &cmd); err != nil {
+			return err
 		}
-		c.reportFailure(fmt.Errorf("amqp: %s consumer stopped: broker closed the delivery channel", GatewaySendQueue))
-	}()
+		return handler(ctx, cmd)
+	})
 	return nil
 }
 
@@ -240,6 +225,25 @@ func runPairSession(ctx context.Context, handler PairHandler, cmd PairCommand, d
 
 	err := handler(ctx, cmd, accept)
 	settled.Do(func() { settle(d, err) })
+}
+
+var ErrRequeue = errors.New("amqp: return the delivery to the queue once this consumer stops")
+
+func (c *Consumer) consumeSerially(queue string, deliveries <-chan rabbitmq.Delivery, handle func(rabbitmq.Delivery) error) {
+	defer c.wg.Done()
+	var requeue []rabbitmq.Delivery
+	for d := range deliveries {
+		err := handle(d)
+		if errors.Is(err, ErrRequeue) {
+			requeue = append(requeue, d)
+			continue
+		}
+		settle(d, err)
+	}
+	for _, d := range requeue {
+		_ = d.Nack(false, true)
+	}
+	c.reportFailure(fmt.Errorf("amqp: %s consumer stopped: broker closed the delivery channel", queue))
 }
 
 func settle(d rabbitmq.Delivery, err error) {
