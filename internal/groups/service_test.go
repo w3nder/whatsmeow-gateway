@@ -195,6 +195,26 @@ func TestApplyRemoveParticipantsResolvesPhonesAgainstTheGroup(t *testing.T) {
 	}
 }
 
+func TestApplyRemoveParticipantsResolvesLIDOnlyParticipantThroughPNForLID(t *testing.T) {
+	stub := newStub()
+	jid := types.NewJID("120363000000000009", types.GroupServer)
+	lid := types.NewJID("2002125877314", types.HiddenUserServer)
+	stub.info[jid.String()] = &types.GroupInfo{JID: jid, Participants: []types.GroupParticipant{
+		{JID: lid, LID: lid},
+	}}
+
+	res, err := groups.Apply(context.Background(), stub, nil, groups.ActionRemoveParticipants, jid, amqp.GroupActionParams{Phones: []string{"5511999887766"}})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if res.Removed == nil || *res.Removed != 1 {
+		t.Fatalf("removed %v, want 1", res.Removed)
+	}
+	if got := stub.removed[jid.String()]; len(got) != 1 || got[0].User != lid.User {
+		t.Fatalf("must remove the lid-only participant resolved through PNForLID, got %v", got)
+	}
+}
+
 func TestApplyRemoveParticipantsWithNoMatchIsOkWithZero(t *testing.T) {
 	stub := newStub()
 	jid := types.NewJID("120363000000000009", types.GroupServer)

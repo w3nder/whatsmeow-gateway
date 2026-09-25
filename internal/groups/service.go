@@ -156,6 +156,15 @@ func removeParticipants(ctx context.Context, c GroupClient, jid types.JID, phone
 		if p.JID.Server == types.DefaultUserServer {
 			if _, ok := wanted[p.JID.User]; ok {
 				targets = append(targets, p.JID)
+				continue
+			}
+		}
+		if p.PhoneNumber.User == "" && p.LID.User != "" {
+			resolved, ok, err := c.PNForLID(ctx, p.LID)
+			if err == nil && ok {
+				if _, ok := wanted[resolved.User]; ok {
+					targets = append(targets, p.JID)
+				}
 			}
 		}
 	}
