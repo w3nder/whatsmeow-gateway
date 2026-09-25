@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,7 +87,7 @@ func (p *rpcProbe) call(t *testing.T, operation, correlationID string, payload s
 
 func TestRpcServerRoundTrip(t *testing.T) {
 	conn := startRabbitMQ(t)
-	server := gatewayamqp.NewRpcServer(conn, 4)
+	server := gatewayamqp.NewRpcServer(conn, 4, discardLogger())
 	t.Cleanup(func() { _ = server.Close() })
 
 	err := server.Handle(context.Background(), "echo.test", func(_ context.Context, payload json.RawMessage) (any, error) {
@@ -110,7 +112,7 @@ func TestRpcServerRoundTrip(t *testing.T) {
 
 func TestRpcServerReportsDomainAndInternalErrors(t *testing.T) {
 	conn := startRabbitMQ(t)
-	server := gatewayamqp.NewRpcServer(conn, 4)
+	server := gatewayamqp.NewRpcServer(conn, 4, discardLogger())
 	t.Cleanup(func() { _ = server.Close() })
 
 	_ = server.Handle(context.Background(), "fail.test", func(_ context.Context, payload json.RawMessage) (any, error) {
@@ -154,7 +156,7 @@ func TestRpcServerSkipsRequestsThatAlreadyExpired(t *testing.T) {
 	}
 
 	handled := make(chan struct{}, 1)
-	server := gatewayamqp.NewRpcServer(conn, 4)
+	server := gatewayamqp.NewRpcServer(conn, 4, discardLogger())
 	t.Cleanup(func() { _ = server.Close() })
 	_ = server.Handle(context.Background(), "late.test", func(context.Context, json.RawMessage) (any, error) {
 		handled <- struct{}{}
@@ -172,7 +174,7 @@ func TestRpcServerSkipsRequestsThatAlreadyExpired(t *testing.T) {
 
 func TestRpcServerRecoversFromHandlerPanic(t *testing.T) {
 	conn := startRabbitMQ(t)
-	server := gatewayamqp.NewRpcServer(conn, 4)
+	server := gatewayamqp.NewRpcServer(conn, 4, discardLogger())
 	t.Cleanup(func() { _ = server.Close() })
 
 	err := server.Handle(context.Background(), "panic.test", func(context.Context, json.RawMessage) (any, error) {
@@ -196,7 +198,7 @@ func TestRpcServerRecoversFromHandlerPanic(t *testing.T) {
 
 func TestRpcServerRepliesInternalWhenResultIsNotSerializable(t *testing.T) {
 	conn := startRabbitMQ(t)
-	server := gatewayamqp.NewRpcServer(conn, 4)
+	server := gatewayamqp.NewRpcServer(conn, 4, discardLogger())
 	t.Cleanup(func() { _ = server.Close() })
 
 	err := server.Handle(context.Background(), "unserializable.test", func(context.Context, json.RawMessage) (any, error) {
@@ -210,6 +212,128 @@ func TestRpcServerRepliesInternalWhenResultIsNotSerializable(t *testing.T) {
 	reply := probe.call(t, "unserializable.test", "corr-unserializable", `{}`, 5*time.Second)
 	if reply["ok"] != false || reply["error"].(map[string]any)["code"] != "internal" {
 		t.Fatalf("unserializable reply %v", reply)
+	}
+}
+
+func TestRpcServerRejectsASecondHandlerForTheSameOperation(t *testing.T) {
+	conn := startRabbitMQ(t)
+	server := gatewayamqp.NewRpcServer(conn, 4, discardLogger())
+	t.Cleanup(func() { _ = server.Close() })
+
+	handler := func(context.Context, json.RawMessage) (any, error) { return nil, nil }
+	if err := server.Handle(context.Background(), "twice.test", handler); err != nil {
+		t.Fatalf("first Handle: %v", err)
+	}
+	if err := server.Handle(context.Background(), "twice.test", handler); err == nil {
+		t.Fatal("a second handler for the same operation must be refused, not replace the first")
+	}
+}
+
+func TestRpcServerAcksTheRequestWhenTheBrokerRefusesTheReply(t *testing.T) {
+	conn := startRabbitMQ(t)
+	logs := &syncBuffer{}
+	server := gatewayamqp.NewRpcServer(conn, 1, slog.New(slog.NewJSONHandler(logs, nil)))
+	t.Cleanup(func() { _ = server.Close() })
+	if err := server.Handle(context.Background(), "refused.test", func(context.Context, json.RawMessage) (any, error) {
+		return map[string]bool{"ran": true}, nil
+	}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	probe := newRpcProbe(t, conn)
+	full, err := probe.ch.QueueDeclare("", false, true, true, false, rabbitmq.Table{"x-max-length": 0, "x-overflow": "reject-publish"})
+	if err != nil {
+		t.Fatalf("declare full reply queue: %v", err)
+	}
+	if err := probe.ch.PublishWithContext(context.Background(), "", gatewayamqp.RpcQueueName("refused.test"), false, false, rabbitmq.Publishing{
+		ContentType: "application/json", ReplyTo: full.Name, CorrelationId: "corr-refused", Expiration: "5000", Body: []byte(`{}`),
+	}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	<-probe.confirms
+
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(logs.String(), "broker refused the reply") {
+		if time.Now().After(deadline) {
+			t.Fatalf("a reply the broker refused must be logged, logs: %s", logs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	reply := probe.call(t, "refused.test", "corr-next", `{}`, 5*time.Second)
+	if reply["ok"] != true {
+		t.Fatalf("the refused reply must not hold the only prefetch slot, got %v", reply)
+	}
+}
+
+func TestRpcServerToleratesTheSecondResolutionOfTheTimestamp(t *testing.T) {
+	conn := startRabbitMQ(t)
+	server := gatewayamqp.NewRpcServer(conn, 4, discardLogger())
+	t.Cleanup(func() { _ = server.Close() })
+	if err := server.Handle(context.Background(), "stamped.test", func(context.Context, json.RawMessage) (any, error) {
+		return map[string]bool{"ran": true}, nil
+	}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	probe := newRpcProbe(t, conn)
+	for time.Now().Sub(time.Now().Truncate(time.Second)) < 600*time.Millisecond {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := probe.ch.PublishWithContext(context.Background(), "", gatewayamqp.RpcQueueName("stamped.test"), false, false, rabbitmq.Publishing{
+		ContentType: "application/json", ReplyTo: probe.replyQueue, CorrelationId: "corr-stamped", Expiration: "400", Body: []byte(`{}`),
+		Timestamp: time.Now().Truncate(time.Second),
+	}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	<-probe.confirms
+	select {
+	case d := <-probe.replies:
+		if d.CorrelationId != "corr-stamped" {
+			t.Fatalf("reply %q", d.CorrelationId)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a request stamped in seconds, as the RpcClient sends it, must not expire before its own timeout")
+	}
+}
+
+func TestRpcServerReportsOneFailureAndLogsEveryConsumerThatStopped(t *testing.T) {
+	conn := startRabbitMQ(t)
+	logs := &syncBuffer{}
+	server := gatewayamqp.NewRpcServer(conn, 4, slog.New(slog.NewJSONHandler(logs, nil)))
+	for _, operation := range []string{"one.test", "two.test"} {
+		if err := server.Handle(context.Background(), operation, func(context.Context, json.RawMessage) (any, error) { return nil, nil }); err != nil {
+			t.Fatalf("Handle %s: %v", operation, err)
+		}
+	}
+
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close connection: %v", err)
+	}
+	select {
+	case failure := <-server.Failed():
+		if failure == nil {
+			t.Fatal("expected the failure that stopped a consumer")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the rpc server must report a dead consumer")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for strings.Count(logs.String(), "rpc consumer failed") < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("every stopped consumer must be logged, not only the one reported, logs: %s", logs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	closed := make(chan struct{})
+	go func() {
+		_ = server.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a second failure must never block the consumer goroutine and hang Close")
 	}
 }
 

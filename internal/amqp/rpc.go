@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -55,17 +56,19 @@ type rpcErrorBody struct {
 type RpcServer struct {
 	conn     *rabbitmq.Connection
 	prefetch int
+	logger   *slog.Logger
 
 	mu       sync.Mutex
 	channels map[string]*rabbitmq.Channel
 
-	closing atomic.Bool
-	failed  chan error
-	wg      sync.WaitGroup
+	closing    atomic.Bool
+	failed     chan error
+	failedOnce sync.Once
+	wg         sync.WaitGroup
 }
 
-func NewRpcServer(conn *rabbitmq.Connection, prefetch int) *RpcServer {
-	return &RpcServer{conn: conn, prefetch: prefetch, channels: make(map[string]*rabbitmq.Channel), failed: make(chan error, 1)}
+func NewRpcServer(conn *rabbitmq.Connection, prefetch int, logger *slog.Logger) *RpcServer {
+	return &RpcServer{conn: conn, prefetch: prefetch, logger: logger, channels: make(map[string]*rabbitmq.Channel), failed: make(chan error, 1)}
 }
 
 func (s *RpcServer) Failed() <-chan error {
@@ -73,6 +76,12 @@ func (s *RpcServer) Failed() <-chan error {
 }
 
 func (s *RpcServer) Handle(ctx context.Context, operation string, handler RpcHandler) error {
+	s.mu.Lock()
+	_, taken := s.channels[operation]
+	s.mu.Unlock()
+	if taken {
+		return fmt.Errorf("amqp: rpc %s already has a handler", operation)
+	}
 	ch, err := s.conn.Channel()
 	if err != nil {
 		return fmt.Errorf("amqp: open rpc channel for %s: %w", operation, err)
@@ -85,6 +94,10 @@ func (s *RpcServer) Handle(ctx context.Context, operation string, handler RpcHan
 	if err := ch.Qos(s.prefetch, 0, false); err != nil {
 		_ = ch.Close()
 		return fmt.Errorf("amqp: set qos on %s: %w", queue, err)
+	}
+	if err := ch.Confirm(false); err != nil {
+		_ = ch.Close()
+		return fmt.Errorf("amqp: enable reply confirms on %s: %w", queue, err)
 	}
 	deliveries, err := ch.Consume(queue, "whatsmeow-gateway.rpc."+operation, false, false, false, false, nil)
 	if err != nil {
@@ -105,7 +118,7 @@ func (s *RpcServer) Handle(ctx context.Context, operation string, handler RpcHan
 			inflight.Add(1)
 			go func(d rabbitmq.Delivery) {
 				defer inflight.Done()
-				s.serve(ctx, ch, d, handler)
+				s.serve(ctx, operation, ch, d, handler)
 			}(d)
 		}
 		s.reportFailure(fmt.Errorf("amqp: %s consumer stopped: broker closed the delivery channel", queue))
@@ -113,31 +126,56 @@ func (s *RpcServer) Handle(ctx context.Context, operation string, handler RpcHan
 	return nil
 }
 
-func (s *RpcServer) serve(ctx context.Context, ch *rabbitmq.Channel, d rabbitmq.Delivery, handler RpcHandler) {
-	if expired(d, time.Now()) {
-		_ = d.Ack(false)
+const replyPublishTimeout = 5 * time.Second
+
+func (s *RpcServer) serve(ctx context.Context, operation string, ch *rabbitmq.Channel, d rabbitmq.Delivery, handler RpcHandler) {
+	now := time.Now()
+	if expired(d, now) {
+		s.ack(operation, d)
 		return
 	}
-	callCtx, cancel := context.WithTimeout(ctx, requestTimeout(d))
+	callCtx, cancel := context.WithDeadline(ctx, requestDeadline(d, now))
 	defer cancel()
 
 	reply := answer(callCtx, d.Body, handler)
 	if d.ReplyTo != "" {
-		body, err := json.Marshal(reply)
-		if err != nil {
-			body, _ = json.Marshal(rpcReply{OK: false, Error: &rpcErrorBody{Code: RpcCodeInternal, Message: "reply is not serializable: " + err.Error()}})
-		}
-		if err := ch.PublishWithContext(ctx, "", d.ReplyTo, false, false, rabbitmq.Publishing{
-			ContentType:   "application/json",
-			CorrelationId: d.CorrelationId,
-			DeliveryMode:  rabbitmq.Transient,
-			Body:          body,
-		}); err != nil {
-			_ = d.Nack(false, false)
-			return
+		if err := s.publishReply(ctx, ch, d, reply); err != nil {
+			s.logger.Error("amqp: rpc reply not delivered, the caller will time out", "operation", operation, "correlation_id", d.CorrelationId, "error", err)
 		}
 	}
-	_ = d.Ack(false)
+	s.ack(operation, d)
+}
+
+func (s *RpcServer) publishReply(ctx context.Context, ch *rabbitmq.Channel, d rabbitmq.Delivery, reply rpcReply) error {
+	body, err := json.Marshal(reply)
+	if err != nil {
+		body, _ = json.Marshal(rpcReply{OK: false, Error: &rpcErrorBody{Code: RpcCodeInternal, Message: "reply is not serializable: " + err.Error()}})
+	}
+	publishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), replyPublishTimeout)
+	defer cancel()
+	confirm, err := ch.PublishWithDeferredConfirmWithContext(publishCtx, "", d.ReplyTo, false, false, rabbitmq.Publishing{
+		ContentType:   "application/json",
+		CorrelationId: d.CorrelationId,
+		DeliveryMode:  rabbitmq.Transient,
+		Body:          body,
+	})
+	if err != nil {
+		return fmt.Errorf("publish reply: %w", err)
+	}
+	acked, err := confirm.WaitContext(publishCtx)
+	if err != nil {
+		return fmt.Errorf("wait reply confirm: %w", err)
+	}
+	if !acked {
+		return errors.New("broker refused the reply")
+	}
+	return nil
+}
+
+func (s *RpcServer) ack(operation string, d rabbitmq.Delivery) {
+	if err := d.Ack(false); err != nil {
+		s.logger.Error("amqp: ack rpc request", "operation", operation, "correlation_id", d.CorrelationId, "error", err)
+	}
 }
 
 func answer(ctx context.Context, body []byte, handler RpcHandler) (reply rpcReply) {
@@ -160,7 +198,10 @@ func answer(ctx context.Context, body []byte, handler RpcHandler) (reply rpcRepl
 	return rpcReply{OK: false, Error: &rpcErrorBody{Code: RpcCodeInternal, Message: err.Error()}}
 }
 
-const defaultRpcTimeout = 30 * time.Second
+const (
+	defaultRpcTimeout   = 30 * time.Second
+	timestampResolution = time.Second
+)
 
 func requestTimeout(d rabbitmq.Delivery) time.Duration {
 	ms, err := strconv.ParseInt(d.Expiration, 10, 64)
@@ -170,21 +211,23 @@ func requestTimeout(d rabbitmq.Delivery) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
-func expired(d rabbitmq.Delivery, now time.Time) bool {
+func requestDeadline(d rabbitmq.Delivery, now time.Time) time.Time {
 	if d.Timestamp.IsZero() || d.Expiration == "" {
-		return false
+		return now.Add(requestTimeout(d))
 	}
-	return now.After(d.Timestamp.Add(requestTimeout(d)))
+	return d.Timestamp.Add(timestampResolution + requestTimeout(d))
+}
+
+func expired(d rabbitmq.Delivery, now time.Time) bool {
+	return !now.Before(requestDeadline(d, now))
 }
 
 func (s *RpcServer) reportFailure(err error) {
 	if s.closing.Load() {
 		return
 	}
-	select {
-	case s.failed <- err:
-	default:
-	}
+	s.logger.Error("amqp: rpc consumer failed", "error", err)
+	s.failedOnce.Do(func() { s.failed <- err })
 }
 
 func (s *RpcServer) Close() error {

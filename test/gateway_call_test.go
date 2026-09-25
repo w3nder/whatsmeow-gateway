@@ -196,7 +196,7 @@ func TestGatewayInboundCallRecordsAndPublishes(t *testing.T) {
 	runErrCh := make(chan error, 1)
 	go func() {
 		runErrCh <- gateway.Run(runCtx, gateway.Deps{
-			Rpc:                  gatewayamqp.NewRpcServer(conn, 4),
+			Rpc:                  gatewayamqp.NewRpcServer(conn, 4, logger),
 			Consumer:             consumer,
 			Publisher:            publisher,
 			Manager:              mgr,

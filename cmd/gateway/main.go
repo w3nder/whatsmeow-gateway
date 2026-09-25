@@ -79,7 +79,7 @@ func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *
 		return fmt.Errorf("main: new consumer: %w", err)
 	}
 
-	rpc := amqp.NewRpcServer(conn, cfg.Prefetch)
+	rpc := amqp.NewRpcServer(conn, cfg.Prefetch, logger)
 
 	publisher, err := amqp.NewPublisher(conn)
 	if err != nil {

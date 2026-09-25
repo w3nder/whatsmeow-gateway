@@ -96,7 +96,7 @@ func gatewayDepsOn(t *testing.T, infra *gatewayInfra, fake *fakeWAClient, name s
 	_, logger := logging.New()
 
 	return gateway.Deps{
-		Rpc:                  gatewayamqp.NewRpcServer(infra.conn, 4),
+		Rpc:                  gatewayamqp.NewRpcServer(infra.conn, 4, logger),
 		Consumer:             consumer,
 		Publisher:            publisher,
 		Manager:              mgr,
