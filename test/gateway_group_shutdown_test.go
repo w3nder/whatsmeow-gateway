@@ -154,3 +154,52 @@ func TestRpcDrainDeadlineIsIndependentOfTheConsumerDeadline(t *testing.T) {
 		t.Fatalf("shutdown took %s with a 300 ms rpc drain deadline", took)
 	}
 }
+
+func TestGroupCommandInFlightWhenTheRpcServerDiesIsRequeuedNotFailed(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.markPaired()
+	infra := startGatewayInfra(t, "channel-groups")
+	cancel, runErrCh := startGroupGateway(t, infra, fake, "gateway-groups")
+	defer cancel()
+	events := probeEvents(t, infra.conn, gatewayamqp.GroupActionRoutingKey)
+
+	groupJIDs := createGroups(t, infra.conn, "channel-groups", 2)
+	fake.mu.Lock()
+	fake.announceDelay = time.Second
+	fake.mu.Unlock()
+
+	publishGroupCommand(t, infra.conn, gatewayamqp.GatewayGroupCommand{CommandID: "cmd-rpc-died", TenantID: "t", ChannelID: "channel-groups", Action: "lock", GroupJIDs: groupJIDs})
+	waitUntil(t, 10*time.Second, "the first lock to reach whatsapp", func() bool { return fake.announceEnteredCount() == 1 })
+
+	ch, err := infra.conn.Channel()
+	if err != nil {
+		t.Fatalf("open channel: %v", err)
+	}
+	if _, err := ch.QueueDelete(gatewayamqp.RpcQueueName("group.info"), false, false, false); err != nil {
+		t.Fatalf("delete rpc queue: %v", err)
+	}
+	_ = ch.Close()
+
+	select {
+	case err := <-runErrCh:
+		if err == nil {
+			t.Fatal("a dead rpc consumer must make the gateway exit with an error")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the gateway did not exit after its rpc consumer died")
+	}
+
+	waitUntil(t, 15*time.Second, "the interrupted command back in gateway.group", func() bool {
+		ready, dead := groupQueueDepths(t, infra.conn)
+		if dead != 0 {
+			t.Fatalf("an exit caused by a dead consumer must never dead-letter the command, gateway.group.dlq=%d", dead)
+		}
+		return ready == 1
+	})
+	drainEvents(events, func(d rabbitmq.Delivery) {
+		var evt gatewayamqp.GroupActionEvent
+		if err := json.Unmarshal(d.Body, &evt); err != nil || !evt.OK {
+			t.Fatalf("a restart is not a failure: no group may be published ok:false, got %s", d.Body)
+		}
+	})
+}

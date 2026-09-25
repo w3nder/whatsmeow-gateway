@@ -277,20 +277,26 @@ func (p *channelPacer) wait(ctx context.Context, channelID string) error {
 }
 
 func (p *channelPacer) touch(channelID string) {
+	now := time.Now()
 	p.mu.Lock()
-	p.last[channelID] = time.Now()
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+	for id, last := range p.last {
+		if now.Sub(last) > groupGapMin+groupGapJitter {
+			delete(p.last, id)
+		}
+	}
+	p.last[channelID] = now
 }
 
 func (g *gateway) GroupHandler(ctx context.Context, cmd amqp.GatewayGroupCommand) error {
 	g.logger.Info("gateway: group command received", "command_id", cmd.CommandID, "channel_id", cmd.ChannelID, "action", cmd.Action, "groups", len(cmd.GroupJIDs))
-	if ctx.Err() != nil {
+	if g.shuttingDown(ctx) {
 		return errShuttingDown
 	}
 	work := context.WithoutCancel(ctx)
 	run := g.prepareGroupCommand(work, cmd)
 	for _, raw := range cmd.GroupJIDs {
-		if ctx.Err() != nil {
+		if g.shuttingDown(ctx) {
 			return errShuttingDown
 		}
 		alreadyDone, removed, err := g.dedupe.BeginAction(work, cmd.CommandID, raw)
@@ -311,6 +317,10 @@ func (g *gateway) GroupHandler(ctx context.Context, cmd amqp.GatewayGroupCommand
 		}
 	}
 	return nil
+}
+
+func (g *gateway) shuttingDown(ctx context.Context) bool {
+	return ctx.Err() != nil || g.stopping.Load()
 }
 
 func (g *gateway) prepareGroupCommand(ctx context.Context, cmd amqp.GatewayGroupCommand) *groupCommandRun {
@@ -345,7 +355,7 @@ func (g *gateway) applyGroupAction(ctx, work context.Context, run *groupCommandR
 	defer cancel()
 	applied, err := groups.Apply(itemCtx, run.client, run.cmd.Action, jid, run.cmd.Params, run.photo, g.logger)
 	g.pacer.touch(run.cmd.ChannelID)
-	if groups.IsUnavailable(err) && ctx.Err() != nil {
+	if groups.IsUnavailable(err) && g.shuttingDown(ctx) {
 		return result, errShuttingDown
 	}
 	if groups.IsUnavailable(err) {
