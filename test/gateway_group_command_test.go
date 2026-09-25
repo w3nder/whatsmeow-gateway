@@ -127,3 +127,34 @@ func TestGroupCommandRemoveParticipantsReportsRemovedCount(t *testing.T) {
 		t.Fatalf("remove result %+v", evt)
 	}
 }
+
+func TestGroupCommandRemoveParticipantsRedeliveryReplaysStoredRemovedCount(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.markPaired()
+	conn, cancel, runErrCh := setupGroupGateway(t, fake, "channel-groups")
+	defer shutdownStatusRoundtripGateway(t, cancel, runErrCh)
+	events := probeEvents(t, conn, gatewayamqp.GroupActionRoutingKey)
+
+	probe := newRpcProbe(t, conn)
+	g1 := probe.call(t, "group.create", "a", `{"tenantId":"t","channelId":"channel-groups","name":"G1"}`, 10*time.Second)["result"].(map[string]any)["groupJid"].(string)
+
+	cmd := gatewayamqp.GatewayGroupCommand{CommandID: "cmd-rm-twice", TenantID: "t", ChannelID: "channel-groups", Action: "remove_participants", GroupJIDs: []string{g1}, Params: gatewayamqp.GroupActionParams{Phones: []string{"15550000000"}}}
+	publishGroupCommand(t, conn, cmd)
+	waitForDelivery(t, events, gatewayamqp.GroupActionRoutingKey, 10*time.Second)
+	publishGroupCommand(t, conn, cmd)
+	replay := waitForDelivery(t, events, gatewayamqp.GroupActionRoutingKey, 10*time.Second)
+
+	var evt gatewayamqp.GroupActionEvent
+	if err := json.Unmarshal(replay.Body, &evt); err != nil {
+		t.Fatal(err)
+	}
+	if !evt.OK || evt.Removed == nil || *evt.Removed != 1 {
+		t.Fatalf("replay must still carry the stored removed count: %+v", evt)
+	}
+	fake.mu.Lock()
+	calls := len(fake.participantCalls)
+	fake.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("a done item must not hit WhatsApp again on redelivery, participantCalls=%v", fake.participantCalls)
+	}
+}

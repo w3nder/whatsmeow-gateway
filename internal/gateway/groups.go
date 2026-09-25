@@ -215,12 +215,14 @@ func (g *gateway) GroupHandler(ctx context.Context, cmd amqp.GatewayGroupCommand
 
 	client, clientErr := g.groupClient(ctx, cmd.TenantID, cmd.ChannelID)
 	for _, raw := range cmd.GroupJIDs {
-		alreadyDone, err := g.dedupe.BeginAction(ctx, cmd.CommandID, raw)
+		alreadyDone, removed, err := g.dedupe.BeginAction(ctx, cmd.CommandID, raw)
 		if err != nil {
 			return fmt.Errorf("gateway: begin action %s/%s: %w", cmd.CommandID, raw, err)
 		}
 		result := amqp.GroupActionEvent{TenantID: cmd.TenantID, ChannelID: cmd.ChannelID, CommandID: cmd.CommandID, GroupJID: raw, Action: cmd.Action, OK: true}
-		if !alreadyDone {
+		if alreadyDone {
+			result.Removed = removed
+		} else {
 			result = g.applyGroupAction(ctx, client, clientErr, cmd, raw, result)
 		}
 		if err := g.publisher.PublishGroupAction(ctx, result); err != nil {
@@ -248,7 +250,7 @@ func (g *gateway) applyGroupAction(ctx context.Context, client session.WAClient,
 		return fail(err)
 	}
 	result.Removed = applied.Removed
-	if err := g.dedupe.MarkActionDone(ctx, cmd.CommandID, raw); err != nil {
+	if err := g.dedupe.MarkActionDone(ctx, cmd.CommandID, raw, applied.Removed); err != nil {
 		g.logger.Error("gateway: mark group action done", "command_id", cmd.CommandID, "group_jid", raw, "error", err)
 	}
 	return result

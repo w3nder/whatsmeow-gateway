@@ -16,23 +16,24 @@ func TestDedupeActionsClaimThenDone(t *testing.T) {
 	}
 	t.Cleanup(store.Close)
 
-	done, err := store.BeginAction(ctx, "cmd-1", "g1@g.us")
-	if err != nil || done {
-		t.Fatalf("first claim: done=%v err=%v", done, err)
+	done, removed, err := store.BeginAction(ctx, "cmd-1", "g1@g.us")
+	if err != nil || done || removed != nil {
+		t.Fatalf("first claim: done=%v removed=%v err=%v", done, removed, err)
 	}
-	done, err = store.BeginAction(ctx, "cmd-1", "g1@g.us")
-	if err != nil || done {
-		t.Fatalf("pending redelivery must re-run the action: done=%v err=%v", done, err)
+	done, removed, err = store.BeginAction(ctx, "cmd-1", "g1@g.us")
+	if err != nil || done || removed != nil {
+		t.Fatalf("pending redelivery must re-run the action: done=%v removed=%v err=%v", done, removed, err)
 	}
-	if err := store.MarkActionDone(ctx, "cmd-1", "g1@g.us"); err != nil {
+	two := 2
+	if err := store.MarkActionDone(ctx, "cmd-1", "g1@g.us", &two); err != nil {
 		t.Fatalf("MarkActionDone: %v", err)
 	}
-	done, err = store.BeginAction(ctx, "cmd-1", "g1@g.us")
-	if err != nil || !done {
-		t.Fatalf("after done the claim must report alreadyDone: done=%v err=%v", done, err)
+	done, removed, err = store.BeginAction(ctx, "cmd-1", "g1@g.us")
+	if err != nil || !done || removed == nil || *removed != 2 {
+		t.Fatalf("after done the claim must report alreadyDone with the stored removed count: done=%v removed=%v err=%v", done, removed, err)
 	}
-	done, err = store.BeginAction(ctx, "cmd-1", "g2@g.us")
-	if err != nil || done {
-		t.Fatalf("another group of the same command is independent: done=%v err=%v", done, err)
+	done, removed, err = store.BeginAction(ctx, "cmd-1", "g2@g.us")
+	if err != nil || done || removed != nil {
+		t.Fatalf("another group of the same command is independent: done=%v removed=%v err=%v", done, removed, err)
 	}
 }

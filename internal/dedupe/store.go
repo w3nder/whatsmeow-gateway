@@ -28,6 +28,7 @@ const createActionsTableSQL = `CREATE TABLE IF NOT EXISTS gateway_group_actions 
 	command_id text NOT NULL,
 	group_jid text NOT NULL,
 	status text NOT NULL,
+	removed integer,
 	updated_at timestamptz NOT NULL DEFAULT now(),
 	PRIMARY KEY (command_id, group_jid)
 )`
@@ -98,24 +99,25 @@ func (s *Store) MarkSent(ctx context.Context, messageID string) error {
 	return nil
 }
 
-func (s *Store) BeginAction(ctx context.Context, commandID, groupJID string) (bool, error) {
+func (s *Store) BeginAction(ctx context.Context, commandID, groupJID string) (bool, *int, error) {
 	var status string
+	var removed *int
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO gateway_group_actions (command_id, group_jid, status) VALUES ($1, $2, $3)
 		 ON CONFLICT (command_id, group_jid) DO UPDATE SET updated_at = now()
-		 RETURNING status`,
+		 RETURNING status, removed`,
 		commandID, groupJID, statusPending,
-	).Scan(&status)
+	).Scan(&status, &removed)
 	if err != nil {
-		return false, fmt.Errorf("dedupe: begin action %s/%s: %w", commandID, groupJID, err)
+		return false, nil, fmt.Errorf("dedupe: begin action %s/%s: %w", commandID, groupJID, err)
 	}
-	return status == statusSent, nil
+	return status == statusSent, removed, nil
 }
 
-func (s *Store) MarkActionDone(ctx context.Context, commandID, groupJID string) error {
+func (s *Store) MarkActionDone(ctx context.Context, commandID, groupJID string, removed *int) error {
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE gateway_group_actions SET status = $3, updated_at = now() WHERE command_id = $1 AND group_jid = $2`,
-		commandID, groupJID, statusSent,
+		`UPDATE gateway_group_actions SET status = $3, removed = $4, updated_at = now() WHERE command_id = $1 AND group_jid = $2`,
+		commandID, groupJID, statusSent, removed,
 	)
 	if err != nil {
 		return fmt.Errorf("dedupe: mark action done %s/%s: %w", commandID, groupJID, err)
