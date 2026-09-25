@@ -480,25 +480,28 @@ func TestApplyRemoveParticipantsMatchesTheBrazilianNinthDigitBothWays(t *testing
 
 func TestClassifyMapsWhatsmeowErrors(t *testing.T) {
 	cases := map[error]string{
-		whatsmeow.ErrGroupNotFound:         amqp.RpcCodeBadGateway,
-		whatsmeow.ErrNotInGroup:            amqp.RpcCodeBadGateway,
-		whatsmeow.ErrIQNotAuthorized:       amqp.RpcCodeBadGateway,
-		whatsmeow.ErrInvalidImageFormat:    amqp.RpcCodeInvalidRequest,
-		whatsmeow.ErrIQTimedOut:            amqp.RpcCodeUnavailable,
-		whatsmeow.ErrNotConnected:          amqp.RpcCodeUnavailable,
-		whatsmeow.ErrNotLoggedIn:           amqp.RpcCodeUnavailable,
-		whatsmeow.ErrIQRateOverLimit:       amqp.RpcCodeUnavailable,
-		whatsmeow.ErrIQInternalServerError: amqp.RpcCodeUnavailable,
-		whatsmeow.ErrIQServiceUnavailable:  amqp.RpcCodeUnavailable,
-		whatsmeow.ErrIQPartialServerError:  amqp.RpcCodeUnavailable,
-		whatsmeow.ErrIQLocked:              amqp.RpcCodeLocked,
-		whatsmeow.ErrIQForbidden:           amqp.RpcCodeBadGateway,
-		whatsmeow.ErrIQNotFound:            amqp.RpcCodeBadGateway,
-		whatsmeow.ErrIQNotAcceptable:       amqp.RpcCodeBadGateway,
-		whatsmeow.ErrIQBadRequest:          amqp.RpcCodeBadGateway,
-		context.DeadlineExceeded:           amqp.RpcCodeUnavailable,
-		context.Canceled:                   amqp.RpcCodeUnavailable,
-		errors.New("anything else"):        amqp.RpcCodeInternal,
+		whatsmeow.ErrGroupNotFound:               amqp.RpcCodeNotFound,
+		whatsmeow.ErrNotInGroup:                  amqp.RpcCodeForbidden,
+		whatsmeow.ErrGroupInviteLinkUnauthorized: amqp.RpcCodeForbidden,
+		whatsmeow.ErrIQNotAuthorized:             amqp.RpcCodeForbidden,
+		whatsmeow.ErrInvalidImageFormat:          amqp.RpcCodeInvalidRequest,
+		whatsmeow.ErrIQTimedOut:                  amqp.RpcCodeUnavailable,
+		whatsmeow.ErrNotConnected:                amqp.RpcCodeUnavailable,
+		whatsmeow.ErrNotLoggedIn:                 amqp.RpcCodeUnavailable,
+		whatsmeow.ErrIQRateOverLimit:             amqp.RpcCodeUnavailable,
+		whatsmeow.ErrIQInternalServerError:       amqp.RpcCodeUnavailable,
+		whatsmeow.ErrIQServiceUnavailable:        amqp.RpcCodeUnavailable,
+		whatsmeow.ErrIQPartialServerError:        amqp.RpcCodeUnavailable,
+		whatsmeow.ErrIQLocked:                    amqp.RpcCodeLocked,
+		whatsmeow.ErrIQForbidden:                 amqp.RpcCodeForbidden,
+		whatsmeow.ErrIQNotFound:                  amqp.RpcCodeNotFound,
+		whatsmeow.ErrIQGone:                      amqp.RpcCodeNotFound,
+		whatsmeow.ErrIQNotAcceptable:             amqp.RpcCodeBadGateway,
+		&whatsmeow.IQError{Code: 409}:            amqp.RpcCodeBadGateway,
+		whatsmeow.ErrIQBadRequest:                amqp.RpcCodeBadGateway,
+		context.DeadlineExceeded:                 amqp.RpcCodeUnavailable,
+		context.Canceled:                         amqp.RpcCodeUnavailable,
+		errors.New("anything else"):              amqp.RpcCodeInternal,
 	}
 	for in, want := range cases {
 		var rpcErr *amqp.RpcError
@@ -520,11 +523,33 @@ func TestClassifyReportsALockedGroupWithItsOwnCode(t *testing.T) {
 	}
 }
 
+func TestClassifyNamesAGroupTheChannelCannotManageOrThatNoLongerExists(t *testing.T) {
+	cases := []struct {
+		in   error
+		want string
+	}{
+		{whatsmeow.ErrIQNotAuthorized, "forbidden: not an admin of the group (401)"},
+		{fmt.Errorf("set photo: %w", &whatsmeow.IQError{Code: 401, Text: "not-authorized"}), "forbidden: not an admin of the group (401)"},
+		{whatsmeow.ErrIQForbidden, "forbidden: not an admin of the group (403)"},
+		{whatsmeow.ErrIQNotFound, "not_found: group not found (404)"},
+		{whatsmeow.ErrIQGone, "not_found: group not found (410)"},
+		{whatsmeow.ErrGroupNotFound, "not_found: group not found (404)"},
+		{whatsmeow.ErrNotInGroup, "forbidden: not an admin of the group (403)"},
+	}
+	for _, tc := range cases {
+		if got := groups.Classify(tc.in).Error(); got != tc.want {
+			t.Fatalf("%v → %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestClassifySplitsPerGroupFailuresFromCommandLevelOnes(t *testing.T) {
 	perGroup := []error{
 		whatsmeow.ErrIQLocked,
+		whatsmeow.ErrIQNotAuthorized,
 		whatsmeow.ErrIQForbidden,
 		whatsmeow.ErrIQNotFound,
+		whatsmeow.ErrIQGone,
 		whatsmeow.ErrIQNotAcceptable,
 		whatsmeow.ErrIQBadRequest,
 		whatsmeow.ErrGroupNotFound,
