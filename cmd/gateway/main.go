@@ -79,6 +79,8 @@ func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *
 		return fmt.Errorf("main: new consumer: %w", err)
 	}
 
+	rpc := amqp.NewRpcServer(conn, cfg.Prefetch)
+
 	publisher, err := amqp.NewPublisher(conn)
 	if err != nil {
 		return fmt.Errorf("main: new publisher: %w", err)
@@ -133,6 +135,7 @@ func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *
 	manager := session.NewManager(gateway.NewWAClientFactory(sessionContainer, waLogger, logger))
 
 	return gateway.Run(ctx, gateway.Deps{
+		Rpc:                  rpc,
 		Consumer:             consumer,
 		Publisher:            publisher,
 		Manager:              manager,

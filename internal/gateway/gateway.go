@@ -31,6 +31,7 @@ import (
 )
 
 type Deps struct {
+	Rpc                  *amqp.RpcServer
 	Consumer             *amqp.Consumer
 	Publisher            *amqp.Publisher
 	Manager              *session.Manager
@@ -48,6 +49,7 @@ type Deps struct {
 }
 
 type gateway struct {
+	rpc                  *amqp.RpcServer
 	consumer             *amqp.Consumer
 	publisher            *amqp.Publisher
 	manager              *session.Manager
@@ -72,6 +74,7 @@ type gateway struct {
 
 func Run(ctx context.Context, deps Deps) error {
 	g := &gateway{
+		rpc:                  deps.Rpc,
 		consumer:             deps.Consumer,
 		publisher:            deps.Publisher,
 		manager:              deps.Manager,
@@ -225,6 +228,11 @@ func (g *gateway) run(ctx context.Context) error {
 		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
 		return fmt.Errorf("gateway: start call consumer: %w", err)
 	}
+	if err := g.registerGroupRpc(g.workCtx); err != nil {
+		g.closeConsumerForFailedBoot()
+		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
+		return fmt.Errorf("gateway: start group rpc: %w", err)
+	}
 
 	g.logger.Info("gateway started", "instance_id", g.instanceID)
 
@@ -235,6 +243,9 @@ func (g *gateway) run(ctx context.Context) error {
 	case consumerErr := <-g.consumer.Failed():
 		fatal = fmt.Errorf("gateway: amqp consumer died: %w", consumerErr)
 		g.logger.Error("gateway: amqp consumer died, shutting down for restart", "error", consumerErr)
+	case rpcErr := <-g.rpc.Failed():
+		fatal = fmt.Errorf("gateway: rpc server died: %w", rpcErr)
+		g.logger.Error("gateway: rpc server died, shutting down for restart", "error", rpcErr)
 	}
 
 	g.closeConsumerWithDrainDeadline()
@@ -286,7 +297,7 @@ func (g *gateway) resumeOwnedSessions(ctx context.Context) {
 }
 
 func (g *gateway) closeConsumerForFailedBoot() {
-	if err := g.consumer.Close(); err != nil {
+	if err := errors.Join(g.consumer.Close(), g.rpc.Close()); err != nil {
 		g.logger.Error("gateway: close consumer after failed boot", "error", err)
 	}
 }
@@ -294,7 +305,7 @@ func (g *gateway) closeConsumerForFailedBoot() {
 func (g *gateway) closeConsumerWithDrainDeadline() {
 	done := make(chan error, 1)
 	go func() {
-		done <- g.consumer.Close()
+		done <- errors.Join(g.consumer.Close(), g.rpc.Close())
 	}()
 
 	select {

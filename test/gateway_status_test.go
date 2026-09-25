@@ -22,7 +22,7 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
 )
 
-func setupStatusRoundtripGateway(t *testing.T, fake *fakeWAClient, channelID string) (probeCh *rabbitmq.Channel, deliveries <-chan rabbitmq.Delivery, dedupeStore *dedupe.Store, cancel context.CancelFunc, runErrCh chan error) {
+func bootGatewayDeps(t *testing.T, fake *fakeWAClient, channelID, name string) (*rabbitmq.Connection, gateway.Deps) {
 	t.Helper()
 
 	conn := startRabbitMQ(t)
@@ -51,7 +51,7 @@ func setupStatusRoundtripGateway(t *testing.T, fake *fakeWAClient, channelID str
 	})
 
 	mediaStore, err := media.NewS3Store(context.Background(), media.S3Config{
-		Bucket:          "gateway-status-roundtrip-unused",
+		Bucket:          name + "-unused",
 		Region:          "us-east-1",
 		Endpoint:        "http://127.0.0.1:1",
 		AccessKeyID:     "unused",
@@ -64,7 +64,7 @@ func setupStatusRoundtripGateway(t *testing.T, fake *fakeWAClient, channelID str
 	_, logger := logging.New()
 
 	dsn := startPostgresForGateway(t)
-	dedupeStore, err = dedupe.Open(context.Background(), dsn)
+	dedupeStore, err := dedupe.Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatalf("dedupe.Open failed: %v", err)
 	}
@@ -81,6 +81,29 @@ func setupStatusRoundtripGateway(t *testing.T, fake *fakeWAClient, channelID str
 		t.Fatalf("registry.Save failed: %v", err)
 	}
 
+	return conn, gateway.Deps{
+		Consumer:             consumer,
+		Publisher:            publisher,
+		Manager:              mgr,
+		Ownership:            ownershipStore,
+		Dedupe:               dedupeStore,
+		Registry:             registryStore,
+		MediaStore:           mediaStore,
+		InstanceID:           name + "-instance",
+		ShardLockTTL:         30 * time.Second,
+		ShutdownDrainTimeout: 10 * time.Second,
+		Logger:               logger,
+	}
+}
+
+func setupStatusRoundtripGateway(t *testing.T, fake *fakeWAClient, channelID string) (probeCh *rabbitmq.Channel, deliveries <-chan rabbitmq.Delivery, dedupeStore *dedupe.Store, cancel context.CancelFunc, runErrCh chan error) {
+	t.Helper()
+
+	conn, deps := bootGatewayDeps(t, fake, channelID, "gateway-status-roundtrip")
+	deps.Rpc = gatewayamqp.NewRpcServer(conn, 4)
+	dedupeStore = deps.Dedupe
+
+	var err error
 	probeCh, err = conn.Channel()
 	if err != nil {
 		t.Fatalf("failed to open probe channel: %v", err)
@@ -108,19 +131,7 @@ func setupStatusRoundtripGateway(t *testing.T, fake *fakeWAClient, channelID str
 
 	runErrCh = make(chan error, 1)
 	go func() {
-		runErrCh <- gateway.Run(ctx, gateway.Deps{
-			Consumer:             consumer,
-			Publisher:            publisher,
-			Manager:              mgr,
-			Ownership:            ownershipStore,
-			Dedupe:               dedupeStore,
-			Registry:             registryStore,
-			MediaStore:           mediaStore,
-			InstanceID:           "gateway-status-roundtrip-instance",
-			ShardLockTTL:         30 * time.Second,
-			ShutdownDrainTimeout: 10 * time.Second,
-			Logger:               logger,
-		})
+		runErrCh <- gateway.Run(ctx, deps)
 	}()
 
 	return probeCh, deliveries, dedupeStore, cancel, runErrCh
