@@ -37,6 +37,7 @@ func (c *identityClient) IsLoggedIn() bool                     { return true }
 func (c *identityClient) IsConnected() bool                    { return true }
 func (c *identityClient) WaitForConnection(time.Duration) bool { return true }
 func (c *identityClient) DeviceJID() *types.JID                { return c.jid }
+func (c *identityClient) DeviceLID() types.JID                 { return types.EmptyJID }
 func (c *identityClient) DisplayName() string                  { return c.displayName }
 func (c *identityClient) SendMessage(context.Context, types.JID, *waE2E.Message, types.MessageID, []waBinary.Node) (whatsmeow.SendResponse, error) {
 	return whatsmeow.SendResponse{}, nil

@@ -18,6 +18,8 @@ type GroupClient interface {
 	UpdateGroupParticipants(ctx context.Context, jid types.JID, participants []types.JID, change whatsmeow.ParticipantChange) ([]types.GroupParticipant, error)
 	GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, error)
 	PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error)
+	DeviceJID() *types.JID
+	DeviceLID() types.JID
 }
 
 type Fetch func(ctx context.Context, url string) ([]byte, error)

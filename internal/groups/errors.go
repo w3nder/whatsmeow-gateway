@@ -2,6 +2,7 @@ package groups
 
 import (
 	"errors"
+	"net/http"
 
 	"go.mau.fi/whatsmeow"
 
@@ -17,12 +18,30 @@ func Classify(err error) error {
 		return err
 	case errors.Is(err, whatsmeow.ErrInvalidImageFormat):
 		return amqp.RpcInvalidRequest(err.Error())
-	case errors.Is(err, whatsmeow.ErrIQTimedOut), errors.Is(err, whatsmeow.ErrNotConnected), errors.Is(err, whatsmeow.ErrNotLoggedIn):
+	case errors.Is(err, whatsmeow.ErrIQTimedOut), errors.Is(err, whatsmeow.ErrNotConnected), errors.Is(err, whatsmeow.ErrNotLoggedIn), isTransientIQError(err):
 		return amqp.RpcUnavailable(err.Error())
 	case errors.Is(err, whatsmeow.ErrGroupNotFound), errors.Is(err, whatsmeow.ErrNotInGroup), errors.Is(err, whatsmeow.ErrGroupInviteLinkUnauthorized), isIQError(err):
 		return amqp.RpcBadGateway(err.Error())
 	default:
 		return &amqp.RpcError{Code: amqp.RpcCodeInternal, Message: err.Error()}
+	}
+}
+
+func IsUnavailable(err error) bool {
+	var rpcErr *amqp.RpcError
+	return errors.As(err, &rpcErr) && rpcErr.Code == amqp.RpcCodeUnavailable
+}
+
+func isTransientIQError(err error) bool {
+	var iq *whatsmeow.IQError
+	if !errors.As(err, &iq) {
+		return false
+	}
+	switch iq.Code {
+	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable:
+		return true
+	default:
+		return false
 	}
 }
 

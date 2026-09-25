@@ -29,6 +29,7 @@ type WAClient interface {
 	IsConnected() bool
 	WaitForConnection(timeout time.Duration) bool
 	DeviceJID() *types.JID
+	DeviceLID() types.JID
 	DisplayName() string
 	SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, id types.MessageID, nodes []waBinary.Node) (whatsmeow.SendResponse, error)
 	BuildEdit(chat types.JID, id types.MessageID, newContent *waE2E.Message) *waE2E.Message
@@ -101,6 +102,10 @@ func (w *waClient) WaitForConnection(timeout time.Duration) bool {
 
 func (w *waClient) DeviceJID() *types.JID {
 	return w.client.Store.ID
+}
+
+func (w *waClient) DeviceLID() types.JID {
+	return w.client.Store.GetLID()
 }
 
 func (w *waClient) DisplayName() string {

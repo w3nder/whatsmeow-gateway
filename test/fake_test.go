@@ -62,6 +62,8 @@ type fakeWAClient struct {
 	inviteLinks      map[string]string
 	groupErr         error
 	nextGroupSeq     int
+	announceDelay    time.Duration
+	announceCount    int
 }
 
 type participantCall struct {
@@ -144,6 +146,10 @@ func (f *fakeWAClient) DeviceJID() *types.JID {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.deviceJID
+}
+
+func (f *fakeWAClient) DeviceLID() types.JID {
+	return types.EmptyJID
 }
 
 func (f *fakeWAClient) DisplayName() string {
@@ -255,9 +261,17 @@ func (f *fakeWAClient) GetGroupInviteLink(ctx context.Context, jid types.JID, re
 
 func (f *fakeWAClient) SetGroupAnnounce(ctx context.Context, jid types.JID, announce bool) error {
 	f.mu.Lock()
+	delay := f.announceDelay
+	f.mu.Unlock()
+	time.Sleep(delay)
+	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.announceCount++
 	if f.groupErr != nil {
 		return f.groupErr
+	}
+	if _, ok := f.groups[jid.String()]; !ok {
+		return whatsmeow.ErrGroupNotFound
 	}
 	if f.announceCalls == nil {
 		f.announceCalls = map[string]bool{}
@@ -352,6 +366,19 @@ func (f *fakeWAClient) markPaired() {
 	f.mu.Lock()
 	f.deviceJID = &jid
 	f.mu.Unlock()
+}
+
+func (f *fakeWAClient) addGroupParticipant(group string, participant types.GroupParticipant) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	info := f.groups[group]
+	info.Participants = append(info.Participants, participant)
+}
+
+func (f *fakeWAClient) announceCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.announceCount
 }
 
 func (f *fakeWAClient) handlerCountAtConnect() int {

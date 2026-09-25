@@ -228,7 +228,7 @@ func (g *gateway) run(ctx context.Context) error {
 		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
 		return fmt.Errorf("gateway: start call consumer: %w", err)
 	}
-	if err := g.consumer.StartGroup(g.workCtx, g.GroupHandler); err != nil {
+	if err := g.consumer.StartGroup(ctx, g.GroupHandler); err != nil {
 		g.closeConsumerForFailedBoot()
 		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
 		return fmt.Errorf("gateway: start group consumer: %w", err)
@@ -310,7 +310,10 @@ func (g *gateway) closeConsumerForFailedBoot() {
 func (g *gateway) closeConsumerWithDrainDeadline() {
 	done := make(chan error, 1)
 	go func() {
-		done <- errors.Join(g.consumer.Close(), g.rpc.Close())
+		rpcDone := make(chan error, 1)
+		go func() { rpcDone <- g.rpc.Close() }()
+		consumerErr := g.consumer.Close()
+		done <- errors.Join(consumerErr, <-rpcDone)
 	}()
 
 	select {
@@ -816,13 +819,29 @@ func NewWAClientFactory(container *sqlstore.Container, waLogger waLog.Logger, sl
 	}
 }
 
+const (
+	mediaFetchTimeout  = 20 * time.Second
+	maxMediaBytes      = 100 << 20
+	maxGroupPhotoBytes = 8 << 20
+)
+
+var mediaHTTPClient = &http.Client{Timeout: mediaFetchTimeout}
+
 func fetchMediaURL(ctx context.Context, url string) ([]byte, error) {
+	return fetchURLCapped(ctx, url, maxMediaBytes)
+}
+
+func fetchGroupPhoto(ctx context.Context, url string) ([]byte, error) {
+	return fetchURLCapped(ctx, url, maxGroupPhotoBytes)
+}
+
+func fetchURLCapped(ctx context.Context, url string, limit int64) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("gateway: build media fetch request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := mediaHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("gateway: fetch media %s: %w", url, err)
 	}
@@ -832,9 +851,12 @@ func fetchMediaURL(ctx context.Context, url string) ([]byte, error) {
 		return nil, fmt.Errorf("gateway: fetch media %s: unexpected status %d", url, resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return nil, fmt.Errorf("gateway: read media %s: %w", url, err)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("gateway: media %s exceeds %d bytes", url, limit)
 	}
 	return data, nil
 }

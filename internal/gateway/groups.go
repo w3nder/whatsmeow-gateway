@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"go.mau.fi/whatsmeow/types"
@@ -151,7 +152,7 @@ func (g *gateway) rpcGroupCreate(ctx context.Context, payload json.RawMessage) (
 	if err != nil {
 		return nil, err
 	}
-	res, err := groups.Create(ctx, client, fetchMediaURL, groups.CreateRequest{
+	res, err := groups.Create(ctx, client, fetchGroupPhoto, groups.CreateRequest{
 		Name: req.Name, Description: req.Description, PhotoURL: req.PhotoURL, Announce: req.Announce,
 	}, g.logger)
 	if err != nil {
@@ -226,13 +227,34 @@ func (g *gateway) rpcGroupJoined(ctx context.Context, payload json.RawMessage) (
 	return out, nil
 }
 
-func (g *gateway) GroupHandler(ctx context.Context, cmd amqp.GatewayGroupCommand) error {
-	g.setTenant(cmd.ChannelID, cmd.TenantID)
-	g.logger.Info("gateway: group command received", "command_id", cmd.CommandID, "channel_id", cmd.ChannelID, "action", cmd.Action, "groups", len(cmd.GroupJIDs))
+const (
+	groupItemTimeout = 30 * time.Second
+	groupGapMin      = 300 * time.Millisecond
+	groupGapJitter   = 500 * time.Millisecond
+)
 
-	client, clientErr := g.groupClient(ctx, cmd.TenantID, cmd.ChannelID)
+var errShuttingDown = fmt.Errorf("gateway: shutting down in the middle of a group command: %w", amqp.ErrRequeue)
+
+type groupCommandRun struct {
+	cmd      amqp.GatewayGroupCommand
+	client   session.WAClient
+	setupErr error
+	photo    []byte
+	touched  bool
+}
+
+func (g *gateway) GroupHandler(ctx context.Context, cmd amqp.GatewayGroupCommand) error {
+	g.logger.Info("gateway: group command received", "command_id", cmd.CommandID, "channel_id", cmd.ChannelID, "action", cmd.Action, "groups", len(cmd.GroupJIDs))
+	if ctx.Err() != nil {
+		return errShuttingDown
+	}
+	work := context.WithoutCancel(ctx)
+	run := g.prepareGroupCommand(work, cmd)
 	for _, raw := range cmd.GroupJIDs {
-		alreadyDone, removed, err := g.dedupe.BeginAction(ctx, cmd.CommandID, raw)
+		if ctx.Err() != nil {
+			return errShuttingDown
+		}
+		alreadyDone, removed, err := g.dedupe.BeginAction(work, cmd.CommandID, raw)
 		if err != nil {
 			return fmt.Errorf("gateway: begin action %s/%s: %w", cmd.CommandID, raw, err)
 		}
@@ -240,37 +262,74 @@ func (g *gateway) GroupHandler(ctx context.Context, cmd amqp.GatewayGroupCommand
 		if alreadyDone {
 			result.Removed = removed
 		} else {
-			result = g.applyGroupAction(ctx, client, clientErr, cmd, raw, result)
+			result, err = g.applyGroupAction(ctx, work, run, raw, result)
+			if err != nil {
+				return err
+			}
 		}
-		if err := g.publisher.PublishGroupAction(ctx, result); err != nil {
+		if err := g.publisher.PublishGroupAction(work, result); err != nil {
 			return fmt.Errorf("gateway: publish group action %s/%s: %w", cmd.CommandID, raw, err)
 		}
 	}
 	return nil
 }
 
-func (g *gateway) applyGroupAction(ctx context.Context, client session.WAClient, clientErr error, cmd amqp.GatewayGroupCommand, raw string, result amqp.GroupActionEvent) amqp.GroupActionEvent {
-	fail := func(err error) amqp.GroupActionEvent {
+func (g *gateway) prepareGroupCommand(ctx context.Context, cmd amqp.GatewayGroupCommand) *groupCommandRun {
+	run := &groupCommandRun{cmd: cmd}
+	run.client, run.setupErr = g.groupClient(ctx, cmd.TenantID, cmd.ChannelID)
+	if run.setupErr != nil || cmd.Action != groups.ActionSetPhoto {
+		return run
+	}
+	photoCtx, cancel := context.WithTimeout(ctx, groupItemTimeout)
+	defer cancel()
+	run.photo, run.setupErr = groups.PreparePhoto(photoCtx, fetchGroupPhoto, cmd.Params.PhotoURL)
+	return run
+}
+
+func (g *gateway) applyGroupAction(ctx, work context.Context, run *groupCommandRun, raw string, result amqp.GroupActionEvent) (amqp.GroupActionEvent, error) {
+	fail := func(err error) (amqp.GroupActionEvent, error) {
 		result.OK = false
 		result.Error = err.Error()
-		return result
+		return result, nil
 	}
-	if clientErr != nil {
-		return fail(clientErr)
+	if run.setupErr != nil {
+		return fail(run.setupErr)
 	}
 	jid, err := parseGroupJID(raw)
 	if err != nil {
 		return fail(err)
 	}
-	applied, err := groups.Apply(ctx, client, fetchMediaURL, cmd.Action, jid, cmd.Params)
+	if run.touched {
+		if err := pauseBetweenGroups(ctx); err != nil {
+			return result, err
+		}
+	}
+	run.touched = true
+	itemCtx, cancel := context.WithTimeout(work, groupItemTimeout)
+	defer cancel()
+	applied, err := groups.Apply(itemCtx, run.client, run.cmd.Action, jid, run.cmd.Params, run.photo)
+	if groups.IsUnavailable(err) {
+		return result, fmt.Errorf("gateway: whatsapp unavailable at %s/%s, halting the command for a later replay: %w", run.cmd.CommandID, raw, err)
+	}
 	if err != nil {
 		return fail(err)
 	}
 	result.Removed = applied.Removed
-	if err := g.dedupe.MarkActionDone(ctx, cmd.CommandID, raw, applied.Removed); err != nil {
-		g.logger.Error("gateway: mark group action done", "command_id", cmd.CommandID, "group_jid", raw, "error", err)
+	if err := g.dedupe.MarkActionDone(work, run.cmd.CommandID, raw, applied.Removed); err != nil {
+		g.logger.Error("gateway: mark group action done", "command_id", run.cmd.CommandID, "group_jid", raw, "error", err)
 	}
-	return result
+	return result, nil
+}
+
+func pauseBetweenGroups(ctx context.Context) error {
+	timer := time.NewTimer(groupGapMin + rand.N(groupGapJitter))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return errShuttingDown
+	case <-timer.C:
+		return nil
+	}
 }
 
 func infoResponse(info groups.Info) groupInfoResponse {

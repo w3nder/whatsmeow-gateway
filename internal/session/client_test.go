@@ -42,6 +42,10 @@ func (f *recordingClient) DeviceJID() *types.JID {
 	return nil
 }
 
+func (f *recordingClient) DeviceLID() types.JID {
+	return types.EmptyJID
+}
+
 func (f *recordingClient) DisplayName() string {
 	return ""
 }

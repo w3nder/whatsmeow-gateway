@@ -64,13 +64,13 @@ func Create(ctx context.Context, c GroupClient, fetch Fetch, req CreateRequest, 
 		}
 	}
 	if req.PhotoURL != "" {
-		if err := setPhoto(ctx, c, fetch, info.JID, req.PhotoURL); err != nil {
+		if err := setPhotoFromURL(ctx, c, fetch, info.JID, req.PhotoURL); err != nil {
 			log.Warn("groups: set photo after create", "group_jid", info.JID.String(), "error", err)
 		}
 	}
-	link, err := c.GetGroupInviteLink(ctx, info.JID, false)
+	link, err := inviteLinkWithRetry(ctx, c, info.JID)
 	if err != nil {
-		return CreateResult{}, Classify(err)
+		log.Warn("groups: invite link after create, the client must fetch it later", "group_jid", info.JID.String(), "error", err)
 	}
 	return CreateResult{
 		GroupJID:         info.JID.String(),
@@ -78,6 +78,26 @@ func Create(ctx context.Context, c GroupClient, fetch Fetch, req CreateRequest, 
 		ParticipantCount: participantCount(info),
 		CreatedAt:        createdAt(info),
 	}, nil
+}
+
+var inviteRetryDelays = []time.Duration{200 * time.Millisecond, 500 * time.Millisecond, time.Second}
+
+func inviteLinkWithRetry(ctx context.Context, c GroupClient, jid types.JID) (string, error) {
+	link, err := c.GetGroupInviteLink(ctx, jid, false)
+	for _, delay := range inviteRetryDelays {
+		if err == nil {
+			return link, nil
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", err
+		case <-timer.C:
+		}
+		link, err = c.GetGroupInviteLink(ctx, jid, false)
+	}
+	return link, err
 }
 
 func InviteLink(ctx context.Context, c GroupClient, jid types.JID, reset bool) (string, error) {
@@ -108,7 +128,7 @@ func Joined(ctx context.Context, c GroupClient) ([]Info, error) {
 	return out, nil
 }
 
-func Apply(ctx context.Context, c GroupClient, fetch Fetch, action string, jid types.JID, params amqp.GroupActionParams) (ActionResult, error) {
+func Apply(ctx context.Context, c GroupClient, action string, jid types.JID, params amqp.GroupActionParams, photo []byte) (ActionResult, error) {
 	var err error
 	switch action {
 	case ActionLock:
@@ -123,10 +143,10 @@ func Apply(ctx context.Context, c GroupClient, fetch Fetch, action string, jid t
 	case ActionSetDescription:
 		err = c.SetGroupTopic(ctx, jid, params.Description)
 	case ActionSetPhoto:
-		if params.PhotoURL == "" {
-			return ActionResult{}, amqp.RpcInvalidRequest("photoUrl is required")
+		if len(photo) == 0 {
+			return ActionResult{}, amqp.RpcInvalidRequest("photo is required")
 		}
-		err = setPhoto(ctx, c, fetch, jid, params.PhotoURL)
+		_, err = c.SetGroupPhoto(ctx, jid, photo)
 	case ActionRemoveParticipants:
 		return removeParticipants(ctx, c, jid, params.Phones)
 	default:
@@ -143,52 +163,131 @@ func removeParticipants(ctx context.Context, c GroupClient, jid types.JID, phone
 	if err != nil {
 		return ActionResult{}, Classify(err)
 	}
-	wanted := make(map[string]struct{}, len(phones))
-	for _, phone := range phones {
-		wanted[strings.TrimLeft(phone, "+")] = struct{}{}
-	}
+	wanted := wantedPhones(phones)
+	self := selfOf(c)
 	targets := make([]types.JID, 0, len(phones))
 	for _, p := range info.Participants {
-		if _, ok := wanted[p.PhoneNumber.User]; ok {
-			targets = append(targets, p.JID)
+		if self.is(p) {
 			continue
 		}
-		if p.JID.Server == types.DefaultUserServer {
-			if _, ok := wanted[p.JID.User]; ok {
-				targets = append(targets, p.JID)
-				continue
-			}
-		}
-		if p.PhoneNumber.User == "" && p.LID.User != "" {
-			resolved, ok, err := c.PNForLID(ctx, p.LID)
-			if err == nil && ok {
-				if _, ok := wanted[resolved.User]; ok {
-					targets = append(targets, p.JID)
-				}
-			}
+		if matchesPhone(ctx, c, p, wanted) {
+			targets = append(targets, p.JID)
 		}
 	}
 	removed := 0
 	if len(targets) > 0 {
-		if _, err := c.UpdateGroupParticipants(ctx, jid, targets, whatsmeow.ParticipantChangeRemove); err != nil {
+		results, err := c.UpdateGroupParticipants(ctx, jid, targets, whatsmeow.ParticipantChangeRemove)
+		if err != nil {
 			return ActionResult{}, Classify(err)
 		}
-		removed = len(targets)
+		for _, r := range results {
+			if r.Error == 0 {
+				removed++
+			}
+		}
 	}
 	return ActionResult{Removed: &removed}, nil
 }
 
-func setPhoto(ctx context.Context, c GroupClient, fetch Fetch, jid types.JID, url string) error {
+func matchesPhone(ctx context.Context, c GroupClient, p types.GroupParticipant, wanted map[string]struct{}) bool {
+	if _, ok := wanted[p.PhoneNumber.User]; ok && p.PhoneNumber.User != "" {
+		return true
+	}
+	if p.JID.Server == types.DefaultUserServer {
+		if _, ok := wanted[p.JID.User]; ok {
+			return true
+		}
+	}
+	if p.PhoneNumber.User == "" && p.LID.User != "" {
+		resolved, ok, err := c.PNForLID(ctx, p.LID)
+		if err == nil && ok {
+			_, match := wanted[resolved.User]
+			return match
+		}
+	}
+	return false
+}
+
+func wantedPhones(phones []string) map[string]struct{} {
+	wanted := make(map[string]struct{}, len(phones)*2)
+	for _, phone := range phones {
+		number := strings.TrimLeft(phone, "+")
+		wanted[number] = struct{}{}
+		if sibling, ok := brazilianSibling(number); ok {
+			wanted[sibling] = struct{}{}
+		}
+	}
+	return wanted
+}
+
+const (
+	brazilCountryCode = "55"
+	brazilPrefixLen   = 4
+	brazilLandlineLen = 12
+	brazilMobileLen   = 13
+	brazilMobileDigit = '9'
+)
+
+func brazilianSibling(number string) (string, bool) {
+	if !strings.HasPrefix(number, brazilCountryCode) {
+		return "", false
+	}
+	switch len(number) {
+	case brazilLandlineLen:
+		return number[:brazilPrefixLen] + string(brazilMobileDigit) + number[brazilPrefixLen:], true
+	case brazilMobileLen:
+		if number[brazilPrefixLen] != brazilMobileDigit {
+			return "", false
+		}
+		return number[:brazilPrefixLen] + number[brazilPrefixLen+1:], true
+	default:
+		return "", false
+	}
+}
+
+type selfIdentity struct {
+	phone string
+	lid   string
+}
+
+func selfOf(c GroupClient) selfIdentity {
+	var self selfIdentity
+	if jid := c.DeviceJID(); jid != nil {
+		self.phone = jid.User
+	}
+	self.lid = c.DeviceLID().User
+	return self
+}
+
+func (s selfIdentity) is(p types.GroupParticipant) bool {
+	if s.phone != "" && (p.PhoneNumber.User == s.phone || (p.JID.Server == types.DefaultUserServer && p.JID.User == s.phone)) {
+		return true
+	}
+	return s.lid != "" && (p.LID.User == s.lid || (p.JID.Server == types.HiddenUserServer && p.JID.User == s.lid))
+}
+
+func PreparePhoto(ctx context.Context, fetch Fetch, url string) ([]byte, error) {
+	if url == "" {
+		return nil, amqp.RpcInvalidRequest("photoUrl is required")
+	}
 	if fetch == nil {
-		return amqp.RpcInvalidRequest("photo fetch is not available")
+		return nil, amqp.RpcInvalidRequest("photo fetch is not available")
 	}
 	raw, err := fetch(ctx, url)
 	if err != nil {
-		return amqp.RpcInvalidRequest(fmt.Sprintf("fetch photo: %v", err))
+		return nil, amqp.RpcInvalidRequest(fmt.Sprintf("fetch photo: %v", err))
 	}
 	jpg, err := ToJPEG(raw)
 	if err != nil {
-		return amqp.RpcInvalidRequest(err.Error())
+		return nil, amqp.RpcInvalidRequest(err.Error())
+	}
+	return jpg, nil
+}
+
+func setPhotoFromURL(ctx context.Context, c GroupClient, fetch Fetch, jid types.JID, url string) error {
+	jpg, err := PreparePhoto(ctx, fetch, url)
+	if err != nil {
+		return err
 	}
 	_, err = c.SetGroupPhoto(ctx, jid, jpg)
 	return err

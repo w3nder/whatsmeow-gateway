@@ -16,20 +16,25 @@ var groupRpcOperations = []string{"group.create", "group.invite_link", "group.in
 
 func setupGroupGateway(t *testing.T, fake *fakeWAClient, channelID string) (conn *rabbitmq.Connection, cancel context.CancelFunc, runErrCh chan error) {
 	t.Helper()
+	infra := startGatewayInfra(t, channelID)
+	cancel, runErrCh = startGroupGateway(t, infra, fake, "gateway-groups")
+	return infra.conn, cancel, runErrCh
+}
 
-	conn, deps := bootGatewayDeps(t, fake, channelID, "gateway-groups")
+func startGroupGateway(t *testing.T, infra *gatewayInfra, fake *fakeWAClient, name string) (context.CancelFunc, chan error) {
+	t.Helper()
 
-	var ctx context.Context
-	ctx, cancel = context.WithCancel(context.Background())
+	deps := gatewayDepsOn(t, infra, fake, name)
+	ctx, cancel := context.WithCancel(context.Background())
 
-	runErrCh = make(chan error, 1)
+	runErrCh := make(chan error, 1)
 	go func() {
 		runErrCh <- gateway.Run(ctx, deps)
 	}()
 
-	waitForGroupRpcHandlersReady(t, conn)
+	waitForGroupRpcHandlersReady(t, infra.conn)
 
-	return conn, cancel, runErrCh
+	return cancel, runErrCh
 }
 
 func waitForGroupRpcHandlersReady(t *testing.T, conn *rabbitmq.Connection) {
