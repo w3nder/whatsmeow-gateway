@@ -10,6 +10,8 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
 )
 
+const lockedMessage = "group is locked (423)"
+
 func Classify(err error) error {
 	var rpcErr *amqp.RpcError
 	switch {
@@ -21,6 +23,8 @@ func Classify(err error) error {
 		return amqp.RpcInvalidRequest(err.Error())
 	case errors.Is(err, whatsmeow.ErrIQTimedOut), errors.Is(err, whatsmeow.ErrNotConnected), errors.Is(err, whatsmeow.ErrNotLoggedIn), errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled), isTransientIQError(err):
 		return amqp.RpcUnavailable(err.Error())
+	case isLockedIQError(err):
+		return amqp.RpcLocked(lockedMessage)
 	case errors.Is(err, whatsmeow.ErrGroupNotFound), errors.Is(err, whatsmeow.ErrNotInGroup), errors.Is(err, whatsmeow.ErrGroupInviteLinkUnauthorized), isIQError(err):
 		return amqp.RpcBadGateway(err.Error())
 	default:
@@ -34,19 +38,24 @@ func IsUnavailable(err error) bool {
 }
 
 func isTransientIQError(err error) bool {
-	var iq *whatsmeow.IQError
-	if !errors.As(err, &iq) {
-		return false
-	}
-	switch iq.Code {
-	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable:
-		return true
-	default:
-		return false
-	}
+	code, ok := iqCode(err)
+	return ok && (code == http.StatusTooManyRequests || code >= http.StatusInternalServerError)
+}
+
+func isLockedIQError(err error) bool {
+	code, ok := iqCode(err)
+	return ok && code == http.StatusLocked
 }
 
 func isIQError(err error) bool {
+	_, ok := iqCode(err)
+	return ok
+}
+
+func iqCode(err error) (int, bool) {
 	var iq *whatsmeow.IQError
-	return errors.As(err, &iq)
+	if !errors.As(err, &iq) {
+		return 0, false
+	}
+	return iq.Code, true
 }

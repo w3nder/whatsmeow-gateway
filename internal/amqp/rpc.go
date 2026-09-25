@@ -19,6 +19,7 @@ const (
 	RpcCodeNotFound       = "not_found"
 	RpcCodeUnavailable    = "unavailable"
 	RpcCodeBadGateway     = "bad_gateway"
+	RpcCodeLocked         = "locked"
 	RpcCodeInternal       = "internal"
 )
 
@@ -36,6 +37,7 @@ func RpcUnavailable(message string) error {
 	return &RpcError{Code: RpcCodeUnavailable, Message: message}
 }
 func RpcBadGateway(message string) error { return &RpcError{Code: RpcCodeBadGateway, Message: message} }
+func RpcLocked(message string) error     { return &RpcError{Code: RpcCodeLocked, Message: message} }
 func RpcInvalidRequest(message string) error {
 	return &RpcError{Code: RpcCodeInvalidRequest, Message: message}
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	rabbitmq "github.com/rabbitmq/amqp091-go"
+	"go.mau.fi/whatsmeow"
 
 	gatewayamqp "github.com/w3nder/whatsmeow-gateway/internal/amqp"
 	"github.com/w3nder/whatsmeow-gateway/internal/gateway"
@@ -169,5 +170,21 @@ func TestGroupInfoUnknownGroupIsBadGateway(t *testing.T) {
 	reply := probe.call(t, "group.info", "u1", `{"tenantId":"t","channelId":"channel-groups","groupJid":"120363000000000099@g.us"}`, 10*time.Second)
 	if reply["ok"] != false || reply["error"].(map[string]any)["code"] != "bad_gateway" {
 		t.Fatalf("unknown group → %v", reply)
+	}
+}
+
+func TestGroupInfoOnALockedGroupIsLocked(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.markPaired()
+	locked := "120363000000000423@g.us"
+	fake.groupErrs = map[string]error{locked: whatsmeow.ErrIQLocked}
+	conn, cancel, runErrCh := setupGroupGateway(t, fake, "channel-groups")
+	defer shutdownStatusRoundtripGateway(t, cancel, runErrCh)
+
+	probe := newRpcProbe(t, conn)
+	reply := probe.call(t, "group.info", "l1", `{"tenantId":"t","channelId":"channel-groups","groupJid":"`+locked+`"}`, 10*time.Second)
+	errBody, _ := reply["error"].(map[string]any)
+	if reply["ok"] != false || errBody["code"] != "locked" || errBody["message"] != "group is locked (423)" {
+		t.Fatalf("locked group → %v", reply)
 	}
 }
