@@ -308,7 +308,10 @@ func PreparePhoto(ctx context.Context, fetch Fetch, url string) ([]byte, error) 
 	if err != nil {
 		return nil, amqp.RpcInvalidRequest(fmt.Sprintf("fetch photo: %v", err))
 	}
-	jpg, err := ToJPEG(raw)
+	jpg, err := ToJPEG(ctx, raw)
+	if err != nil && ctx.Err() != nil {
+		return nil, Classify(err)
+	}
 	if err != nil {
 		return nil, amqp.RpcInvalidRequest(err.Error())
 	}

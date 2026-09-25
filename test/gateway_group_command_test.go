@@ -334,7 +334,7 @@ func TestGroupCommandSetDescriptionChainsTheTopicAndSkipsAnUnchangedOne(t *testi
 	}
 }
 
-func TestGroupCommandSetPhotoShrinksALargeImageToWhatsAppsLimit(t *testing.T) {
+func TestGroupCommandSetPhotoCropsALargeImageToWhatsAppsSquare(t *testing.T) {
 	photo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var buf bytes.Buffer
 		_ = png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 1920, 1080)))
@@ -364,8 +364,8 @@ func TestGroupCommandSetPhotoShrinksALargeImageToWhatsAppsLimit(t *testing.T) {
 	if err != nil || format != "jpeg" {
 		t.Fatalf("whatsapp must receive a jpeg, got %q (%v)", format, err)
 	}
-	if cfg.Width != 640 || cfg.Height != 360 {
-		t.Fatalf("a 1920x1080 photo must reach whatsapp as 640x360, got %dx%d", cfg.Width, cfg.Height)
+	if cfg.Width != 640 || cfg.Height != 640 {
+		t.Fatalf("a 1920x1080 photo must reach whatsapp as a 640x640 square, got %dx%d", cfg.Width, cfg.Height)
 	}
 }
 
