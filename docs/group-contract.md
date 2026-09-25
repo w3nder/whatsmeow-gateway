@@ -37,7 +37,7 @@ resposta (ou o confirm não chegar), o gateway registra o erro em log e confirma
 mesmo assim — a operação já rodou, então repeti-la (ex. `group.create`) seria pior; o
 cliente termina por timeout. No desligamento, cada operação em andamento tem até
 `RpcDrainTimeout` (30 s) para terminar, independente do prazo de drenagem do consumidor
-de comandos.
+de comandos (ver "Desligamento e prazo do container" abaixo).
 
 ### Códigos de erro
 
@@ -65,7 +65,7 @@ Pedido:
 | `channelId` | string | sempre |
 | `name` | string | sempre — obrigatório, `invalid_request` se vazio |
 | `description` | string | opcional — falha em definir o tópico só gera log, não erro |
-| `photoUrl` | string | opcional — mesmo tratamento de `set_photo` (download de até 20 s e 8 MiB, JPEG com lado maior de 640 px); falha só gera log, não erro |
+| `photoUrl` | string | opcional — mesmo tratamento de `set_photo` (download de até 20 s e 8 MiB, quadrado de até 640×640 em JPEG, orientação EXIF aplicada); falha só gera log, não erro |
 | `announce` | bool | opcional — grupo nasce só-admin-envia quando `true` |
 
 Resposta:
@@ -193,8 +193,18 @@ novo.
 
 Paralelismo, ritmo e interrupção:
 
-- Comandos de **canais diferentes rodam em paralelo** (até o prefetch da instância);
-  comandos do **mesmo canal** rodam um depois do outro, na ordem em que chegaram.
+- Comandos de **canais diferentes rodam em paralelo**; comandos do **mesmo canal** rodam
+  um depois do outro, na ordem em que chegaram.
+- A fila `gateway.group` tem prefetch próprio (`GROUP_PREFETCH`, padrão 64), separado
+  do prefetch de envio e chamada. Cada canal guarda no máximo 16 comandos esperando a
+  vez além do que está rodando. Um comando que chega para um canal já cheio não fica
+  segurando um slot do prefetch: depois de 1 s o gateway o republica no fim da fila
+  (publish com confirm, cabeçalho `x-gateway-overflow` com o número de ordem) e confirma
+  a entrega original. Assim um canal com centenas de comandos nunca impede outro canal
+  de receber o seu. As cópias voltam na ordem, e enquanto houver cópia pendente de um
+  canal os comandos novos dele também vão para o fim, então a ordem por canal se mantém.
+  Limite: essa ordem vive na memória da instância; se ela reiniciar (ou outra instância
+  consumir a fila) com cópias pendentes, as cópias entram na ordem em que chegarem.
 - Entre dois grupos do mesmo canal o gateway espera de 300 a 800 ms (sorteado), mesmo
   quando são de comandos seguidos, para não disparar dezenas de alterações no WhatsApp
   em rajada. Grupos já concluídos numa reentrega não esperam.
@@ -211,7 +221,20 @@ Paralelismo, ritmo e interrupção:
   `gateway.group` (nack com requeue depois de cancelar o consumidor) — nunca para a DLQ
   e nunca como `ok: false`; a próxima instância retoma do mesmo ponto pelo ledger. O
   requeue só acontece nesse caso: falha de um grupo fora do desligamento nunca devolve
-  o comando à fila. O consumidor tem até `ShutdownDrainTimeout` (20 s) para drenar.
+  o comando à fila. O mesmo vale quando o gateway sai por falha do consumidor ou do
+  servidor RPC: o comando em andamento é devolvido à fila, nunca publicado como falha.
+
+Desligamento e prazo do container:
+
+- O gateway drena em paralelo o consumidor de comandos (`ShutdownDrainTimeout`, 20 s)
+  e o servidor RPC (`RpcDrainTimeout`, 30 s), cada um com o próprio prazo. Somando o
+  encerramento de chamadas e a liberação dos shards, o processo precisa de até ~60 s
+  depois do SIGTERM.
+- O Docker mata o container **10 s** depois do SIGTERM por padrão, antes desses
+  prazos. O serviço do gateway no compose precisa de `stop_grace_period: 60s`. Esse
+  compose fica no `sender-vectax` (`infra/`) e quem ajusta é o usuário; sem isso, um
+  comando interrompido pelo SIGKILL continua seguro (sem ack, o broker o reentrega e o
+  ledger evita repetir o que já foi feito), mas o RPC em andamento é perdido.
 
 ### Ações
 
@@ -221,8 +244,8 @@ Paralelismo, ritmo e interrupção:
 | `unlock` | — | Desliga "somente admin envia mensagem" |
 | `remove_participants` | `phones` (obrigatório) | Remove os números listados; participantes não encontrados no grupo são ignorados, sem erro; o próprio número do canal nunca é removido |
 | `set_name` | `name` (obrigatório) | Renomeia o grupo; `invalid_request` se vazio |
-| `set_description` | `description` | Define o tópico do grupo (aceita string vazia, que limpa o tópico). O gateway lê o grupo antes e manda o id do tópico atual como anterior; se o tópico já é o pedido, não reenvia |
-| `set_photo` | `photoUrl` (obrigatório) | Baixa a imagem, reduz para o lado maior de **640 px** (limite da foto de grupo do WhatsApp), recodifica em JPEG e define como foto do grupo; JPEG que já cabe vai intacto. `invalid_request` se a URL não vier, a imagem não decodificar ou passar de 50 megapixels |
+| `set_description` | `description` | Define o tópico do grupo (aceita string vazia, que limpa o tópico). Faz um `GetGroupInfo` por grupo antes de alterar, para mandar o id do tópico atual como anterior; se o tópico já é o pedido, não reenvia |
+| `set_photo` | `photoUrl` (obrigatório) | Baixa a imagem, aplica a orientação EXIF (foto de celular não sai deitada), recorta o quadrado central (a foto de grupo do WhatsApp é quadrada), reduz para no máximo **640×640**, pinta transparência de branco e recodifica em JPEG; um JPEG já quadrado, de até 640 px e sem rotação vai intacto. No máximo duas conversões rodam ao mesmo tempo no processo. `invalid_request` se a URL não vier, a imagem não decodificar ou passar de 16 megapixels |
 
 `phones` aceita o número com ou sem `+`; a correspondência tenta o `phoneNumber` do
 participante, o `user` do JID e, quando o participante só tem LID, resolve o PN antes de
