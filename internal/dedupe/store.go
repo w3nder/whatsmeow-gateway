@@ -24,6 +24,14 @@ const createTableSQL = `CREATE TABLE IF NOT EXISTS gateway_sent_messages (
 const statusPending = "pending"
 const statusSent = "sent"
 
+const createActionsTableSQL = `CREATE TABLE IF NOT EXISTS gateway_group_actions (
+	command_id text NOT NULL,
+	group_jid text NOT NULL,
+	status text NOT NULL,
+	updated_at timestamptz NOT NULL DEFAULT now(),
+	PRIMARY KEY (command_id, group_jid)
+)`
+
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -37,6 +45,11 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 	if _, err := pool.Exec(ctx, createTableSQL); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("dedupe: create gateway_sent_messages table: %w", err)
+	}
+
+	if _, err := pool.Exec(ctx, createActionsTableSQL); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("dedupe: create gateway_group_actions table: %w", err)
 	}
 
 	return &Store{pool: pool}, nil
@@ -81,6 +94,34 @@ func (s *Store) MarkSent(ctx context.Context, messageID string) error {
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("dedupe: mark sent %s: no ledger row found", messageID)
+	}
+	return nil
+}
+
+func (s *Store) BeginAction(ctx context.Context, commandID, groupJID string) (bool, error) {
+	var status string
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO gateway_group_actions (command_id, group_jid, status) VALUES ($1, $2, $3)
+		 ON CONFLICT (command_id, group_jid) DO UPDATE SET updated_at = now()
+		 RETURNING status`,
+		commandID, groupJID, statusPending,
+	).Scan(&status)
+	if err != nil {
+		return false, fmt.Errorf("dedupe: begin action %s/%s: %w", commandID, groupJID, err)
+	}
+	return status == statusSent, nil
+}
+
+func (s *Store) MarkActionDone(ctx context.Context, commandID, groupJID string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE gateway_group_actions SET status = $3, updated_at = now() WHERE command_id = $1 AND group_jid = $2`,
+		commandID, groupJID, statusSent,
+	)
+	if err != nil {
+		return fmt.Errorf("dedupe: mark action done %s/%s: %w", commandID, groupJID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("dedupe: mark action done %s/%s: no ledger row found", commandID, groupJID)
 	}
 	return nil
 }
