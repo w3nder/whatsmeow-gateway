@@ -100,7 +100,8 @@ func TestOverflowClearsAChannelThatStalled(t *testing.T) {
 	clock := time.Now()
 	o.now = func() time.Time { return clock }
 	o.send("x", rabbitmq.Delivery{})
-	<-o.queue
+	published := <-o.queue
+	published.spill.unpublished.Add(-1)
 	if o.admits("x", rabbitmq.Delivery{}) {
 		t.Fatal("while the copy is out, new commands wait")
 	}
@@ -165,5 +166,77 @@ func TestOverflowRetriesAFailedCopyKeepingItsNumber(t *testing.T) {
 	}
 	if len(o.channels) != 0 {
 		t.Fatalf("the channel must drain after the retried copies come back, state %v", o.channels)
+	}
+}
+
+func TestOverflowKeepsOrderWhileItsCopiesAreStillUnpublished(t *testing.T) {
+	o := spillOnly("a")
+	clock := time.Now()
+	o.now = func() time.Time { return clock }
+	o.send("x", rabbitmq.Delivery{})
+	pending := <-o.queue
+
+	clock = clock.Add(overflowStallAfter + time.Second)
+	if o.admits("x", rabbitmq.Delivery{}) {
+		t.Fatal("a copy still retrying its publish must keep newer commands behind it, stall or not")
+	}
+	pending.spill.unpublished.Add(-1)
+	if !o.admits("x", rabbitmq.Delivery{}) {
+		t.Fatal("once every copy is published the stall guard may clear the channel")
+	}
+}
+
+func TestReturnsFromEarlierAttemptsAreDrainedAndAClosedChannelIsNotAReturn(t *testing.T) {
+	returns := make(chan rabbitmq.Return, 1)
+	returns <- rabbitmq.Return{}
+	drainReturns(returns)
+	if copyReturned(returns) {
+		t.Fatal("a return left by an earlier attempt must not be blamed on the next publish")
+	}
+	close(returns)
+	drainReturns(returns)
+	if copyReturned(returns) {
+		t.Fatal("a closed return channel is not a return")
+	}
+	live := make(chan rabbitmq.Return, 1)
+	live <- rabbitmq.Return{}
+	if !copyReturned(live) {
+		t.Fatal("a return that arrived for this publish must count")
+	}
+}
+
+type countingTail struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *countingTail) publish(rabbitmq.Delivery, rabbitmq.Table) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	return nil
+}
+
+func TestOverflowHandsBackQueuedCopiesWithoutPublishingOnceClosed(t *testing.T) {
+	tail := &countingTail{}
+	ack := &recordingAcknowledger{}
+	o := &overflow{
+		nonce: "a", publish: tail.publish, hold: time.Hour, retryFirst: time.Millisecond, now: time.Now,
+		channels: map[string]*channelSpill{}, queue: make(chan overflowItem, 4), stop: make(chan struct{}), done: make(chan struct{}),
+	}
+	for tag := range uint64(3) {
+		o.send("x", rabbitmq.Delivery{Acknowledger: ack, DeliveryTag: tag + 1})
+	}
+	go o.run()
+	o.close()
+
+	if tail.calls != 0 {
+		t.Fatalf("a closed spill must not spend a publish attempt per queued copy, got %d", tail.calls)
+	}
+	if len(ack.nacks) != 3 || len(ack.acks) != 0 {
+		t.Fatalf("every queued original goes back to the queue at once, nacks %v acks %v", ack.nacks, ack.acks)
+	}
+	if n := o.channels["x"].unpublished.Load(); n != 0 {
+		t.Fatalf("handed back copies are no longer pending, %d left", n)
 	}
 }
