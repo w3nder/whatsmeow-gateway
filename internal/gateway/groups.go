@@ -235,6 +235,7 @@ const (
 	groupItemTimeout = 30 * time.Second
 	groupGapMin      = 300 * time.Millisecond
 	groupGapJitter   = 500 * time.Millisecond
+	groupHaltLimit   = 3
 )
 
 var errShuttingDown = fmt.Errorf("gateway: shutting down in the middle of a group command: %w", amqp.ErrRequeue)
@@ -365,7 +366,7 @@ func (g *gateway) applyGroupAction(ctx, work context.Context, run *groupCommandR
 		return result, errShuttingDown
 	}
 	if groups.IsUnavailable(err) {
-		return result, fmt.Errorf("gateway: whatsapp unavailable at %s/%s, halting the command for a later replay: %w", run.cmd.CommandID, raw, err)
+		return g.haltOrGiveUp(work, run, raw, err, fail)
 	}
 	if err != nil {
 		return fail(err)
@@ -375,6 +376,17 @@ func (g *gateway) applyGroupAction(ctx, work context.Context, run *groupCommandR
 		g.logger.Error("gateway: mark group action done", "command_id", run.cmd.CommandID, "group_jid", raw, "error", err)
 	}
 	return result, nil
+}
+
+func (g *gateway) haltOrGiveUp(work context.Context, run *groupCommandRun, raw string, err error, fail func(error) (amqp.GroupActionEvent, error)) (amqp.GroupActionEvent, error) {
+	halts, haltErr := g.dedupe.RecordActionHalt(work, run.cmd.CommandID, raw)
+	if haltErr != nil {
+		g.logger.Error("gateway: record group action halt", "command_id", run.cmd.CommandID, "group_jid", raw, "error", haltErr)
+	}
+	if haltErr != nil || halts < groupHaltLimit {
+		return amqp.GroupActionEvent{}, fmt.Errorf("gateway: whatsapp unavailable at %s/%s (halt %d of %d), halting the command for a later replay: %w", run.cmd.CommandID, raw, halts, groupHaltLimit, err)
+	}
+	return fail(err)
 }
 
 func infoResponse(info groups.Info) groupInfoResponse {

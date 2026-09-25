@@ -565,3 +565,47 @@ func TestGroupCommandReinjectedFromTheDLQSkipsFinishedGroupsAndFailsTheLockedOne
 		t.Fatalf("the reinjected command must be acked, gateway.group=%d gateway.group.dlq=%d", ready, dead)
 	}
 }
+
+func TestGroupCommandGroupFailingWithServerErrorOnEveryReplayFailsAloneOnTheThirdHalt(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.markPaired()
+	infra := startGatewayInfra(t, "channel-groups")
+	cancel, runErrCh := startGroupGateway(t, infra, fake, "gateway-groups")
+	events := probeEvents(t, infra.conn, gatewayamqp.GroupActionRoutingKey)
+
+	probe := newRpcProbe(t, infra.conn)
+	broken := probe.call(t, "group.create", "a", `{"tenantId":"t","channelId":"channel-groups","name":"G1"}`, 10*time.Second)["result"].(map[string]any)["groupJid"].(string)
+	healthy := probe.call(t, "group.create", "b", `{"tenantId":"t","channelId":"channel-groups","name":"G2"}`, 10*time.Second)["result"].(map[string]any)["groupJid"].(string)
+	fake.mu.Lock()
+	fake.groupErrs = map[string]error{broken: whatsmeow.ErrIQServiceUnavailable}
+	fake.mu.Unlock()
+
+	cmd := gatewayamqp.GatewayGroupCommand{CommandID: "cmd-always-503", TenantID: "t", ChannelID: "channel-groups", Action: "lock", GroupJIDs: []string{broken, healthy}}
+	for replay := 1; replay < 3; replay++ {
+		publishGroupCommand(t, infra.conn, cmd)
+		waitUntil(t, 15*time.Second, "the halted command in gateway.group.dlq", func() bool {
+			_, dead := groupQueueDepths(t, infra.conn)
+			return dead == replay
+		})
+		drainEvents(events, func(d rabbitmq.Delivery) {
+			t.Fatalf("halt %d of the limit must not publish a result, got %s", replay, d.Body)
+		})
+	}
+
+	publishGroupCommand(t, infra.conn, cmd)
+	got := collectGroupResults(t, events, 2)
+	if res := got[broken]; res.OK || !strings.HasPrefix(res.Error, gatewayamqp.RpcCodeUnavailable+": ") {
+		t.Fatalf("on the third halt the group must fail on its own as unavailable, got %+v", res)
+	}
+	if !got[healthy].OK {
+		t.Fatalf("the group after the broken one must finally run, got %+v", got[healthy])
+	}
+
+	shutdownStatusRoundtripGateway(t, cancel, runErrCh)
+	if ready, dead := groupQueueDepths(t, infra.conn); ready != 0 || dead != 2 {
+		t.Fatalf("only the two earlier halts may sit in the dlq, gateway.group=%d gateway.group.dlq=%d", ready, dead)
+	}
+	if calls := fake.announceCallCount(); calls != 4 {
+		t.Fatalf("the broken group must be tried three times and the healthy one once, announce calls %d", calls)
+	}
+}

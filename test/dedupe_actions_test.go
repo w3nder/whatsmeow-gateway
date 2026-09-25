@@ -58,3 +58,41 @@ func TestDedupeActionsKeepAFailedGroupForTheReplay(t *testing.T) {
 		t.Fatalf("a failed group must replay its failure instead of running again: record=%+v err=%v", record, err)
 	}
 }
+
+func TestDedupeActionsRefuseAFailureWithoutReason(t *testing.T) {
+	store := openActionLedger(t)
+	ctx := context.Background()
+
+	if _, err := store.BeginAction(ctx, "cmd-empty", "g1@g.us"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := store.MarkActionFailed(ctx, "cmd-empty", "g1@g.us", ""); err == nil {
+		t.Fatal("a failure without reason would replay as ok:true and must be refused")
+	}
+	record, err := store.BeginAction(ctx, "cmd-empty", "g1@g.us")
+	if err != nil || record.Finished {
+		t.Fatalf("the group must stay pending after a refused failure: record=%+v err=%v", record, err)
+	}
+}
+
+func TestDedupeActionsCountTheHaltsOfAGroup(t *testing.T) {
+	store := openActionLedger(t)
+	ctx := context.Background()
+
+	if _, err := store.RecordActionHalt(ctx, "cmd-halt", "g1@g.us"); err == nil {
+		t.Fatal("a halt on a group never claimed must be refused")
+	}
+	for want := 1; want <= 3; want++ {
+		if _, err := store.BeginAction(ctx, "cmd-halt", "g1@g.us"); err != nil {
+			t.Fatalf("claim %d: %v", want, err)
+		}
+		halts, err := store.RecordActionHalt(ctx, "cmd-halt", "g1@g.us")
+		if err != nil || halts != want {
+			t.Fatalf("halt %d: got %d err=%v", want, halts, err)
+		}
+	}
+	record, err := store.BeginAction(ctx, "cmd-halt", "g1@g.us")
+	if err != nil || record.Finished {
+		t.Fatalf("halts alone never finish a group: record=%+v err=%v", record, err)
+	}
+}

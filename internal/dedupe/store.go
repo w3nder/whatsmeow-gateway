@@ -34,7 +34,9 @@ const createActionsTableSQL = `CREATE TABLE IF NOT EXISTS gateway_group_actions 
 	PRIMARY KEY (command_id, group_jid)
 )`
 
-const addActionFailureColumnSQL = `ALTER TABLE gateway_group_actions ADD COLUMN IF NOT EXISTS failure text`
+const addActionFailureColumnsSQL = `ALTER TABLE gateway_group_actions
+	ADD COLUMN IF NOT EXISTS failure text,
+	ADD COLUMN IF NOT EXISTS halts integer NOT NULL DEFAULT 0`
 
 type Store struct {
 	pool *pgxpool.Pool
@@ -56,9 +58,9 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		return nil, fmt.Errorf("dedupe: create gateway_group_actions table: %w", err)
 	}
 
-	if _, err := pool.Exec(ctx, addActionFailureColumnSQL); err != nil {
+	if _, err := pool.Exec(ctx, addActionFailureColumnsSQL); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("dedupe: add failure column to gateway_group_actions: %w", err)
+		return nil, fmt.Errorf("dedupe: add failure columns to gateway_group_actions: %w", err)
 	}
 
 	return &Store{pool: pool}, nil
@@ -126,11 +128,10 @@ func (s *Store) BeginAction(ctx context.Context, commandID, groupJID string) (Ac
 	if err != nil {
 		return ActionRecord{}, fmt.Errorf("dedupe: begin action %s/%s: %w", commandID, groupJID, err)
 	}
-	record := ActionRecord{Finished: status == statusSent || status == statusFailed, Removed: removed}
-	if status == statusFailed && failure != nil {
-		record.Failure = *failure
+	if status == statusFailed && failure != nil && *failure != "" {
+		return ActionRecord{Finished: true, Failure: *failure}, nil
 	}
-	return record, nil
+	return ActionRecord{Finished: status == statusSent, Removed: removed}, nil
 }
 
 func (s *Store) MarkActionDone(ctx context.Context, commandID, groupJID string, removed *int) error {
@@ -138,7 +139,25 @@ func (s *Store) MarkActionDone(ctx context.Context, commandID, groupJID string, 
 }
 
 func (s *Store) MarkActionFailed(ctx context.Context, commandID, groupJID, failure string) error {
+	if failure == "" {
+		return fmt.Errorf("dedupe: mark action failed %s/%s: the failure reason is required", commandID, groupJID)
+	}
 	return s.finishAction(ctx, commandID, groupJID, statusFailed, nil, &failure)
+}
+
+func (s *Store) RecordActionHalt(ctx context.Context, commandID, groupJID string) (int, error) {
+	var halts int
+	err := s.pool.QueryRow(ctx,
+		`UPDATE gateway_group_actions SET halts = halts + 1, updated_at = now() WHERE command_id = $1 AND group_jid = $2 RETURNING halts`,
+		commandID, groupJID,
+	).Scan(&halts)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("dedupe: record action halt %s/%s: no ledger row found", commandID, groupJID)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("dedupe: record action halt %s/%s: %w", commandID, groupJID, err)
+	}
+	return halts, nil
 }
 
 func (s *Store) finishAction(ctx context.Context, commandID, groupJID, status string, removed *int, failure *string) error {
