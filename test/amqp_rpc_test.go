@@ -298,6 +298,23 @@ func TestRpcServerToleratesTheSecondResolutionOfTheTimestamp(t *testing.T) {
 	}
 
 	probe := newRpcProbe(t, conn)
+	stampCheck, err := probe.ch.QueueDeclare("", false, true, true, false, nil)
+	if err != nil {
+		t.Fatalf("declare stamp check queue: %v", err)
+	}
+	withNanos := time.Date(2026, 9, 25, 12, 0, 0, 900_000_000, time.UTC)
+	if err := probe.ch.PublishWithContext(context.Background(), "", stampCheck.Name, false, false, rabbitmq.Publishing{Timestamp: withNanos}); err != nil {
+		t.Fatalf("publish stamp check: %v", err)
+	}
+	<-probe.confirms
+	stamped, ok, err := probe.ch.Get(stampCheck.Name, true)
+	if err != nil || !ok {
+		t.Fatalf("get stamp check: ok=%v err=%v", ok, err)
+	}
+	if !stamped.Timestamp.Equal(withNanos.Truncate(time.Second)) {
+		t.Fatalf("the AMQP timestamp carries whole seconds only, got %s", stamped.Timestamp)
+	}
+
 	if err := probe.ch.PublishWithContext(context.Background(), "", gatewayamqp.RpcQueueName("stamped.test"), false, false, rabbitmq.Publishing{
 		ContentType: "application/json", ReplyTo: probe.replyQueue, CorrelationId: "corr-stamped", Expiration: "1500", Body: []byte(`{}`),
 		Timestamp: time.Now().Truncate(time.Second).Add(-time.Second),
