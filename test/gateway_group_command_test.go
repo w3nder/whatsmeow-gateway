@@ -508,6 +508,48 @@ func TestGroupCommandLockedGroupFailsAloneAndTheCommandCompletes(t *testing.T) {
 	}
 }
 
+func TestGroupCommandSetPhotoOnAGroupThatRefusesTheChannelFailsAloneAsForbidden(t *testing.T) {
+	photo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var buf bytes.Buffer
+		_ = png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 2, 2)))
+		_, _ = w.Write(buf.Bytes())
+	}))
+	defer photo.Close()
+
+	fake := newFakeWAClient()
+	fake.markPaired()
+	infra := startGatewayInfra(t, "channel-groups")
+	cancel, runErrCh := startGroupGateway(t, infra, fake, "gateway-groups")
+	events := probeEvents(t, infra.conn, gatewayamqp.GroupActionRoutingKey)
+
+	probe := newRpcProbe(t, infra.conn)
+	var groupJIDs []string
+	for _, id := range []string{"a", "b", "c"} {
+		res := probe.call(t, "group.create", id, `{"tenantId":"t","channelId":"channel-groups","name":"G"}`, 10*time.Second)
+		groupJIDs = append(groupJIDs, res["result"].(map[string]any)["groupJid"].(string))
+	}
+	refusing := groupJIDs[1]
+	fake.mu.Lock()
+	fake.groupErrs = map[string]error{refusing: &whatsmeow.IQError{Code: 401, Text: "not-authorized"}}
+	fake.mu.Unlock()
+
+	publishGroupCommand(t, infra.conn, gatewayamqp.GatewayGroupCommand{CommandID: "cmd-photo-forbidden", TenantID: "t", ChannelID: "channel-groups", Action: "set_photo", GroupJIDs: groupJIDs, Params: gatewayamqp.GroupActionParams{PhotoURL: photo.URL + "/p.png"}})
+
+	got := collectGroupResults(t, events, len(groupJIDs))
+	if !got[groupJIDs[0]].OK || !got[groupJIDs[2]].OK {
+		t.Fatalf("the groups around the refusing one must get the photo, got %+v", got)
+	}
+	const forbidden = gatewayamqp.RpcCodeForbidden + ": not an admin of the group (401)"
+	if res := got[refusing]; res.OK || res.Error != forbidden {
+		t.Fatalf("the refusing group must fail on its own with %q, got %+v", forbidden, res)
+	}
+
+	shutdownStatusRoundtripGateway(t, cancel, runErrCh)
+	if ready, dead := groupQueueDepths(t, infra.conn); ready != 0 || dead != 0 {
+		t.Fatalf("a group refusing the channel must not hold the command back, gateway.group=%d gateway.group.dlq=%d", ready, dead)
+	}
+}
+
 func TestGroupCommandReinjectedFromTheDLQSkipsFinishedGroupsAndFailsTheLockedOne(t *testing.T) {
 	fake := newFakeWAClient()
 	fake.markPaired()
