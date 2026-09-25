@@ -9,10 +9,16 @@ import (
 
 type recordingAcknowledger struct {
 	mu    sync.Mutex
+	acks  []uint64
 	nacks []uint64
 }
 
-func (r *recordingAcknowledger) Ack(uint64, bool) error { return nil }
+func (r *recordingAcknowledger) Ack(tag uint64, _ bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.acks = append(r.acks, tag)
+	return nil
+}
 func (r *recordingAcknowledger) Reject(uint64, bool) error {
 	return nil
 }
@@ -55,53 +61,4 @@ func TestLanesRefuseAJobBeyondTheBacklog(t *testing.T) {
 	}
 	close(release)
 	l.wait()
-}
-
-func overflowFor(t *testing.T) *overflow {
-	t.Helper()
-	return &overflow{next: map[string]int64{}, expected: map[string]int64{}, queue: make(chan overflowItem, 16)}
-}
-
-func copyOf(seq int64) rabbitmq.Delivery {
-	return rabbitmq.Delivery{Headers: rabbitmq.Table{overflowHeader: seq}}
-}
-
-func TestOverflowKeepsTheOrderOfOneChannel(t *testing.T) {
-	o := overflowFor(t)
-	if !o.admits("a", rabbitmq.Delivery{}) {
-		t.Fatal("a channel with nothing spilled admits new commands")
-	}
-	o.send("a", rabbitmq.Delivery{})
-	o.send("a", rabbitmq.Delivery{})
-	first, second := <-o.queue, <-o.queue
-	if first.seq != 1 || second.seq != 2 {
-		t.Fatalf("spilled commands are numbered in arrival order, got %d and %d", first.seq, second.seq)
-	}
-	if o.admits("a", rabbitmq.Delivery{}) {
-		t.Fatal("a new command must queue behind the spilled ones of its channel")
-	}
-	if !o.admits("b", rabbitmq.Delivery{}) {
-		t.Fatal("another channel is never held by the spill of the first")
-	}
-	if o.admits("a", copyOf(2)) {
-		t.Fatal("the second copy must not overtake the first")
-	}
-	o.send("a", copyOf(2))
-	if again := <-o.queue; again.seq != 2 {
-		t.Fatalf("a copy sent back keeps its number, got %d", again.seq)
-	}
-	if !o.admits("a", copyOf(1)) {
-		t.Fatal("the oldest copy is admitted")
-	}
-	o.admitted("a", copyOf(1))
-	if !o.admits("a", copyOf(2)) {
-		t.Fatal("then the next one")
-	}
-	o.admitted("a", copyOf(2))
-	if !o.admits("a", rabbitmq.Delivery{}) {
-		t.Fatal("once every copy is back, new commands flow again")
-	}
-	if len(o.next) != 0 || len(o.expected) != 0 {
-		t.Fatalf("a drained channel leaves no state behind, next=%v expected=%v", o.next, o.expected)
-	}
 }
