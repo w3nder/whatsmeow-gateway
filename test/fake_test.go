@@ -61,12 +61,14 @@ type fakeWAClient struct {
 	participantCalls []participantCall
 	inviteLinks      map[string]string
 	groupErr         error
+	groupErrs        map[string]error
 	nextGroupSeq     int
 	announceDelay    time.Duration
 	announceCount    int
 	announceEntered  int
 	announceStartsAt []time.Time
 	dropAfterLocks   int
+	dropped          bool
 	topicSeq         int
 	createDelay      time.Duration
 	createEntered    int
@@ -244,6 +246,9 @@ func (f *fakeWAClient) CreateGroup(ctx context.Context, req whatsmeow.ReqCreateG
 func (f *fakeWAClient) GetGroupInfo(ctx context.Context, jid types.JID) (*types.GroupInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.groupErrs[jid.String()]; err != nil {
+		return nil, err
+	}
 	if info, ok := f.groups[jid.String()]; ok {
 		return info, nil
 	}
@@ -283,6 +288,12 @@ func (f *fakeWAClient) SetGroupAnnounce(ctx context.Context, jid types.JID, anno
 	if f.groupErr != nil {
 		return f.groupErr
 	}
+	if err := f.groupErrs[jid.String()]; err != nil {
+		return err
+	}
+	if f.dropped {
+		return whatsmeow.ErrIQDisconnected
+	}
 	if !f.connected {
 		return whatsmeow.ErrNotConnected
 	}
@@ -298,6 +309,7 @@ func (f *fakeWAClient) SetGroupAnnounce(ctx context.Context, jid types.JID, anno
 	}
 	if f.dropAfterLocks > 0 && len(f.announceCalls) >= f.dropAfterLocks {
 		f.connected = false
+		f.dropped = true
 	}
 	return nil
 }

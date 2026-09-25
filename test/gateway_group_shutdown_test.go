@@ -113,9 +113,9 @@ func TestGroupCommandChannelDroppingMidCommandDeadLettersWithoutFailures(t *test
 	drainEvents(events, func(d rabbitmq.Delivery) {
 		t.Fatalf("a channel that drops mid-command is transient: no ok:false may be published, got %s", d.Body)
 	})
-	alreadyDone, _, err := infra.dedupe.BeginAction(t.Context(), "cmd-drop", groupJIDs[0])
-	if err != nil || !alreadyDone {
-		t.Fatalf("the ledger must keep the locked group done for the replay: done=%v err=%v", alreadyDone, err)
+	record, err := infra.dedupe.BeginAction(t.Context(), "cmd-drop", groupJIDs[0])
+	if err != nil || !record.Finished || record.Failure != "" {
+		t.Fatalf("the ledger must keep the locked group done for the replay: record=%+v err=%v", record, err)
 	}
 }
 

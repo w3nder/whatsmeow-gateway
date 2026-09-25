@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"image"
 	"image/jpeg"
 	"image/png"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/socket"
 	"go.mau.fi/whatsmeow/types"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
@@ -488,6 +490,12 @@ func TestClassifyMapsWhatsmeowErrors(t *testing.T) {
 		whatsmeow.ErrIQRateOverLimit:       amqp.RpcCodeUnavailable,
 		whatsmeow.ErrIQInternalServerError: amqp.RpcCodeUnavailable,
 		whatsmeow.ErrIQServiceUnavailable:  amqp.RpcCodeUnavailable,
+		whatsmeow.ErrIQPartialServerError:  amqp.RpcCodeUnavailable,
+		whatsmeow.ErrIQLocked:              amqp.RpcCodeLocked,
+		whatsmeow.ErrIQForbidden:           amqp.RpcCodeBadGateway,
+		whatsmeow.ErrIQNotFound:            amqp.RpcCodeBadGateway,
+		whatsmeow.ErrIQNotAcceptable:       amqp.RpcCodeBadGateway,
+		whatsmeow.ErrIQBadRequest:          amqp.RpcCodeBadGateway,
 		context.DeadlineExceeded:           amqp.RpcCodeUnavailable,
 		context.Canceled:                   amqp.RpcCodeUnavailable,
 		errors.New("anything else"):        amqp.RpcCodeInternal,
@@ -496,6 +504,56 @@ func TestClassifyMapsWhatsmeowErrors(t *testing.T) {
 		var rpcErr *amqp.RpcError
 		if !errors.As(groups.Classify(in), &rpcErr) || rpcErr.Code != want {
 			t.Fatalf("%v → %v, want %s", in, groups.Classify(in), want)
+		}
+	}
+}
+
+func TestClassifyReportsALockedGroupWithItsOwnCode(t *testing.T) {
+	for _, in := range []error{whatsmeow.ErrIQLocked, fmt.Errorf("set announce: %w", &whatsmeow.IQError{Code: 423, Text: "locked"})} {
+		var rpcErr *amqp.RpcError
+		if !errors.As(groups.Classify(in), &rpcErr) || rpcErr.Code != amqp.RpcCodeLocked || rpcErr.Message != "group is locked (423)" {
+			t.Fatalf("%v → %+v, want locked with the fixed message", in, rpcErr)
+		}
+		if rpcErr.Error() != "locked: group is locked (423)" {
+			t.Fatalf("the ok:false error of a locked group must read %q, got %q", "locked: group is locked (423)", rpcErr.Error())
+		}
+	}
+}
+
+func TestClassifySplitsPerGroupFailuresFromCommandLevelOnes(t *testing.T) {
+	perGroup := []error{
+		whatsmeow.ErrIQLocked,
+		whatsmeow.ErrIQForbidden,
+		whatsmeow.ErrIQNotFound,
+		whatsmeow.ErrIQNotAcceptable,
+		whatsmeow.ErrIQBadRequest,
+		whatsmeow.ErrGroupNotFound,
+		whatsmeow.ErrNotInGroup,
+		&whatsmeow.IQError{Code: 410, Text: "gone"},
+	}
+	for _, in := range perGroup {
+		if groups.IsUnavailable(groups.Classify(in)) {
+			t.Fatalf("%v is specific to one group and must never halt the command", in)
+		}
+	}
+	commandLevel := []error{
+		whatsmeow.ErrIQRateOverLimit,
+		whatsmeow.ErrIQInternalServerError,
+		whatsmeow.ErrIQServiceUnavailable,
+		whatsmeow.ErrIQPartialServerError,
+		&whatsmeow.IQError{Code: 502, Text: "bad-gateway"},
+		whatsmeow.ErrIQTimedOut,
+		whatsmeow.ErrNotConnected,
+		whatsmeow.ErrNotLoggedIn,
+		whatsmeow.ErrIQDisconnected,
+		&whatsmeow.DisconnectedError{Action: "message send"},
+		fmt.Errorf("set announce: %w", socket.ErrSocketClosed),
+		context.Canceled,
+		context.DeadlineExceeded,
+	}
+	for _, in := range commandLevel {
+		if !groups.IsUnavailable(groups.Classify(in)) {
+			t.Fatalf("%v concerns the channel or WhatsApp itself and must halt the command", in)
 		}
 	}
 }
