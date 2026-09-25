@@ -45,8 +45,9 @@ de comandos (ver "Desligamento e prazo do container" abaixo).
 |---|---|
 | `invalid_request` | Payload não é JSON válido, falta campo obrigatório ou `groupJid` não é um JID de grupo |
 | `not_found` | O canal não tem sessão pareada nesta instância |
-| `unavailable` | O canal está pareado mas não está conectado agora, o WhatsApp respondeu com limite de taxa (429), erro de servidor (500/503) ou não respondeu no prazo, ou a instância está desligando (ela não reabre o canal nesse momento) — transitório, vale tentar de novo depois |
-| `bad_gateway` | O WhatsApp recusou o pedido (ex.: grupo inexistente, sem permissão) |
+| `unavailable` | O canal está pareado mas não está conectado agora, o WhatsApp respondeu com limite de taxa (429), erro de servidor (5xx) ou não respondeu no prazo, ou a instância está desligando (ela não reabre o canal nesse momento) — transitório, vale tentar de novo depois |
+| `locked` | O grupo está suspenso/bloqueado pelo WhatsApp (IQ 423); mensagem fixa `group is locked (423)`. Permanente para aquele grupo — tentar de novo não adianta |
+| `bad_gateway` | O WhatsApp recusou o pedido por um motivo daquele grupo (ex.: grupo inexistente, canal fora do grupo ou sem ser admin, pedido inválido — IQ 400, 403, 404, 406 e demais códigos abaixo de 500 que não sejam 423 nem 429) |
 | `internal` | O handler entrou em pânico ou a resposta não pôde ser serializada |
 
 ### `group.create`
@@ -232,12 +233,17 @@ Paralelismo, ritmo e interrupção:
   em rajada. Grupos já concluídos numa reentrega não esperam.
 - Cada grupo tem prazo de **30 s**. Em `set_photo` a imagem é baixada e convertida
   **uma vez** por comando, antes do primeiro grupo (download limitado a 20 s e 8 MiB).
-- **Limite de taxa (429)** — e também erro 500/503, timeout ou o canal caindo no meio do
+- **Falha de um grupo só** (tabela "Falha por grupo × falha do comando" abaixo) nunca
+  para o comando: o grupo sai com `ok: false`, a falha fica no ledger e o gateway segue
+  para o próximo `groupJid`.
+- **Limite de taxa (429)** — e também erro 5xx, timeout ou o canal caindo no meio do
   comando — é `unavailable`: o gateway **para o comando** e o rejeita (nack sem requeue),
   o que o leva para a DLQ `gateway.group.dlq`, sem publicar falso `ok: false`. O gateway
   não reinjeta a DLQ: quem devolve o comando para `gateway.group` é o `DeadLetterWatch`
   do backend (no boot, quando a DLQ cresce e a cada hora). Na reentrega, os grupos já
-  concluídos só republicam o resultado pelo ledger e os pendentes são aplicados.
+  concluídos — com sucesso ou com falha do próprio grupo — só republicam o resultado
+  pelo ledger (o mesmo `ok`/`error`, sem chamar o WhatsApp) e os pendentes são
+  aplicados.
 - **Desligamento** no meio do comando: o grupo em andamento termina (ou falha por
   `unavailable` porque o canal já foi desconectado) e o comando volta para a fila
   `gateway.group` (nack com requeue depois de cancelar o consumidor) — nunca para a DLQ
@@ -257,6 +263,30 @@ Desligamento e prazo do container:
   compose fica no `sender-vectax` (`infra/`) e quem ajusta é o usuário; sem isso, um
   comando interrompido pelo SIGKILL continua seguro (sem ack, o broker o reentrega e o
   ledger evita repetir o que já foi feito), mas o RPC em andamento é perdido.
+
+### Falha por grupo × falha do comando
+
+O erro do WhatsApp decide se afeta só aquele grupo ou o comando inteiro:
+
+| Condição | Código | Efeito no comando |
+|---|---|---|
+| IQ 423 — grupo suspenso/bloqueado pelo WhatsApp | `locked` | só o grupo falha: `ok: false`, `error` `locked: group is locked (423)`; segue para o próximo |
+| IQ 403 — canal fora do grupo ou sem ser admin | `bad_gateway` | só o grupo falha; segue |
+| IQ 404 — grupo inexistente | `bad_gateway` | só o grupo falha; segue |
+| IQ 400 / 406 — pedido inválido para o grupo (ex.: nome longo demais) | `bad_gateway` | só o grupo falha; segue |
+| Qualquer outro IQ abaixo de 500 (exceto 429) | `bad_gateway` | só o grupo falha; segue |
+| `groupJid` que não é JID de grupo, `params` faltando | `invalid_request` | só o grupo falha; segue |
+| Canal sem sessão ou offline **no início** do comando | `not_found` / `unavailable` | cada grupo falha com `ok: false`; comando confirmado |
+| IQ 429 — limite de taxa | `unavailable` | **para o comando** (nack → DLQ), sem `ok: false` |
+| IQ 5xx — erro do servidor do WhatsApp | `unavailable` | **para o comando** (nack → DLQ), sem `ok: false` |
+| Timeout do IQ, canal caindo no meio, contexto cancelado | `unavailable` | **para o comando** (nack → DLQ), sem `ok: false` |
+| Desligamento do gateway | — | comando volta para `gateway.group` (nack com requeue) |
+
+A falha de um grupo é gravada no ledger `(commandId, groupJid)` como concluída com
+falha: uma reentrega do mesmo `commandId` (inclusive um comando reinjetado da DLQ)
+republica o mesmo `ok: false` sem chamar o WhatsApp de novo. Um comando que parou num
+grupo antes desta regra (o grupo ficou pendente no ledger) é tentado de novo nesse grupo
+na reinjeção, e a falha dele agora só marca o grupo.
 
 ### Ações
 
@@ -297,7 +327,9 @@ feita, no caso de reentrega).
 | `removed` | int | só em `remove_participants` — quantos participantes o WhatsApp aceitou remover (entradas sem erro na resposta; pode ser `0` se nenhum telefone bateu com o grupo) |
 
 `ok: false` não derruba o consumidor: o gateway registra o `error` e segue para o
-próximo `groupJid` da lista. Com o canal offline **no início** do comando (não conecta
+próximo `groupJid` da lista. `error` é `<código>: <mensagem>`, com o código da tabela de
+erros do RPC (ex.: `locked: group is locked (423)`, `bad_gateway: info query returned
+status 403: forbidden`). Com o canal offline **no início** do comando (não conecta
 nem retomando a sessão), cada grupo sai com `ok: false` e `error` começando por
 `unavailable:`, e o comando é confirmado — um canal fora do ar por horas não pode ficar
 indo e voltando da DLQ. Se o canal cai **no meio** do comando, vale a regra de
