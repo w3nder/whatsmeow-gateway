@@ -82,6 +82,7 @@ func bootGatewayDeps(t *testing.T, fake *fakeWAClient, channelID, name string) (
 	}
 
 	return conn, gateway.Deps{
+		Rpc:                  gatewayamqp.NewRpcServer(conn, 4),
 		Consumer:             consumer,
 		Publisher:            publisher,
 		Manager:              mgr,
@@ -100,7 +101,6 @@ func setupStatusRoundtripGateway(t *testing.T, fake *fakeWAClient, channelID str
 	t.Helper()
 
 	conn, deps := bootGatewayDeps(t, fake, channelID, "gateway-status-roundtrip")
-	deps.Rpc = gatewayamqp.NewRpcServer(conn, 4)
 	dedupeStore = deps.Dedupe
 
 	var err error

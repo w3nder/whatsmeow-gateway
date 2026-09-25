@@ -17,6 +17,7 @@ type rpcProbe struct {
 	ch         *rabbitmq.Channel
 	replyQueue string
 	replies    <-chan rabbitmq.Delivery
+	confirms   chan rabbitmq.Confirmation
 }
 
 func newRpcProbe(t *testing.T, conn *rabbitmq.Connection) *rpcProbe {
@@ -26,6 +27,10 @@ func newRpcProbe(t *testing.T, conn *rabbitmq.Connection) *rpcProbe {
 		t.Fatalf("open probe channel: %v", err)
 	}
 	t.Cleanup(func() { _ = ch.Close() })
+	if err := ch.Confirm(false); err != nil {
+		t.Fatalf("enable publisher confirms: %v", err)
+	}
+	confirms := ch.NotifyPublish(make(chan rabbitmq.Confirmation, 1))
 	q, err := ch.QueueDeclare("", false, true, true, false, nil)
 	if err != nil {
 		t.Fatalf("declare reply queue: %v", err)
@@ -34,7 +39,7 @@ func newRpcProbe(t *testing.T, conn *rabbitmq.Connection) *rpcProbe {
 	if err != nil {
 		t.Fatalf("consume reply queue: %v", err)
 	}
-	return &rpcProbe{ch: ch, replyQueue: q.Name, replies: replies}
+	return &rpcProbe{ch: ch, replyQueue: q.Name, replies: replies, confirms: confirms}
 }
 
 func (p *rpcProbe) call(t *testing.T, operation, correlationID string, payload string, timeout time.Duration) map[string]any {
@@ -50,6 +55,14 @@ func (p *rpcProbe) call(t *testing.T, operation, correlationID string, payload s
 		Body:          []byte(payload),
 	}); err != nil {
 		t.Fatalf("publish rpc request: %v", err)
+	}
+	select {
+	case confirm := <-p.confirms:
+		if !confirm.Ack {
+			t.Fatalf("broker nacked publish of %s request (queue not ready?)", operation)
+		}
+	case <-time.After(timeout + 5*time.Second):
+		t.Fatalf("no publish confirm for %s", operation)
 	}
 	select {
 	case d := <-p.replies:

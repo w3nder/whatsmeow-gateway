@@ -12,11 +12,12 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/gateway"
 )
 
+var groupRpcOperations = []string{"group.create", "group.invite_link", "group.info", "group.joined"}
+
 func setupGroupGateway(t *testing.T, fake *fakeWAClient, channelID string) (conn *rabbitmq.Connection, cancel context.CancelFunc, runErrCh chan error) {
 	t.Helper()
 
 	conn, deps := bootGatewayDeps(t, fake, channelID, "gateway-groups")
-	deps.Rpc = gatewayamqp.NewRpcServer(conn, 4)
 
 	var ctx context.Context
 	ctx, cancel = context.WithCancel(context.Background())
@@ -26,7 +27,40 @@ func setupGroupGateway(t *testing.T, fake *fakeWAClient, channelID string) (conn
 		runErrCh <- gateway.Run(ctx, deps)
 	}()
 
+	waitForGroupRpcHandlersReady(t, conn)
+
 	return conn, cancel, runErrCh
+}
+
+func waitForGroupRpcHandlersReady(t *testing.T, conn *rabbitmq.Connection) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for _, operation := range groupRpcOperations {
+		queue := gatewayamqp.RpcQueueName(operation)
+		for {
+			ready, err := groupRpcQueueHasConsumer(conn, queue)
+			if err == nil && ready {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("group rpc handler for %s not ready after 10s: %v", operation, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+}
+
+func groupRpcQueueHasConsumer(conn *rabbitmq.Connection, queue string) (bool, error) {
+	ch, err := conn.Channel()
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = ch.Close() }()
+	info, err := ch.QueueDeclarePassive(queue, true, false, false, false, rabbitmq.Table{"x-queue-type": "quorum"})
+	if err != nil {
+		return false, err
+	}
+	return info.Consumers >= 1, nil
 }
 
 func TestGroupCreateRpcCreatesAnnouncesAndReturnsLink(t *testing.T) {
@@ -113,5 +147,18 @@ func TestGroupRpcRejectsInvalidPayload(t *testing.T) {
 	reply := probe.call(t, "group.info", "i1", `{"tenantId":"t","channelId":"channel-groups","groupJid":"not a jid"}`, 10*time.Second)
 	if reply["ok"] != false || reply["error"].(map[string]any)["code"] != "invalid_request" {
 		t.Fatalf("bad jid → %v", reply)
+	}
+}
+
+func TestGroupInfoUnknownGroupIsBadGateway(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.markPaired()
+	conn, cancel, runErrCh := setupGroupGateway(t, fake, "channel-groups")
+	defer shutdownStatusRoundtripGateway(t, cancel, runErrCh)
+
+	probe := newRpcProbe(t, conn)
+	reply := probe.call(t, "group.info", "u1", `{"tenantId":"t","channelId":"channel-groups","groupJid":"120363000000000099@g.us"}`, 10*time.Second)
+	if reply["ok"] != false || reply["error"].(map[string]any)["code"] != "bad_gateway" {
+		t.Fatalf("unknown group → %v", reply)
 	}
 }

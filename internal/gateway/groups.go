@@ -71,16 +71,21 @@ type groupJoinedResponse struct {
 	Groups []groupInfoResponse `json:"groups"`
 }
 
+type groupRpcRoute struct {
+	operation string
+	handler   amqp.RpcHandler
+}
+
 func (g *gateway) registerGroupRpc(ctx context.Context) error {
-	handlers := map[string]amqp.RpcHandler{
-		rpcGroupCreate:     g.rpcGroupCreate,
-		rpcGroupInviteLink: g.rpcGroupInviteLink,
-		rpcGroupInfo:       g.rpcGroupInfo,
-		rpcGroupJoined:     g.rpcGroupJoined,
+	routes := []groupRpcRoute{
+		{rpcGroupCreate, g.rpcGroupCreate},
+		{rpcGroupInviteLink, g.rpcGroupInviteLink},
+		{rpcGroupInfo, g.rpcGroupInfo},
+		{rpcGroupJoined, g.rpcGroupJoined},
 	}
-	for operation, handler := range handlers {
-		if err := g.rpc.Handle(ctx, operation, handler); err != nil {
-			return fmt.Errorf("gateway: register rpc %s: %w", operation, err)
+	for _, route := range routes {
+		if err := g.rpc.Handle(ctx, route.operation, route.handler); err != nil {
+			return fmt.Errorf("gateway: register rpc %s: %w", route.operation, err)
 		}
 	}
 	return nil
@@ -98,13 +103,13 @@ func (g *gateway) groupClient(ctx context.Context, tenantID, channelID string) (
 	if channelID == "" {
 		return nil, amqp.RpcInvalidRequest("channelId is required")
 	}
-	g.setTenant(channelID, tenantID)
 	if err := g.ensureChannelConnected(ctx, channelID); err != nil {
 		if errors.Is(err, session.ErrNoSession) {
 			return nil, amqp.RpcNotFound(err.Error())
 		}
 		return nil, amqp.RpcUnavailable(err.Error())
 	}
+	g.setTenant(channelID, tenantID)
 	client, err := g.waClientFor(channelID)
 	if err != nil {
 		return nil, amqp.RpcUnavailable(err.Error())
