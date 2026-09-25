@@ -44,7 +44,8 @@ de comandos (ver "Desligamento e prazo do container" abaixo).
 | Código | Significado |
 |---|---|
 | `invalid_request` | Payload não é JSON válido, falta campo obrigatório ou `groupJid` não é um JID de grupo |
-| `not_found` | O canal não tem sessão pareada nesta instância, **ou** o grupo não existe mais (IQ 404 ou 410); neste caso a mensagem é fixa `group not found (404)` / `group not found (410)` e é permanente para aquele grupo |
+| `not_found` | O canal não tem sessão pareada nesta instância — só isso; nunca descreve um grupo |
+| `gone` | O grupo não existe mais (IQ 404 ou 410); mensagem fixa `group not found (404)` / `group not found (410)`. Permanente para aquele grupo — tentar de novo não adianta |
 | `forbidden` | O WhatsApp recusou o canal naquele grupo (IQ 401 ou 403: canal fora do grupo ou sem ser admin — um grupo suspenso também responde 401 a algumas ações); mensagem fixa `not an admin of the group (401)` / `not an admin of the group (403)`. Permanente para aquele grupo — tentar de novo não adianta |
 | `unavailable` | O canal está pareado mas não está conectado agora, o WhatsApp respondeu com limite de taxa (429), erro de servidor (5xx) ou não respondeu no prazo, ou a instância está desligando (ela não reabre o canal nesse momento) — transitório, vale tentar de novo depois |
 | `locked` | O grupo está suspenso/bloqueado pelo WhatsApp (IQ 423); mensagem fixa `group is locked (423)`. Permanente para aquele grupo — tentar de novo não adianta |
@@ -275,7 +276,7 @@ O erro do WhatsApp decide se afeta só aquele grupo ou o comando inteiro:
 |---|---|---|
 | IQ 423 — grupo suspenso/bloqueado pelo WhatsApp | `locked` | só o grupo falha: `ok: false`, `error` `locked: group is locked (423)`; segue para o próximo |
 | IQ 401 / 403 — canal fora do grupo ou sem ser admin (um grupo suspenso responde 401 a `set_photo`) | `forbidden` | só o grupo falha: `ok: false`, `error` `forbidden: not an admin of the group (401)` (ou `(403)`); segue |
-| IQ 404 / 410 — grupo inexistente | `not_found` | só o grupo falha: `ok: false`, `error` `not_found: group not found (404)` (ou `(410)`); segue |
+| IQ 404 / 410 — grupo inexistente | `gone` | só o grupo falha: `ok: false`, `error` `gone: group not found (404)` (ou `(410)`); segue |
 | IQ 400 / 406 — pedido inválido para o grupo (ex.: nome longo demais) | `bad_gateway` | só o grupo falha; segue |
 | Qualquer outro IQ abaixo de 500 (exceto 401, 403, 404, 410, 423 e 429) | `bad_gateway` | só o grupo falha; segue |
 | `groupJid` que não é JID de grupo, `params` faltando | `invalid_request` | só o grupo falha; segue |
@@ -334,7 +335,7 @@ feita, no caso de reentrega).
 `ok: false` não derruba o consumidor: o gateway registra o `error` e segue para o
 próximo `groupJid` da lista. `error` é `<código>: <mensagem>`, com o código da tabela de
 erros do RPC (ex.: `locked: group is locked (423)`, `forbidden: not an admin of the
-group (401)`, `not_found: group not found (404)`, `bad_gateway: info query returned
+group (401)`, `gone: group not found (404)`, `bad_gateway: info query returned
 status 406: not-acceptable`). Com o canal offline **no início** do comando (não conecta
 nem retomando a sessão), cada grupo sai com `ok: false` e `error` começando por
 `unavailable:`, e o comando é confirmado — um canal fora do ar por horas não pode ficar

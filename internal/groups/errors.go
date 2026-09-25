@@ -60,7 +60,7 @@ func classifyGroupIQCode(code int, err error) error {
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return amqp.RpcForbidden(fmt.Sprintf("not an admin of the group (%d)", code))
 	case http.StatusNotFound, http.StatusGone:
-		return amqp.RpcNotFound(fmt.Sprintf("group not found (%d)", code))
+		return amqp.RpcGone(fmt.Sprintf("group not found (%d)", code))
 	default:
 		return amqp.RpcBadGateway(err.Error())
 	}

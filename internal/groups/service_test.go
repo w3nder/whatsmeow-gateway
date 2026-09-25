@@ -480,7 +480,7 @@ func TestApplyRemoveParticipantsMatchesTheBrazilianNinthDigitBothWays(t *testing
 
 func TestClassifyMapsWhatsmeowErrors(t *testing.T) {
 	cases := map[error]string{
-		whatsmeow.ErrGroupNotFound:               amqp.RpcCodeNotFound,
+		whatsmeow.ErrGroupNotFound:               amqp.RpcCodeGone,
 		whatsmeow.ErrNotInGroup:                  amqp.RpcCodeForbidden,
 		whatsmeow.ErrGroupInviteLinkUnauthorized: amqp.RpcCodeForbidden,
 		whatsmeow.ErrIQNotAuthorized:             amqp.RpcCodeForbidden,
@@ -494,8 +494,8 @@ func TestClassifyMapsWhatsmeowErrors(t *testing.T) {
 		whatsmeow.ErrIQPartialServerError:        amqp.RpcCodeUnavailable,
 		whatsmeow.ErrIQLocked:                    amqp.RpcCodeLocked,
 		whatsmeow.ErrIQForbidden:                 amqp.RpcCodeForbidden,
-		whatsmeow.ErrIQNotFound:                  amqp.RpcCodeNotFound,
-		whatsmeow.ErrIQGone:                      amqp.RpcCodeNotFound,
+		whatsmeow.ErrIQNotFound:                  amqp.RpcCodeGone,
+		whatsmeow.ErrIQGone:                      amqp.RpcCodeGone,
 		whatsmeow.ErrIQNotAcceptable:             amqp.RpcCodeBadGateway,
 		&whatsmeow.IQError{Code: 409}:            amqp.RpcCodeBadGateway,
 		whatsmeow.ErrIQBadRequest:                amqp.RpcCodeBadGateway,
@@ -531,9 +531,9 @@ func TestClassifyNamesAGroupTheChannelCannotManageOrThatNoLongerExists(t *testin
 		{whatsmeow.ErrIQNotAuthorized, "forbidden: not an admin of the group (401)"},
 		{fmt.Errorf("set photo: %w", &whatsmeow.IQError{Code: 401, Text: "not-authorized"}), "forbidden: not an admin of the group (401)"},
 		{whatsmeow.ErrIQForbidden, "forbidden: not an admin of the group (403)"},
-		{whatsmeow.ErrIQNotFound, "not_found: group not found (404)"},
-		{whatsmeow.ErrIQGone, "not_found: group not found (410)"},
-		{whatsmeow.ErrGroupNotFound, "not_found: group not found (404)"},
+		{whatsmeow.ErrIQNotFound, "gone: group not found (404)"},
+		{whatsmeow.ErrIQGone, "gone: group not found (410)"},
+		{whatsmeow.ErrGroupNotFound, "gone: group not found (404)"},
 		{whatsmeow.ErrNotInGroup, "forbidden: not an admin of the group (403)"},
 	}
 	for _, tc := range cases {
