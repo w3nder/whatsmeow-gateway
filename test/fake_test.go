@@ -65,6 +65,7 @@ type fakeWAClient struct {
 	announceDelay    time.Duration
 	announceCount    int
 	announceEntered  int
+	announceStartsAt []time.Time
 	dropAfterLocks   int
 	topicSeq         int
 	createDelay      time.Duration
@@ -272,6 +273,7 @@ func (f *fakeWAClient) GetGroupInviteLink(ctx context.Context, jid types.JID, re
 func (f *fakeWAClient) SetGroupAnnounce(ctx context.Context, jid types.JID, announce bool) error {
 	f.mu.Lock()
 	f.announceEntered++
+	f.announceStartsAt = append(f.announceStartsAt, time.Now())
 	delay := f.announceDelay
 	f.mu.Unlock()
 	time.Sleep(delay)
@@ -401,6 +403,12 @@ func (f *fakeWAClient) addGroupParticipant(group string, participant types.Group
 	defer f.mu.Unlock()
 	info := f.groups[group]
 	info.Participants = append(info.Participants, participant)
+}
+
+func (f *fakeWAClient) announceStarts() []time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]time.Time{}, f.announceStartsAt...)
 }
 
 func (f *fakeWAClient) announceEnteredCount() int {

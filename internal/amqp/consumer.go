@@ -20,7 +20,9 @@ type CallHandler func(ctx context.Context, cmd GatewayCallCommand) error
 type GroupHandler func(ctx context.Context, cmd GatewayGroupCommand) error
 
 type ConsumerConfig struct {
-	Prefetch int
+	Prefetch         int
+	GroupPrefetch    int
+	GroupLaneBacklog int
 }
 
 type Consumer struct {
@@ -33,6 +35,9 @@ type Consumer struct {
 	pairStarted  bool
 	callStarted  bool
 	groupStarted bool
+
+	groupPrefetch    int
+	groupLaneBacklog int
 
 	closing atomic.Bool
 	failed  chan error
@@ -117,20 +122,29 @@ func NewConsumer(conn *rabbitmq.Connection, cfg ConsumerConfig) (*Consumer, erro
 		_ = groupCh.Close()
 		return nil, err
 	}
-	if err := groupCh.Qos(cfg.Prefetch, 0, false); err != nil {
+	if err := groupCh.Qos(orDefault(cfg.GroupPrefetch, DefaultGroupPrefetch), 0, false); err != nil {
 		_ = sendCh.Close()
 		_ = pairCh.Close()
 		_ = callCh.Close()
 		_ = groupCh.Close()
 		return nil, fmt.Errorf("amqp: set qos on gateway.group channel: %w", err)
 	}
+	if err := groupCh.Confirm(false); err != nil {
+		_ = sendCh.Close()
+		_ = pairCh.Close()
+		_ = callCh.Close()
+		_ = groupCh.Close()
+		return nil, fmt.Errorf("amqp: enable confirms on gateway.group channel: %w", err)
+	}
 
 	return &Consumer{
-		sendCh:  sendCh,
-		pairCh:  pairCh,
-		callCh:  callCh,
-		groupCh: groupCh,
-		failed:  make(chan error, 1),
+		sendCh:           sendCh,
+		pairCh:           pairCh,
+		callCh:           callCh,
+		groupCh:          groupCh,
+		groupPrefetch:    orDefault(cfg.GroupPrefetch, DefaultGroupPrefetch),
+		groupLaneBacklog: orDefault(cfg.GroupLaneBacklog, DefaultGroupLaneBacklog),
+		failed:           make(chan error, 1),
 	}, nil
 }
 
@@ -158,12 +172,12 @@ func (c *Consumer) StartGroup(ctx context.Context, handler GroupHandler) error {
 	}
 	c.groupStarted = true
 	c.wg.Add(1)
-	go c.consumePerChannel(GatewayGroupQueue, deliveries, func(d rabbitmq.Delivery) (string, func() error, error) {
+	go c.consumePerChannel(GatewayGroupQueue, deliveries, func(d rabbitmq.Delivery) (laneJob, error) {
 		var cmd GatewayGroupCommand
 		if err := json.Unmarshal(d.Body, &cmd); err != nil {
-			return "", nil, err
+			return laneJob{}, err
 		}
-		return cmd.ChannelID, func() error { return handler(ctx, cmd) }, nil
+		return laneJob{channelID: cmd.ChannelID, handle: func() error { return handler(ctx, cmd) }}, nil
 	})
 	return nil
 }
@@ -244,80 +258,6 @@ func (c *Consumer) consumeSerially(queue string, deliveries <-chan rabbitmq.Deli
 		_ = d.Nack(false, true)
 	}
 	c.reportFailure(fmt.Errorf("amqp: %s consumer stopped: broker closed the delivery channel", queue))
-}
-
-func (c *Consumer) consumePerChannel(queue string, deliveries <-chan rabbitmq.Delivery, decode func(rabbitmq.Delivery) (string, func() error, error)) {
-	defer c.wg.Done()
-	var (
-		mu      sync.Mutex
-		requeue []rabbitmq.Delivery
-		lanes   = newLanes()
-	)
-	for d := range deliveries {
-		channelID, handle, err := decode(d)
-		if err != nil {
-			settle(d, err)
-			continue
-		}
-		lanes.run(channelID, func() {
-			err := handle()
-			if errors.Is(err, ErrRequeue) {
-				mu.Lock()
-				requeue = append(requeue, d)
-				mu.Unlock()
-				return
-			}
-			settle(d, err)
-		})
-	}
-	lanes.wait()
-	for _, d := range requeue {
-		_ = d.Nack(false, true)
-	}
-	c.reportFailure(fmt.Errorf("amqp: %s consumer stopped: broker closed the delivery channel", queue))
-}
-
-type lanes struct {
-	mu      sync.Mutex
-	pending map[string][]func()
-	workers sync.WaitGroup
-}
-
-func newLanes() *lanes {
-	return &lanes{pending: make(map[string][]func())}
-}
-
-func (l *lanes) run(key string, job func()) {
-	l.mu.Lock()
-	queued, busy := l.pending[key]
-	l.pending[key] = append(queued, job)
-	l.mu.Unlock()
-	if busy {
-		return
-	}
-	l.workers.Add(1)
-	go l.drain(key)
-}
-
-func (l *lanes) drain(key string) {
-	defer l.workers.Done()
-	for {
-		l.mu.Lock()
-		queued := l.pending[key]
-		if len(queued) == 0 {
-			delete(l.pending, key)
-			l.mu.Unlock()
-			return
-		}
-		job := queued[0]
-		l.pending[key] = queued[1:]
-		l.mu.Unlock()
-		job()
-	}
-}
-
-func (l *lanes) wait() {
-	l.workers.Wait()
 }
 
 func settle(d rabbitmq.Delivery, err error) {

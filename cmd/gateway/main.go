@@ -74,7 +74,7 @@ func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *
 		}
 	}()
 
-	consumer, err := amqp.NewConsumer(conn, amqp.ConsumerConfig{Prefetch: cfg.Prefetch})
+	consumer, err := amqp.NewConsumer(conn, amqp.ConsumerConfig{Prefetch: cfg.Prefetch, GroupPrefetch: cfg.GroupPrefetch})
 	if err != nil {
 		return fmt.Errorf("main: new consumer: %w", err)
 	}

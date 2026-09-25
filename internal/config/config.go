@@ -3,9 +3,11 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
 	"github.com/w3nder/whatsmeow-gateway/internal/ownership"
 )
 
@@ -22,6 +24,7 @@ type Config struct {
 	ShardCount           int
 	SendPacePerSec       float64
 	Prefetch             int
+	GroupPrefetch        int
 	ShardLockTTL         time.Duration
 	SendTimeout          time.Duration
 	ShutdownDrainTimeout time.Duration
@@ -47,6 +50,7 @@ func Load() (Config, error) {
 		ShardCount:           ownership.DefaultShardCount,
 		SendPacePerSec:       1,
 		Prefetch:             32,
+		GroupPrefetch:        amqp.DefaultGroupPrefetch,
 		ShardLockTTL:         24 * time.Hour,
 		SendTimeout:          30 * time.Second,
 		ShutdownDrainTimeout: 20 * time.Second,
@@ -59,6 +63,13 @@ func Load() (Config, error) {
 	}
 	if c.AMQPURL == "" || c.SessionDSN == "" || c.RedisURL == "" || c.InstanceID == "" {
 		return Config{}, fmt.Errorf("missing required env (GATEWAY_INSTANCE_ID, AMQP_URL, SESSION_DATABASE_URL, REDIS_URL)")
+	}
+	if raw := os.Getenv("GROUP_PREFETCH"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			return Config{}, fmt.Errorf("GROUP_PREFETCH must be a positive integer, got %q", raw)
+		}
+		c.GroupPrefetch = n
 	}
 	if c.CallMediaAddr != "" && c.CallMediaTokenSecret == "" {
 		return Config{}, fmt.Errorf("CALL_MEDIA_TOKEN_SECRET is required when CALL_MEDIA_ADDR is set")
