@@ -96,3 +96,46 @@ type PairCommand struct {
 	ChannelID string `json:"channelId"`
 	UserID    string `json:"userId"`
 }
+
+type GroupActionParams struct {
+	Phones      []string `json:"phones,omitempty"`
+	Name        string   `json:"name,omitempty"`
+	Description string   `json:"description,omitempty"`
+	PhotoURL    string   `json:"photoUrl,omitempty"`
+}
+
+type GatewayGroupCommand struct {
+	CommandID string            `json:"commandId"`
+	TenantID  string            `json:"tenantId"`
+	ChannelID string            `json:"channelId"`
+	Action    string            `json:"action"`
+	GroupJIDs []string          `json:"groupJids"`
+	Params    GroupActionParams `json:"params"`
+}
+
+type GroupActionEvent struct {
+	TenantID  string `json:"tenantId"`
+	ChannelID string `json:"channelId"`
+	CommandID string `json:"commandId"`
+	GroupJID  string `json:"groupJid"`
+	Action    string `json:"action"`
+	OK        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+	Removed   *int   `json:"removed,omitempty"`
+}
+
+type GroupParticipant struct {
+	JID   string `json:"jid"`
+	LID   string `json:"lid,omitempty"`
+	Phone string `json:"phone,omitempty"`
+}
+
+type GroupParticipantsEvent struct {
+	TenantID     string             `json:"tenantId"`
+	ChannelID    string             `json:"channelId"`
+	GroupJID     string             `json:"groupJid"`
+	Type         string             `json:"type"`
+	Participants []GroupParticipant `json:"participants"`
+	EventID      string             `json:"eventId"`
+	OccurredAt   string             `json:"occurredAt"`
+}
