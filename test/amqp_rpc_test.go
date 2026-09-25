@@ -229,6 +229,27 @@ func TestRpcServerRejectsASecondHandlerForTheSameOperation(t *testing.T) {
 	}
 }
 
+func TestRpcServerAcceptsOnlyOneOfTwoConcurrentHandlersForAnOperation(t *testing.T) {
+	conn := startRabbitMQ(t)
+	server := gatewayamqp.NewRpcServer(conn, 4, discardLogger())
+	t.Cleanup(func() { _ = server.Close() })
+
+	handler := func(context.Context, json.RawMessage) (any, error) { return nil, nil }
+	results := make(chan error, 2)
+	for range 2 {
+		go func() { results <- server.Handle(context.Background(), "race.test", handler) }()
+	}
+	accepted := 0
+	for range 2 {
+		if err := <-results; err == nil {
+			accepted++
+		}
+	}
+	if accepted != 1 {
+		t.Fatalf("exactly one of two concurrent registrations may win, %d did", accepted)
+	}
+}
+
 func TestRpcServerAcksTheRequestWhenTheBrokerRefusesTheReply(t *testing.T) {
 	conn := startRabbitMQ(t)
 	logs := &syncBuffer{}
@@ -277,12 +298,9 @@ func TestRpcServerToleratesTheSecondResolutionOfTheTimestamp(t *testing.T) {
 	}
 
 	probe := newRpcProbe(t, conn)
-	for time.Now().Sub(time.Now().Truncate(time.Second)) < 600*time.Millisecond {
-		time.Sleep(10 * time.Millisecond)
-	}
 	if err := probe.ch.PublishWithContext(context.Background(), "", gatewayamqp.RpcQueueName("stamped.test"), false, false, rabbitmq.Publishing{
-		ContentType: "application/json", ReplyTo: probe.replyQueue, CorrelationId: "corr-stamped", Expiration: "400", Body: []byte(`{}`),
-		Timestamp: time.Now().Truncate(time.Second),
+		ContentType: "application/json", ReplyTo: probe.replyQueue, CorrelationId: "corr-stamped", Expiration: "1500", Body: []byte(`{}`),
+		Timestamp: time.Now().Truncate(time.Second).Add(-time.Second),
 	}); err != nil {
 		t.Fatalf("publish: %v", err)
 	}

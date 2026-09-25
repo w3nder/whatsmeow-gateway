@@ -76,33 +76,13 @@ func (s *RpcServer) Failed() <-chan error {
 }
 
 func (s *RpcServer) Handle(ctx context.Context, operation string, handler RpcHandler) error {
-	s.mu.Lock()
-	_, taken := s.channels[operation]
-	s.mu.Unlock()
-	if taken {
+	if !s.reserve(operation) {
 		return fmt.Errorf("amqp: rpc %s already has a handler", operation)
 	}
-	ch, err := s.conn.Channel()
+	ch, deliveries, err := s.open(operation)
 	if err != nil {
-		return fmt.Errorf("amqp: open rpc channel for %s: %w", operation, err)
-	}
-	queue := RpcQueueName(operation)
-	if _, err := ch.QueueDeclare(queue, true, false, false, false, rabbitmq.Table{"x-queue-type": "quorum"}); err != nil {
-		_ = ch.Close()
-		return fmt.Errorf("amqp: declare %s: %w", queue, err)
-	}
-	if err := ch.Qos(s.prefetch, 0, false); err != nil {
-		_ = ch.Close()
-		return fmt.Errorf("amqp: set qos on %s: %w", queue, err)
-	}
-	if err := ch.Confirm(false); err != nil {
-		_ = ch.Close()
-		return fmt.Errorf("amqp: enable reply confirms on %s: %w", queue, err)
-	}
-	deliveries, err := ch.Consume(queue, "whatsmeow-gateway.rpc."+operation, false, false, false, false, nil)
-	if err != nil {
-		_ = ch.Close()
-		return fmt.Errorf("amqp: consume %s: %w", queue, err)
+		s.release(operation)
+		return err
 	}
 
 	s.mu.Lock()
@@ -121,9 +101,51 @@ func (s *RpcServer) Handle(ctx context.Context, operation string, handler RpcHan
 				s.serve(ctx, operation, ch, d, handler)
 			}(d)
 		}
-		s.reportFailure(fmt.Errorf("amqp: %s consumer stopped: broker closed the delivery channel", queue))
+		s.reportFailure(fmt.Errorf("amqp: %s consumer stopped: broker closed the delivery channel", RpcQueueName(operation)))
 	}()
 	return nil
+}
+
+func (s *RpcServer) reserve(operation string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, taken := s.channels[operation]; taken {
+		return false
+	}
+	s.channels[operation] = nil
+	return true
+}
+
+func (s *RpcServer) release(operation string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.channels, operation)
+}
+
+func (s *RpcServer) open(operation string) (*rabbitmq.Channel, <-chan rabbitmq.Delivery, error) {
+	ch, err := s.conn.Channel()
+	if err != nil {
+		return nil, nil, fmt.Errorf("amqp: open rpc channel for %s: %w", operation, err)
+	}
+	queue := RpcQueueName(operation)
+	if _, err := ch.QueueDeclare(queue, true, false, false, false, rabbitmq.Table{"x-queue-type": "quorum"}); err != nil {
+		_ = ch.Close()
+		return nil, nil, fmt.Errorf("amqp: declare %s: %w", queue, err)
+	}
+	if err := ch.Qos(s.prefetch, 0, false); err != nil {
+		_ = ch.Close()
+		return nil, nil, fmt.Errorf("amqp: set qos on %s: %w", queue, err)
+	}
+	if err := ch.Confirm(false); err != nil {
+		_ = ch.Close()
+		return nil, nil, fmt.Errorf("amqp: enable reply confirms on %s: %w", queue, err)
+	}
+	deliveries, err := ch.Consume(queue, "whatsmeow-gateway.rpc."+operation, false, false, false, false, nil)
+	if err != nil {
+		_ = ch.Close()
+		return nil, nil, fmt.Errorf("amqp: consume %s: %w", queue, err)
+	}
+	return ch, deliveries, nil
 }
 
 const replyPublishTimeout = 5 * time.Second
@@ -239,12 +261,18 @@ func (s *RpcServer) Close() error {
 
 	var errs []error
 	for operation, ch := range channels {
+		if ch == nil {
+			continue
+		}
 		if err := ch.Cancel("whatsmeow-gateway.rpc."+operation, false); err != nil {
 			errs = append(errs, fmt.Errorf("amqp: cancel rpc %s: %w", operation, err))
 		}
 	}
 	s.wg.Wait()
 	for operation, ch := range channels {
+		if ch == nil {
+			continue
+		}
 		if err := ch.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("amqp: close rpc channel %s: %w", operation, err))
 		}
