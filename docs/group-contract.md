@@ -199,12 +199,28 @@ Paralelismo, ritmo e interrupção:
   do prefetch de envio e chamada. Cada canal guarda no máximo 16 comandos esperando a
   vez além do que está rodando. Um comando que chega para um canal já cheio não fica
   segurando um slot do prefetch: depois de 1 s o gateway o republica no fim da fila
-  (publish com confirm, cabeçalho `x-gateway-overflow` com o número de ordem) e confirma
-  a entrega original. Assim um canal com centenas de comandos nunca impede outro canal
-  de receber o seu. As cópias voltam na ordem, e enquanto houver cópia pendente de um
-  canal os comandos novos dele também vão para o fim, então a ordem por canal se mantém.
-  Limite: essa ordem vive na memória da instância; se ela reiniciar (ou outra instância
-  consumir a fila) com cópias pendentes, as cópias entram na ordem em que chegarem.
+  e confirma a entrega original. Assim um canal com centenas de comandos nunca impede
+  outro canal de receber o seu. Detalhes do transbordo:
+  - A cópia vai pela exchange padrão direto para `gateway.group` (`mandatory`, com
+    confirm), para nenhuma outra fila ligada a `whatsapp.gateway.group.v1` recebê-la.
+    Ela leva `x-gateway-overflow` (número de ordem por canal) e
+    `x-gateway-overflow-nonce` (identifica a instância que numerou, sorteado a cada
+    início do consumidor).
+  - Ordem por canal: enquanto um canal tiver cópia pendente, os comandos novos dele
+    também vão para o fim; uma cópia só entra na vez quando o número dela é **menor ou
+    igual** ao esperado. Uma cópia repetida (número já passado) entra como reentrega e o
+    ledger não repete o que já foi feito.
+  - Falha ao publicar a cópia (confirm que não chega, broker sob alarme, eleição de
+    líder): o gateway **segura a entrega original e tenta de novo** com o mesmo número,
+    com espera crescente de 200 ms até 5 s, até conseguir. Só devolve a original à fila
+    (nack com requeue) se o canal AMQP fechar ou o consumidor estiver parando; nesses
+    casos a numeração da instância recomeça do zero de qualquer forma.
+  - Cópia com nonce de outra instância (outro pod, ou a mesma depois de reiniciar) é
+    tratada como comando novo: entra se o canal não tem transbordo aqui, ou vai para o
+    fim com um número desta instância.
+  - Trava de segurança: um canal com transbordo que não deixa entrar nenhuma cópia por
+    30 s tem o controle de ordem descartado e volta a aceitar comandos na chegada — nunca
+    fica preso para sempre esperando uma cópia que outra instância consumiu.
 - Entre dois grupos do mesmo canal o gateway espera de 300 a 800 ms (sorteado), mesmo
   quando são de comandos seguidos, para não disparar dezenas de alterações no WhatsApp
   em rajada. Grupos já concluídos numa reentrega não esperam.
