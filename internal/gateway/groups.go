@@ -299,13 +299,15 @@ func (g *gateway) GroupHandler(ctx context.Context, cmd amqp.GatewayGroupCommand
 		if g.shuttingDown(ctx) {
 			return errShuttingDown
 		}
-		alreadyDone, removed, err := g.dedupe.BeginAction(work, cmd.CommandID, raw)
+		record, err := g.dedupe.BeginAction(work, cmd.CommandID, raw)
 		if err != nil {
 			return fmt.Errorf("gateway: begin action %s/%s: %w", cmd.CommandID, raw, err)
 		}
 		result := amqp.GroupActionEvent{TenantID: cmd.TenantID, ChannelID: cmd.ChannelID, CommandID: cmd.CommandID, GroupJID: raw, Action: cmd.Action, OK: true}
-		if alreadyDone {
-			result.Removed = removed
+		if record.Finished {
+			result.Removed = record.Removed
+			result.OK = record.Failure == ""
+			result.Error = record.Failure
 		} else {
 			result, err = g.applyGroupAction(ctx, work, run, raw, result)
 			if err != nil {
@@ -339,6 +341,10 @@ func (g *gateway) applyGroupAction(ctx, work context.Context, run *groupCommandR
 	fail := func(err error) (amqp.GroupActionEvent, error) {
 		result.OK = false
 		result.Error = err.Error()
+		g.logger.Warn("gateway: group action failed for this group only, the command goes on", "command_id", run.cmd.CommandID, "group_jid", raw, "action", run.cmd.Action, "error", err)
+		if markErr := g.dedupe.MarkActionFailed(work, run.cmd.CommandID, raw, result.Error); markErr != nil {
+			g.logger.Error("gateway: mark group action failed", "command_id", run.cmd.CommandID, "group_jid", raw, "error", markErr)
+		}
 		return result, nil
 	}
 	if run.setupErr != nil {

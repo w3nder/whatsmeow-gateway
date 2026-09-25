@@ -114,7 +114,7 @@ func TestGroupCommandRedeliveryReplaysDoneAndReappliesPending(t *testing.T) {
 	cmd := gatewayamqp.GatewayGroupCommand{CommandID: "cmd-twice", TenantID: "t", ChannelID: "channel-groups", Action: "set_name", GroupJIDs: []string{g1}, Params: gatewayamqp.GroupActionParams{Name: "Renomeado"}}
 	publishGroupCommand(t, infra.conn, cmd)
 	waitForDelivery(t, events, gatewayamqp.GroupActionRoutingKey, 10*time.Second)
-	if _, _, err := infra.dedupe.BeginAction(context.Background(), cmd.CommandID, g2); err != nil {
+	if _, err := infra.dedupe.BeginAction(context.Background(), cmd.CommandID, g2); err != nil {
 		t.Fatalf("leave g2 pending in the ledger: %v", err)
 	}
 
@@ -450,5 +450,118 @@ func TestGroupCommandRemoveParticipantsRedeliveryReplaysStoredRemovedCount(t *te
 	fake.mu.Unlock()
 	if calls != 1 {
 		t.Fatalf("a done item must not hit WhatsApp again on redelivery, participantCalls=%v", fake.participantCalls)
+	}
+}
+
+func collectGroupResults(t *testing.T, events <-chan rabbitmq.Delivery, n int) map[string]gatewayamqp.GroupActionEvent {
+	t.Helper()
+	got := map[string]gatewayamqp.GroupActionEvent{}
+	for len(got) < n {
+		d := waitForDelivery(t, events, gatewayamqp.GroupActionRoutingKey, 15*time.Second)
+		var evt gatewayamqp.GroupActionEvent
+		if err := json.Unmarshal(d.Body, &evt); err != nil {
+			t.Fatal(err)
+		}
+		got[evt.GroupJID] = evt
+	}
+	return got
+}
+
+const lockedGroupError = gatewayamqp.RpcCodeLocked + ": group is locked (423)"
+
+func TestGroupCommandLockedGroupFailsAloneAndTheCommandCompletes(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.markPaired()
+	infra := startGatewayInfra(t, "channel-groups")
+	cancel, runErrCh := startGroupGateway(t, infra, fake, "gateway-groups")
+	events := probeEvents(t, infra.conn, gatewayamqp.GroupActionRoutingKey)
+
+	probe := newRpcProbe(t, infra.conn)
+	var groupJIDs []string
+	for _, id := range []string{"a", "b", "c"} {
+		res := probe.call(t, "group.create", id, `{"tenantId":"t","channelId":"channel-groups","name":"G","announce":true}`, 10*time.Second)
+		groupJIDs = append(groupJIDs, res["result"].(map[string]any)["groupJid"].(string))
+	}
+	locked := groupJIDs[1]
+	fake.mu.Lock()
+	fake.groupErrs = map[string]error{locked: whatsmeow.ErrIQLocked}
+	fake.mu.Unlock()
+
+	publishGroupCommand(t, infra.conn, gatewayamqp.GatewayGroupCommand{CommandID: "cmd-unlock-locked", TenantID: "t", ChannelID: "channel-groups", Action: "unlock", GroupJIDs: groupJIDs})
+
+	got := collectGroupResults(t, events, len(groupJIDs))
+	if !got[groupJIDs[0]].OK || !got[groupJIDs[2]].OK {
+		t.Fatalf("the groups around the locked one must be unlocked, got %+v", got)
+	}
+	if res := got[locked]; res.OK || res.Error != lockedGroupError {
+		t.Fatalf("the locked group must fail on its own with %q, got %+v", lockedGroupError, res)
+	}
+
+	shutdownStatusRoundtripGateway(t, cancel, runErrCh)
+	if ready, dead := groupQueueDepths(t, infra.conn); ready != 0 || dead != 0 {
+		t.Fatalf("a locked group must not hold the command back, gateway.group=%d gateway.group.dlq=%d", ready, dead)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if unlocked, ok := fake.announceCalls[groupJIDs[2]]; !ok || unlocked {
+		t.Fatalf("the group after the locked one must reach WhatsApp, announce calls %v", fake.announceCalls)
+	}
+}
+
+func TestGroupCommandReinjectedFromTheDLQSkipsFinishedGroupsAndFailsTheLockedOne(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.markPaired()
+	infra := startGatewayInfra(t, "channel-groups")
+	cancel, runErrCh := startGroupGateway(t, infra, fake, "gateway-groups")
+	events := probeEvents(t, infra.conn, gatewayamqp.GroupActionRoutingKey)
+
+	probe := newRpcProbe(t, infra.conn)
+	var groupJIDs []string
+	for _, id := range []string{"a", "b", "c"} {
+		res := probe.call(t, "group.create", id, `{"tenantId":"t","channelId":"channel-groups","name":"G","announce":true}`, 10*time.Second)
+		groupJIDs = append(groupJIDs, res["result"].(map[string]any)["groupJid"].(string))
+	}
+	done, locked, pending := groupJIDs[0], groupJIDs[1], groupJIDs[2]
+	fake.mu.Lock()
+	fake.groupErrs = map[string]error{locked: whatsmeow.ErrIQLocked}
+	fake.mu.Unlock()
+
+	cmd := gatewayamqp.GatewayGroupCommand{CommandID: "cmd-from-dlq", TenantID: "t", ChannelID: "channel-groups", Action: "unlock", GroupJIDs: groupJIDs}
+	ctx := context.Background()
+	if _, err := infra.dedupe.BeginAction(ctx, cmd.CommandID, done); err != nil {
+		t.Fatalf("seed the finished group: %v", err)
+	}
+	if err := infra.dedupe.MarkActionDone(ctx, cmd.CommandID, done, nil); err != nil {
+		t.Fatalf("seed the finished group: %v", err)
+	}
+	if _, err := infra.dedupe.BeginAction(ctx, cmd.CommandID, locked); err != nil {
+		t.Fatalf("leave the locked group pending, as the command halted on it before the fix: %v", err)
+	}
+
+	publishGroupCommand(t, infra.conn, cmd)
+	got := collectGroupResults(t, events, len(groupJIDs))
+	if !got[done].OK || !got[pending].OK {
+		t.Fatalf("the finished group must replay ok and the pending one must run, got %+v", got)
+	}
+	if res := got[locked]; res.OK || res.Error != lockedGroupError {
+		t.Fatalf("the locked group must fail on its own with %q, got %+v", lockedGroupError, res)
+	}
+	callsAfterFirstRun := fake.announceCallCount()
+	if callsAfterFirstRun != 2 {
+		t.Fatalf("only the locked and the pending group may reach WhatsApp, announce calls %d", callsAfterFirstRun)
+	}
+
+	publishGroupCommand(t, infra.conn, cmd)
+	replayed := collectGroupResults(t, events, len(groupJIDs))
+	if !replayed[done].OK || !replayed[pending].OK || replayed[locked].OK || replayed[locked].Error != lockedGroupError {
+		t.Fatalf("a second reinjection must replay the same results from the ledger, got %+v", replayed)
+	}
+	if calls := fake.announceCallCount(); calls != callsAfterFirstRun {
+		t.Fatalf("a second reinjection must not reach WhatsApp again, announce calls %d", calls)
+	}
+
+	shutdownStatusRoundtripGateway(t, cancel, runErrCh)
+	if ready, dead := groupQueueDepths(t, infra.conn); ready != 0 || dead != 0 {
+		t.Fatalf("the reinjected command must be acked, gateway.group=%d gateway.group.dlq=%d", ready, dead)
 	}
 }
