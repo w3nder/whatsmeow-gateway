@@ -84,6 +84,42 @@ func TestBuildGroupParticipantsLeaveVersusRemoved(t *testing.T) {
 	}
 }
 
+func TestBuildGroupParticipantsLeaveMatchesSenderPNWhenSenderIsLID(t *testing.T) {
+	e := groupEvent()
+	senderLID := types.NewJID("2002125877314", types.HiddenUserServer)
+	senderPN := types.NewJID("5511888887777", types.DefaultUserServer)
+	e.Sender = &senderLID
+	e.SenderPN = &senderPN
+	e.Leave = []types.JID{senderPN}
+	if out := gateway.BuildGroupParticipants(context.Background(), lidResolver{}, "t", "c", e); out[0].Type != "leave" {
+		t.Fatalf("sender LID with SenderPN leaving as phone → %q", out[0].Type)
+	}
+}
+
+func TestBuildGroupParticipantsLeaveResolvesLIDAgainstPhoneSender(t *testing.T) {
+	e := groupEvent()
+	senderPN := types.NewJID("5511888887777", types.DefaultUserServer)
+	leavingLID := types.NewJID("2002125877314", types.HiddenUserServer)
+	e.Sender = &senderPN
+	e.Leave = []types.JID{leavingLID}
+	resolver := lidResolver{"2002125877314": "5511888887777"}
+	if out := gateway.BuildGroupParticipants(context.Background(), resolver, "t", "c", e); out[0].Type != "leave" {
+		t.Fatalf("sender phone leaving as resolved LID → %q", out[0].Type)
+	}
+}
+
+func TestBuildGroupParticipantsLeaveDifferentPhoneIsRemoved(t *testing.T) {
+	e := groupEvent()
+	senderLID := types.NewJID("2002125877314", types.HiddenUserServer)
+	senderPN := types.NewJID("5511888887777", types.DefaultUserServer)
+	e.Sender = &senderLID
+	e.SenderPN = &senderPN
+	e.Leave = []types.JID{types.NewJID("5511777776666", types.DefaultUserServer)}
+	if out := gateway.BuildGroupParticipants(context.Background(), lidResolver{}, "t", "c", e); out[0].Type != "removed" {
+		t.Fatalf("different phone leaving → %q", out[0].Type)
+	}
+}
+
 func TestBuildGroupParticipantsSplitsJoinLeavePromoteDemote(t *testing.T) {
 	e := groupEvent()
 	e.Join = []types.JID{types.NewJID("1", types.DefaultUserServer)}

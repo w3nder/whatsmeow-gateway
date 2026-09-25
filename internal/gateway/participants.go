@@ -36,22 +36,34 @@ func BuildGroupParticipants(ctx context.Context, resolver PhoneResolver, tenantI
 		})
 	}
 	add("join", e.Join)
-	add(leaveKind(e), e.Leave)
+	add(leaveKind(ctx, resolver, e), e.Leave)
 	add("promoted", e.Promote)
 	add("demoted", e.Demote)
 	return out
 }
 
-func leaveKind(e *events.GroupInfo) string {
+func leaveKind(ctx context.Context, resolver PhoneResolver, e *events.GroupInfo) string {
 	if e.Sender == nil {
 		return "removed"
 	}
 	for _, jid := range e.Leave {
-		if jid.User == e.Sender.User {
+		if senderMatches(e, jid.User) {
 			return "leave"
+		}
+		if jid.Server == types.HiddenUserServer {
+			if pn, ok, err := resolver.PNForLID(ctx, jid); err == nil && ok && senderMatches(e, pn.User) {
+				return "leave"
+			}
 		}
 	}
 	return "removed"
+}
+
+func senderMatches(e *events.GroupInfo, user string) bool {
+	if e.Sender.User == user {
+		return true
+	}
+	return e.SenderPN != nil && e.SenderPN.User == user
 }
 
 func participantsOf(ctx context.Context, resolver PhoneResolver, jids []types.JID) []amqp.GroupParticipant {
