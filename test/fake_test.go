@@ -68,6 +68,7 @@ type fakeWAClient struct {
 	announceEntered  int
 	announceStartsAt []time.Time
 	dropAfterLocks   int
+	dropped          bool
 	topicSeq         int
 	createDelay      time.Duration
 	createEntered    int
@@ -290,6 +291,9 @@ func (f *fakeWAClient) SetGroupAnnounce(ctx context.Context, jid types.JID, anno
 	if err := f.groupErrs[jid.String()]; err != nil {
 		return err
 	}
+	if f.dropped {
+		return whatsmeow.ErrIQDisconnected
+	}
 	if !f.connected {
 		return whatsmeow.ErrNotConnected
 	}
@@ -305,6 +309,7 @@ func (f *fakeWAClient) SetGroupAnnounce(ctx context.Context, jid types.JID, anno
 	}
 	if f.dropAfterLocks > 0 && len(f.announceCalls) >= f.dropAfterLocks {
 		f.connected = false
+		f.dropped = true
 	}
 	return nil
 }

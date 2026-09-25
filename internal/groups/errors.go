@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/socket"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
 )
@@ -21,7 +22,7 @@ func Classify(err error) error {
 		return err
 	case errors.Is(err, whatsmeow.ErrInvalidImageFormat):
 		return amqp.RpcInvalidRequest(err.Error())
-	case errors.Is(err, whatsmeow.ErrIQTimedOut), errors.Is(err, whatsmeow.ErrNotConnected), errors.Is(err, whatsmeow.ErrNotLoggedIn), errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled), isTransientIQError(err):
+	case errors.Is(err, whatsmeow.ErrIQTimedOut), errors.Is(err, whatsmeow.ErrNotConnected), errors.Is(err, whatsmeow.ErrNotLoggedIn), errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled), isTransientIQError(err), isDisconnected(err):
 		return amqp.RpcUnavailable(err.Error())
 	case isLockedIQError(err):
 		return amqp.RpcLocked(lockedMessage)
@@ -35,6 +36,10 @@ func Classify(err error) error {
 func IsUnavailable(err error) bool {
 	var rpcErr *amqp.RpcError
 	return errors.As(err, &rpcErr) && rpcErr.Code == amqp.RpcCodeUnavailable
+}
+
+func isDisconnected(err error) bool {
+	return errors.As(err, new(*whatsmeow.DisconnectedError)) || errors.Is(err, socket.ErrSocketClosed)
 }
 
 func isTransientIQError(err error) bool {

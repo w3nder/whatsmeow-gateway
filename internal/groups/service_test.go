@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/socket"
 	"go.mau.fi/whatsmeow/types"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
@@ -544,6 +545,9 @@ func TestClassifySplitsPerGroupFailuresFromCommandLevelOnes(t *testing.T) {
 		whatsmeow.ErrIQTimedOut,
 		whatsmeow.ErrNotConnected,
 		whatsmeow.ErrNotLoggedIn,
+		whatsmeow.ErrIQDisconnected,
+		&whatsmeow.DisconnectedError{Action: "message send"},
+		fmt.Errorf("set announce: %w", socket.ErrSocketClosed),
 		context.Canceled,
 		context.DeadlineExceeded,
 	}
