@@ -8,6 +8,7 @@ import (
 	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 
 	gatewayamqp "github.com/w3nder/whatsmeow-gateway/internal/amqp"
+	"github.com/w3nder/whatsmeow-gateway/internal/ownership"
 )
 
 func publishGroupCommand(t *testing.T, conn *rabbitmq.Connection, cmd gatewayamqp.GatewayGroupCommand) {
@@ -28,11 +30,15 @@ func publishGroupCommand(t *testing.T, conn *rabbitmq.Connection, cmd gatewayamq
 	}
 	defer func() { _ = ch.Close() }()
 	body, _ := json.Marshal(cmd)
-	if err := ch.PublishWithContext(context.Background(), gatewayamqp.GatewayGroupExchange, "1", false, false, rabbitmq.Publishing{
+	if err := ch.PublishWithContext(context.Background(), gatewayamqp.GatewayGroupExchange, commandRoutingKey(cmd.ChannelID), false, false, rabbitmq.Publishing{
 		ContentType: "application/json", DeliveryMode: rabbitmq.Persistent, Body: body,
 	}); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
+}
+
+func commandRoutingKey(channelID string) string {
+	return strconv.Itoa(ownership.Shard(channelID, ownership.DefaultShardCount))
 }
 
 func probeEvents(t *testing.T, conn *rabbitmq.Connection, routingKey string) <-chan rabbitmq.Delivery {

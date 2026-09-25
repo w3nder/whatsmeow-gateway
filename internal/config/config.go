@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/w3nder/whatsmeow-gateway/internal/ownership"
 )
 
 type Config struct {
@@ -41,7 +43,7 @@ func Load() (Config, error) {
 		S3Endpoint:           os.Getenv("S3_ENDPOINT"),
 		S3AccessKeyID:        os.Getenv("S3_ACCESS_KEY_ID"),
 		S3SecretAccessKey:    os.Getenv("S3_SECRET_ACCESS_KEY"),
-		ShardCount:           1024,
+		ShardCount:           ownership.DefaultShardCount,
 		SendPacePerSec:       1,
 		Prefetch:             32,
 		ShardLockTTL:         24 * time.Hour,

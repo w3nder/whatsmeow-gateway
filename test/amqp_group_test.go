@@ -46,7 +46,7 @@ func TestConsumerHandlesGatewayGroupCommand(t *testing.T) {
 		GroupJIDs: []string{"120363422547615282@g.us"},
 	}
 	body, _ := json.Marshal(cmd)
-	if err := publishCh.PublishWithContext(context.Background(), gatewayamqp.GatewayGroupExchange, "17", false, false, rabbitmq.Publishing{
+	if err := publishCh.PublishWithContext(context.Background(), gatewayamqp.GatewayGroupExchange, commandRoutingKey(cmd.ChannelID), false, false, rabbitmq.Publishing{
 		ContentType: "application/json", DeliveryMode: rabbitmq.Persistent, Body: body,
 	}); err != nil {
 		t.Fatalf("publish: %v", err)
