@@ -54,6 +54,9 @@ func Create(ctx context.Context, c GroupClient, fetch Fetch, req CreateRequest, 
 	if strings.TrimSpace(req.Name) == "" {
 		return CreateResult{}, amqp.RpcInvalidRequest("group name is required")
 	}
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
 	info, err := c.CreateGroup(ctx, whatsmeow.ReqCreateGroup{Name: req.Name, GroupAnnounce: types.GroupAnnounce{IsAnnounce: req.Announce}})
 	if err != nil {
 		return CreateResult{}, Classify(err)
@@ -75,10 +78,12 @@ func Create(ctx context.Context, c GroupClient, fetch Fetch, req CreateRequest, 
 	return CreateResult{
 		GroupJID:         info.JID.String(),
 		InviteURL:        link,
-		ParticipantCount: participantCount(info),
+		ParticipantCount: max(participantCount(info), creatorOnly),
 		CreatedAt:        createdAt(info),
 	}, nil
 }
+
+const creatorOnly = 1
 
 var inviteRetryDelays = []time.Duration{200 * time.Millisecond, 500 * time.Millisecond, time.Second}
 
@@ -307,10 +312,7 @@ func participantCount(info *types.GroupInfo) int {
 	if info.ParticipantCount > 0 {
 		return info.ParticipantCount
 	}
-	if len(info.Participants) > 0 {
-		return len(info.Participants)
-	}
-	return 1
+	return len(info.Participants)
 }
 
 func createdAt(info *types.GroupInfo) time.Time {

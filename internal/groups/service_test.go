@@ -33,6 +33,7 @@ type stubClient struct {
 	own            *types.JID
 	ownLID         types.JID
 	refused        map[string]bool
+	bareCreate     bool
 }
 
 func newStub() *stubClient {
@@ -55,7 +56,9 @@ func (s *stubClient) CreateGroup(_ context.Context, req whatsmeow.ReqCreateGroup
 	info := &types.GroupInfo{JID: jid}
 	info.Name = req.Name
 	info.IsAnnounce = req.IsAnnounce
-	info.Participants = []types.GroupParticipant{{JID: types.NewJID("15550000000", types.DefaultUserServer)}}
+	if !s.bareCreate {
+		info.Participants = []types.GroupParticipant{{JID: types.NewJID("15550000000", types.DefaultUserServer)}}
+	}
 	s.info[jid.String()] = info
 	return info, nil
 }
@@ -200,6 +203,39 @@ func TestCreateWithoutInviteLinkStillReturnsTheGroup(t *testing.T) {
 	}
 	if stub.inviteCalls != 4 {
 		t.Fatalf("invite calls %d, want 1 try and 3 retries", stub.inviteCalls)
+	}
+}
+
+func TestCreateCountsTheCreatorWhenWhatsAppReportsNoParticipants(t *testing.T) {
+	stub := newStub()
+	stub.bareCreate = true
+	res, err := groups.Create(context.Background(), stub, nil, groups.CreateRequest{Name: "G"}, slog.Default())
+	if err != nil || res.ParticipantCount != 1 {
+		t.Fatalf("a created group has at least its creator, got %d (%v)", res.ParticipantCount, err)
+	}
+}
+
+func TestDescribeReportsZeroParticipantsWhenWhatsAppReportsNone(t *testing.T) {
+	stub := newStub()
+	jid := types.NewJID("120363000000000009", types.GroupServer)
+	stub.info[jid.String()] = &types.GroupInfo{JID: jid}
+	info, err := groups.Describe(context.Background(), stub, jid)
+	if err != nil || info.ParticipantCount != 0 {
+		t.Fatalf("an existing group is never assumed to have one member, got %d (%v)", info.ParticipantCount, err)
+	}
+	stub.info[jid.String()].ParticipantCount = 7
+	if info, _ := groups.Describe(context.Background(), stub, jid); info.ParticipantCount != 7 {
+		t.Fatalf("the count whatsapp reports wins, got %d", info.ParticipantCount)
+	}
+}
+
+func TestCreateWithoutLoggerDoesNotPanicOnAFailedStep(t *testing.T) {
+	stub := newStub()
+	stub.photoErr = whatsmeow.ErrInvalidImageFormat
+	stub.inviteErr = whatsmeow.ErrIQNotAuthorized
+	res, err := groups.Create(context.Background(), stub, fetchOf(pngBytes(t), nil), groups.CreateRequest{Name: "G", PhotoURL: "https://s3/x"}, nil)
+	if err != nil || res.GroupJID == "" {
+		t.Fatalf("a nil logger must not break the creation: %v %+v", err, res)
 	}
 }
 
