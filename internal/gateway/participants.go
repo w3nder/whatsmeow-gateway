@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
@@ -19,7 +20,17 @@ type PhoneResolver interface {
 	PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error)
 }
 
-func BuildGroupParticipants(ctx context.Context, resolver PhoneResolver, tenantID, channelID string, e *events.GroupInfo) []amqp.GroupParticipantsEvent {
+type rosterChange struct {
+	ctx       context.Context
+	resolver  PhoneResolver
+	log       *slog.Logger
+	channelID string
+	event     *events.GroupInfo
+	phones    map[types.JID]string
+}
+
+func BuildGroupParticipants(ctx context.Context, resolver PhoneResolver, log *slog.Logger, tenantID, channelID string, e *events.GroupInfo) []amqp.GroupParticipantsEvent {
+	change := &rosterChange{ctx: ctx, resolver: resolver, log: log, channelID: channelID, event: e, phones: make(map[types.JID]string)}
 	var out []amqp.GroupParticipantsEvent
 	add := func(kind string, jids []types.JID) {
 		if len(jids) == 0 {
@@ -30,52 +41,79 @@ func BuildGroupParticipants(ctx context.Context, resolver PhoneResolver, tenantI
 			ChannelID:    channelID,
 			GroupJID:     e.JID.String(),
 			Type:         kind,
-			Participants: participantsOf(ctx, resolver, jids),
+			Participants: change.participants(jids),
 			EventID:      participantsEventID(e.JID, kind, e.Timestamp, jids),
 			OccurredAt:   e.Timestamp.UTC().Format(time.RFC3339),
 		})
 	}
+	left, removed := change.splitLeave()
 	add("join", e.Join)
-	add(leaveKind(ctx, resolver, e), e.Leave)
+	add("leave", left)
+	add("removed", removed)
 	add("promoted", e.Promote)
 	add("demoted", e.Demote)
 	return out
 }
 
-func leaveKind(ctx context.Context, resolver PhoneResolver, e *events.GroupInfo) string {
-	if e.Sender == nil {
-		return "removed"
-	}
-	for _, jid := range e.Leave {
-		if senderMatches(e, jid.User) {
-			return "leave"
-		}
-		if jid.Server == types.HiddenUserServer {
-			if pn, ok, err := resolver.PNForLID(ctx, jid); err == nil && ok && senderMatches(e, pn.User) {
-				return "leave"
-			}
+func (c *rosterChange) splitLeave() (left, removed []types.JID) {
+	for _, jid := range c.event.Leave {
+		if c.leftByThemselves(jid) {
+			left = append(left, jid)
+		} else {
+			removed = append(removed, jid)
 		}
 	}
-	return "removed"
+	return left, removed
 }
 
-func senderMatches(e *events.GroupInfo, user string) bool {
-	if e.Sender.User == user {
+func (c *rosterChange) leftByThemselves(jid types.JID) bool {
+	if c.event.Sender == nil {
+		return false
+	}
+	if c.senderMatches(jid.User) {
 		return true
 	}
-	return e.SenderPN != nil && e.SenderPN.User == user
+	if jid.Server != types.HiddenUserServer {
+		return false
+	}
+	phone := c.phoneOf(jid)
+	return phone != "" && c.senderMatches(phone)
 }
 
-func participantsOf(ctx context.Context, resolver PhoneResolver, jids []types.JID) []amqp.GroupParticipant {
+func (c *rosterChange) senderMatches(user string) bool {
+	if c.event.Sender.User == user {
+		return true
+	}
+	return c.event.SenderPN != nil && c.event.SenderPN.User == user
+}
+
+func (c *rosterChange) phoneOf(lid types.JID) string {
+	if phone, done := c.phones[lid]; done {
+		return phone
+	}
+	pn, ok, err := c.resolver.PNForLID(c.ctx, lid)
+	switch {
+	case err != nil:
+		c.log.Warn("gateway: resolve phone of a lid group participant", "channel_id", c.channelID, "group_jid", c.event.JID.String(), "lid", lid.String(), "error", err)
+	case !ok:
+		c.log.Debug("gateway: lid group participant has no known phone", "channel_id", c.channelID, "group_jid", c.event.JID.String(), "lid", lid.String())
+	}
+	phone := ""
+	if err == nil && ok {
+		phone = pn.User
+	}
+	c.phones[lid] = phone
+	return phone
+}
+
+func (c *rosterChange) participants(jids []types.JID) []amqp.GroupParticipant {
 	out := make([]amqp.GroupParticipant, 0, len(jids))
 	for _, jid := range jids {
 		p := amqp.GroupParticipant{JID: jid.String()}
 		switch jid.Server {
 		case types.HiddenUserServer:
 			p.LID = jid.String()
-			if pn, ok, err := resolver.PNForLID(ctx, jid); err == nil && ok {
-				p.Phone = pn.User
-			}
+			p.Phone = c.phoneOf(jid)
 		case types.DefaultUserServer:
 			p.Phone = jid.User
 		}

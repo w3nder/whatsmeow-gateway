@@ -54,9 +54,7 @@ func Create(ctx context.Context, c GroupClient, fetch Fetch, req CreateRequest, 
 	if strings.TrimSpace(req.Name) == "" {
 		return CreateResult{}, amqp.RpcInvalidRequest("group name is required")
 	}
-	if log == nil {
-		log = slog.New(slog.DiscardHandler)
-	}
+	log = orDiscard(log)
 	info, err := c.CreateGroup(ctx, whatsmeow.ReqCreateGroup{Name: req.Name, GroupAnnounce: types.GroupAnnounce{IsAnnounce: req.Announce}})
 	if err != nil {
 		return CreateResult{}, Classify(err)
@@ -84,6 +82,13 @@ func Create(ctx context.Context, c GroupClient, fetch Fetch, req CreateRequest, 
 }
 
 const creatorOnly = 1
+
+func orDiscard(log *slog.Logger) *slog.Logger {
+	if log == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return log
+}
 
 var inviteRetryDelays = []time.Duration{200 * time.Millisecond, 500 * time.Millisecond, time.Second}
 
@@ -133,7 +138,8 @@ func Joined(ctx context.Context, c GroupClient) ([]Info, error) {
 	return out, nil
 }
 
-func Apply(ctx context.Context, c GroupClient, action string, jid types.JID, params amqp.GroupActionParams, photo []byte) (ActionResult, error) {
+func Apply(ctx context.Context, c GroupClient, action string, jid types.JID, params amqp.GroupActionParams, photo []byte, log *slog.Logger) (ActionResult, error) {
+	log = orDiscard(log)
 	var err error
 	switch action {
 	case ActionLock:
@@ -153,7 +159,7 @@ func Apply(ctx context.Context, c GroupClient, action string, jid types.JID, par
 		}
 		_, err = c.SetGroupPhoto(ctx, jid, photo)
 	case ActionRemoveParticipants:
-		return removeParticipants(ctx, c, jid, params.Phones)
+		return removeParticipants(ctx, c, jid, params.Phones, log)
 	default:
 		return ActionResult{}, amqp.RpcInvalidRequest(fmt.Sprintf("unknown action %q", action))
 	}
@@ -163,7 +169,7 @@ func Apply(ctx context.Context, c GroupClient, action string, jid types.JID, par
 	return ActionResult{}, nil
 }
 
-func removeParticipants(ctx context.Context, c GroupClient, jid types.JID, phones []string) (ActionResult, error) {
+func removeParticipants(ctx context.Context, c GroupClient, jid types.JID, phones []string, log *slog.Logger) (ActionResult, error) {
 	info, err := c.GetGroupInfo(ctx, jid)
 	if err != nil {
 		return ActionResult{}, Classify(err)
@@ -175,7 +181,7 @@ func removeParticipants(ctx context.Context, c GroupClient, jid types.JID, phone
 		if self.is(p) {
 			continue
 		}
-		if matchesPhone(ctx, c, p, wanted) {
+		if matchesPhone(ctx, c, jid, p, wanted, log) {
 			targets = append(targets, p.JID)
 		}
 	}
@@ -194,7 +200,7 @@ func removeParticipants(ctx context.Context, c GroupClient, jid types.JID, phone
 	return ActionResult{Removed: &removed}, nil
 }
 
-func matchesPhone(ctx context.Context, c GroupClient, p types.GroupParticipant, wanted map[string]struct{}) bool {
+func matchesPhone(ctx context.Context, c GroupClient, group types.JID, p types.GroupParticipant, wanted map[string]struct{}, log *slog.Logger) bool {
 	if _, ok := wanted[p.PhoneNumber.User]; ok && p.PhoneNumber.User != "" {
 		return true
 	}
@@ -203,14 +209,20 @@ func matchesPhone(ctx context.Context, c GroupClient, p types.GroupParticipant, 
 			return true
 		}
 	}
-	if p.PhoneNumber.User == "" && p.LID.User != "" {
-		resolved, ok, err := c.PNForLID(ctx, p.LID)
-		if err == nil && ok {
-			_, match := wanted[resolved.User]
-			return match
-		}
+	if p.PhoneNumber.User != "" || p.LID.User == "" {
+		return false
 	}
-	return false
+	resolved, ok, err := c.PNForLID(ctx, p.LID)
+	if err != nil {
+		log.Warn("groups: resolve phone of a lid participant to remove", "group_jid", group.String(), "lid", p.LID.String(), "error", err)
+		return false
+	}
+	if !ok {
+		log.Debug("groups: lid participant has no known phone", "group_jid", group.String(), "lid", p.LID.String())
+		return false
+	}
+	_, match := wanted[resolved.User]
+	return match
 }
 
 func wantedPhones(phones []string) map[string]struct{} {

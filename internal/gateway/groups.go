@@ -128,7 +128,7 @@ func (g *gateway) handleGroupInfo(channelID string, e *events.GroupInfo) {
 		g.logger.Error("gateway: resolve client for group info", "channel_id", channelID, "error", err)
 		return
 	}
-	for _, evt := range BuildGroupParticipants(g.workCtx, client, g.tenantFor(channelID), channelID, e) {
+	for _, evt := range BuildGroupParticipants(g.workCtx, client, g.logger, g.tenantFor(channelID), channelID, e) {
 		if err := g.publisher.PublishGroupParticipants(g.workCtx, evt); err != nil {
 			g.logger.Error("gateway: publish group participants", "channel_id", channelID, "group_jid", evt.GroupJID, "type", evt.Type, "error", err)
 		}
@@ -307,7 +307,7 @@ func (g *gateway) applyGroupAction(ctx, work context.Context, run *groupCommandR
 	run.touched = true
 	itemCtx, cancel := context.WithTimeout(work, groupItemTimeout)
 	defer cancel()
-	applied, err := groups.Apply(itemCtx, run.client, run.cmd.Action, jid, run.cmd.Params, run.photo)
+	applied, err := groups.Apply(itemCtx, run.client, run.cmd.Action, jid, run.cmd.Params, run.photo, g.logger)
 	if groups.IsUnavailable(err) && ctx.Err() != nil {
 		return result, errShuttingDown
 	}

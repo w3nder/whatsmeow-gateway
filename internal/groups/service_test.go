@@ -8,6 +8,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"go.mau.fi/whatsmeow"
@@ -34,6 +35,7 @@ type stubClient struct {
 	ownLID         types.JID
 	refused        map[string]bool
 	bareCreate     bool
+	lidErr         error
 }
 
 func newStub() *stubClient {
@@ -126,6 +128,9 @@ func (s *stubClient) GetJoinedGroups(context.Context) ([]*types.GroupInfo, error
 }
 
 func (s *stubClient) PNForLID(_ context.Context, lid types.JID) (types.JID, bool, error) {
+	if s.lidErr != nil {
+		return types.JID{}, false, s.lidErr
+	}
 	if lid.User == "2002125877314" {
 		return types.NewJID("5511999887766", types.DefaultUserServer), true, nil
 	}
@@ -255,7 +260,7 @@ func TestApplyRemoveParticipantsResolvesPhonesAgainstTheGroup(t *testing.T) {
 		{JID: types.NewJID("5511888887777", types.DefaultUserServer), PhoneNumber: types.NewJID("5511888887777", types.DefaultUserServer)},
 	}}
 
-	res, err := groups.Apply(context.Background(), stub, groups.ActionRemoveParticipants, jid, amqp.GroupActionParams{Phones: []string{"5511999887766", "5500000000000"}}, nil)
+	res, err := groups.Apply(context.Background(), stub, groups.ActionRemoveParticipants, jid, amqp.GroupActionParams{Phones: []string{"5511999887766", "5500000000000"}}, nil, slog.Default())
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -275,7 +280,7 @@ func TestApplyRemoveParticipantsResolvesLIDOnlyParticipantThroughPNForLID(t *tes
 		{JID: lid, LID: lid},
 	}}
 
-	res, err := groups.Apply(context.Background(), stub, groups.ActionRemoveParticipants, jid, amqp.GroupActionParams{Phones: []string{"5511999887766"}}, nil)
+	res, err := groups.Apply(context.Background(), stub, groups.ActionRemoveParticipants, jid, amqp.GroupActionParams{Phones: []string{"5511999887766"}}, nil, slog.Default())
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -287,11 +292,30 @@ func TestApplyRemoveParticipantsResolvesLIDOnlyParticipantThroughPNForLID(t *tes
 	}
 }
 
+func TestApplyRemoveParticipantsLogsAFailedLIDResolution(t *testing.T) {
+	stub := newStub()
+	stub.lidErr = errors.New("lid store down")
+	jid := types.NewJID("120363000000000009", types.GroupServer)
+	lid := types.NewJID("2002125877314", types.HiddenUserServer)
+	stub.info[jid.String()] = &types.GroupInfo{JID: jid, Participants: []types.GroupParticipant{{JID: lid, LID: lid}}}
+	var logs bytes.Buffer
+
+	res, err := groups.Apply(context.Background(), stub, groups.ActionRemoveParticipants, jid, amqp.GroupActionParams{Phones: []string{"5511999887766"}}, nil, slog.New(slog.NewJSONHandler(&logs, nil)))
+	if err != nil || res.Removed == nil || *res.Removed != 0 {
+		t.Fatalf("an unresolved lid is simply not matched: %v %+v", err, res)
+	}
+	for _, want := range []string{"lid store down", jid.String(), lid.String()} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("the failed resolution must be logged with %q, logs: %s", want, logs.String())
+		}
+	}
+}
+
 func TestApplyRemoveParticipantsWithNoMatchIsOkWithZero(t *testing.T) {
 	stub := newStub()
 	jid := types.NewJID("120363000000000009", types.GroupServer)
 	stub.info[jid.String()] = &types.GroupInfo{JID: jid}
-	res, err := groups.Apply(context.Background(), stub, groups.ActionRemoveParticipants, jid, amqp.GroupActionParams{Phones: []string{"5500000000000"}}, nil)
+	res, err := groups.Apply(context.Background(), stub, groups.ActionRemoveParticipants, jid, amqp.GroupActionParams{Phones: []string{"5500000000000"}}, nil, slog.Default())
 	if err != nil || res.Removed == nil || *res.Removed != 0 {
 		t.Fatalf("got %v %+v", err, res)
 	}
@@ -304,29 +328,29 @@ func TestApplyLockUnlockNameDescriptionPhoto(t *testing.T) {
 	stub := newStub()
 	jid := types.NewJID("120363000000000009", types.GroupServer)
 	ctx := context.Background()
-	if _, err := groups.Apply(ctx, stub, groups.ActionLock, jid, amqp.GroupActionParams{}, nil); err != nil || !stub.announce[jid.String()] {
+	if _, err := groups.Apply(ctx, stub, groups.ActionLock, jid, amqp.GroupActionParams{}, nil, slog.Default()); err != nil || !stub.announce[jid.String()] {
 		t.Fatalf("lock: %v %v", err, stub.announce)
 	}
-	if _, err := groups.Apply(ctx, stub, groups.ActionUnlock, jid, amqp.GroupActionParams{}, nil); err != nil || stub.announce[jid.String()] {
+	if _, err := groups.Apply(ctx, stub, groups.ActionUnlock, jid, amqp.GroupActionParams{}, nil, slog.Default()); err != nil || stub.announce[jid.String()] {
 		t.Fatalf("unlock: %v %v", err, stub.announce)
 	}
-	if _, err := groups.Apply(ctx, stub, groups.ActionSetName, jid, amqp.GroupActionParams{Name: "Novo"}, nil); err != nil || stub.names[jid.String()] != "Novo" {
+	if _, err := groups.Apply(ctx, stub, groups.ActionSetName, jid, amqp.GroupActionParams{Name: "Novo"}, nil, slog.Default()); err != nil || stub.names[jid.String()] != "Novo" {
 		t.Fatalf("set_name: %v %v", err, stub.names)
 	}
-	if _, err := groups.Apply(ctx, stub, groups.ActionSetDescription, jid, amqp.GroupActionParams{Description: "Desc"}, nil); err != nil || stub.topics[jid.String()] != "Desc" {
+	if _, err := groups.Apply(ctx, stub, groups.ActionSetDescription, jid, amqp.GroupActionParams{Description: "Desc"}, nil, slog.Default()); err != nil || stub.topics[jid.String()] != "Desc" {
 		t.Fatalf("set_description: %v %v", err, stub.topics)
 	}
 	photo, err := groups.PreparePhoto(ctx, fetchOf(pngBytes(t), nil), "https://s3/p")
 	if err != nil {
 		t.Fatalf("PreparePhoto: %v", err)
 	}
-	if _, err := groups.Apply(ctx, stub, groups.ActionSetPhoto, jid, amqp.GroupActionParams{PhotoURL: "https://s3/p"}, photo); err != nil || !bytes.Equal(stub.photos[jid.String()], photo) {
+	if _, err := groups.Apply(ctx, stub, groups.ActionSetPhoto, jid, amqp.GroupActionParams{PhotoURL: "https://s3/p"}, photo, slog.Default()); err != nil || !bytes.Equal(stub.photos[jid.String()], photo) {
 		t.Fatalf("set_photo: %v", err)
 	}
-	if _, err := groups.Apply(ctx, stub, groups.ActionSetPhoto, jid, amqp.GroupActionParams{PhotoURL: "https://s3/p"}, nil); err == nil {
+	if _, err := groups.Apply(ctx, stub, groups.ActionSetPhoto, jid, amqp.GroupActionParams{PhotoURL: "https://s3/p"}, nil, slog.Default()); err == nil {
 		t.Fatal("set_photo without a prepared photo must fail")
 	}
-	if _, err := groups.Apply(ctx, stub, "explode", jid, amqp.GroupActionParams{}, nil); err == nil {
+	if _, err := groups.Apply(ctx, stub, "explode", jid, amqp.GroupActionParams{}, nil, slog.Default()); err == nil {
 		t.Fatal("unknown action must fail")
 	}
 }
@@ -363,7 +387,7 @@ func TestApplyRemoveParticipantsNeverRemovesTheChannelItself(t *testing.T) {
 		{JID: types.NewJID("5511888887777", types.DefaultUserServer)},
 	}}
 
-	res, err := groups.Apply(context.Background(), stub, groups.ActionRemoveParticipants, jid, amqp.GroupActionParams{Phones: []string{"5511999887766", "5511888887777"}}, nil)
+	res, err := groups.Apply(context.Background(), stub, groups.ActionRemoveParticipants, jid, amqp.GroupActionParams{Phones: []string{"5511999887766", "5511888887777"}}, nil, slog.Default())
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -384,7 +408,7 @@ func TestApplyRemoveParticipantsCountsOnlyAcceptedRemovals(t *testing.T) {
 		{JID: types.NewJID("5511777776666", types.DefaultUserServer)},
 	}}
 
-	res, err := groups.Apply(context.Background(), stub, groups.ActionRemoveParticipants, jid, amqp.GroupActionParams{Phones: []string{"5511888887777", "5511777776666"}}, nil)
+	res, err := groups.Apply(context.Background(), stub, groups.ActionRemoveParticipants, jid, amqp.GroupActionParams{Phones: []string{"5511888887777", "5511777776666"}}, nil, slog.Default())
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -410,7 +434,7 @@ func TestApplyRemoveParticipantsMatchesTheBrazilianNinthDigitBothWays(t *testing
 				{JID: types.NewJID(tc.participant, types.DefaultUserServer)},
 				{JID: types.NewJID("5521988887777", types.DefaultUserServer)},
 			}}
-			res, err := groups.Apply(context.Background(), stub, groups.ActionRemoveParticipants, jid, amqp.GroupActionParams{Phones: []string{tc.phone}}, nil)
+			res, err := groups.Apply(context.Background(), stub, groups.ActionRemoveParticipants, jid, amqp.GroupActionParams{Phones: []string{tc.phone}}, nil, slog.Default())
 			if err != nil {
 				t.Fatalf("Apply: %v", err)
 			}
