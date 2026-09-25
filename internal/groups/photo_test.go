@@ -145,51 +145,103 @@ func TestToJPEGPaintsTransparencyWhite(t *testing.T) {
 	}
 }
 
-func withOrientation(t *testing.T, jpegData []byte, orientation uint16) []byte {
-	t.Helper()
+func exifSegment(orientation uint16, ifdOffset uint32) []byte {
 	ifd := make([]byte, 2+12+4)
 	binary.LittleEndian.PutUint16(ifd[0:], 1)
 	binary.LittleEndian.PutUint16(ifd[2:], 0x0112)
 	binary.LittleEndian.PutUint16(ifd[4:], 3)
 	binary.LittleEndian.PutUint32(ifd[6:], 1)
 	binary.LittleEndian.PutUint16(ifd[10:], orientation)
-	tiff := append([]byte{'I', 'I', 42, 0, 8, 0, 0, 0}, ifd...)
-	payload := append([]byte("Exif\x00\x00"), tiff...)
+	tiff := []byte{'I', 'I', 42, 0, 0, 0, 0, 0}
+	binary.LittleEndian.PutUint32(tiff[4:], ifdOffset)
+	payload := append([]byte("Exif\x00\x00"), append(tiff, ifd...)...)
 	segment := []byte{0xFF, 0xE1, 0, 0}
 	binary.BigEndian.PutUint16(segment[2:], uint16(len(payload)+2))
-	segment = append(segment, payload...)
+	return append(segment, payload...)
+}
+
+func withSegment(jpegData, segment []byte) []byte {
 	out := append([]byte{}, jpegData[:2]...)
 	out = append(out, segment...)
 	return append(out, jpegData[2:]...)
 }
 
-func TestToJPEGAppliesTheExifOrientation(t *testing.T) {
+var (
+	red    = color.RGBA{R: 255, A: 255}
+	green  = color.RGBA{G: 255, A: 255}
+	blue   = color.RGBA{B: 255, A: 255}
+	yellow = color.RGBA{R: 255, G: 255, A: 255}
+)
+
+func quadrantJPEG(t *testing.T) []byte {
+	t.Helper()
 	src := image.NewRGBA(image.Rect(0, 0, 64, 64))
 	for y := range 64 {
 		for x := range 64 {
-			c := color.RGBA{B: 255, A: 255}
-			if x < 32 {
-				c = color.RGBA{R: 255, A: 255}
+			switch {
+			case x < 32 && y < 32:
+				src.Set(x, y, red)
+			case y < 32:
+				src.Set(x, y, green)
+			case x < 32:
+				src.Set(x, y, blue)
+			default:
+				src.Set(x, y, yellow)
 			}
-			src.Set(x, y, c)
 		}
 	}
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, src, &jpeg.Options{Quality: 95}); err != nil {
 		t.Fatal(err)
 	}
+	return buf.Bytes()
+}
 
-	out, err := groups.ToJPEG(context.Background(), withOrientation(t, buf.Bytes(), 6))
-	if err != nil {
-		t.Fatalf("ToJPEG: %v", err)
+func nearest(c color.Color) color.RGBA {
+	r, g, b, _ := c.RGBA()
+	best, bestDistance := red, -1
+	for _, candidate := range []color.RGBA{red, green, blue, yellow} {
+		dr, dg, db := int(r>>8)-int(candidate.R), int(g>>8)-int(candidate.G), int(b>>8)-int(candidate.B)
+		if d := dr*dr + dg*dg + db*db; bestDistance < 0 || d < bestDistance {
+			best, bestDistance = candidate, d
+		}
 	}
-	img, err := jpeg.Decode(bytes.NewReader(out))
-	if err != nil {
-		t.Fatal(err)
+	return best
+}
+
+func TestToJPEGAppliesEveryExifOrientation(t *testing.T) {
+	source := quadrantJPEG(t)
+	cases := []struct {
+		name    string
+		segment []byte
+		want    [4]color.RGBA
+	}{
+		{"1 normal", exifSegment(1, 8), [4]color.RGBA{red, green, blue, yellow}},
+		{"2 mirror horizontal", exifSegment(2, 8), [4]color.RGBA{green, red, yellow, blue}},
+		{"3 rotate 180", exifSegment(3, 8), [4]color.RGBA{yellow, blue, green, red}},
+		{"4 mirror vertical", exifSegment(4, 8), [4]color.RGBA{blue, yellow, red, green}},
+		{"5 transpose", exifSegment(5, 8), [4]color.RGBA{red, blue, green, yellow}},
+		{"6 rotate 90 clockwise", exifSegment(6, 8), [4]color.RGBA{blue, red, yellow, green}},
+		{"7 transverse", exifSegment(7, 8), [4]color.RGBA{yellow, green, blue, red}},
+		{"8 rotate 270 clockwise", exifSegment(8, 8), [4]color.RGBA{green, yellow, red, blue}},
+		{"malformed value 0", exifSegment(0, 8), [4]color.RGBA{red, green, blue, yellow}},
+		{"malformed value 9", exifSegment(9, 8), [4]color.RGBA{red, green, blue, yellow}},
+		{"malformed ifd offset", exifSegment(6, 0xFFFFFFF0), [4]color.RGBA{red, green, blue, yellow}},
 	}
-	top, _, _, _ := img.At(32, 8).RGBA()
-	bottom, _, _, _ := img.At(32, 56).RGBA()
-	if top>>8 < 200 || bottom>>8 > 60 {
-		t.Fatalf("orientation 6 turns the red left half to the top, got red %d on top and %d at the bottom", top>>8, bottom>>8)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := groups.ToJPEG(context.Background(), withSegment(source, tc.segment))
+			if err != nil {
+				t.Fatalf("ToJPEG: %v", err)
+			}
+			img, err := jpeg.Decode(bytes.NewReader(out))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := [4]color.RGBA{nearest(img.At(16, 16)), nearest(img.At(48, 16)), nearest(img.At(16, 48)), nearest(img.At(48, 48))}
+			if got != tc.want {
+				t.Fatalf("quadrants top-left, top-right, bottom-left, bottom-right: got %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

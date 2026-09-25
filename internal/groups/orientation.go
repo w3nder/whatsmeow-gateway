@@ -61,10 +61,11 @@ func tiffOrientation(segment []byte) (int, bool) {
 	if order.Uint16(tiff[2:]) != tiffMagic {
 		return 0, false
 	}
-	ifd := int(order.Uint32(tiff[4:]))
-	if ifd+2 > len(tiff) {
+	offset := uint64(order.Uint32(tiff[4:]))
+	if offset+2 > uint64(len(tiff)) {
 		return 0, false
 	}
+	ifd := int(offset)
 	entries := int(order.Uint16(tiff[ifd:]))
 	for i := range entries {
 		entry := ifd + 2 + i*ifdEntrySize
