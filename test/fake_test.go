@@ -64,7 +64,11 @@ type fakeWAClient struct {
 	nextGroupSeq     int
 	announceDelay    time.Duration
 	announceCount    int
+	announceEntered  int
+	dropAfterLocks   int
 	topicSeq         int
+	createDelay      time.Duration
+	createEntered    int
 }
 
 type participantCall struct {
@@ -213,6 +217,11 @@ func (f *fakeWAClient) GetProfilePictureInfo(ctx context.Context, jid types.JID,
 
 func (f *fakeWAClient) CreateGroup(ctx context.Context, req whatsmeow.ReqCreateGroup) (*types.GroupInfo, error) {
 	f.mu.Lock()
+	f.createEntered++
+	delay := f.createDelay
+	f.mu.Unlock()
+	time.Sleep(delay)
+	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.groupErr != nil {
 		return nil, f.groupErr
@@ -262,6 +271,7 @@ func (f *fakeWAClient) GetGroupInviteLink(ctx context.Context, jid types.JID, re
 
 func (f *fakeWAClient) SetGroupAnnounce(ctx context.Context, jid types.JID, announce bool) error {
 	f.mu.Lock()
+	f.announceEntered++
 	delay := f.announceDelay
 	f.mu.Unlock()
 	time.Sleep(delay)
@@ -270,6 +280,9 @@ func (f *fakeWAClient) SetGroupAnnounce(ctx context.Context, jid types.JID, anno
 	f.announceCount++
 	if f.groupErr != nil {
 		return f.groupErr
+	}
+	if !f.connected {
+		return whatsmeow.ErrNotConnected
 	}
 	if _, ok := f.groups[jid.String()]; !ok {
 		return whatsmeow.ErrGroupNotFound
@@ -280,6 +293,9 @@ func (f *fakeWAClient) SetGroupAnnounce(ctx context.Context, jid types.JID, anno
 	f.announceCalls[jid.String()] = announce
 	if info, ok := f.groups[jid.String()]; ok {
 		info.IsAnnounce = announce
+	}
+	if f.dropAfterLocks > 0 && len(f.announceCalls) >= f.dropAfterLocks {
+		f.connected = false
 	}
 	return nil
 }
@@ -385,6 +401,18 @@ func (f *fakeWAClient) addGroupParticipant(group string, participant types.Group
 	defer f.mu.Unlock()
 	info := f.groups[group]
 	info.Participants = append(info.Participants, participant)
+}
+
+func (f *fakeWAClient) announceEnteredCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.announceEntered
+}
+
+func (f *fakeWAClient) createEnteredCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.createEntered
 }
 
 func (f *fakeWAClient) announceCallCount() int {

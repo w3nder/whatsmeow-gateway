@@ -147,6 +147,7 @@ func run(ctx context.Context, cfg config.Config, waLogger waLog.Logger, logger *
 		ShardLockTTL:         cfg.ShardLockTTL,
 		SendTimeout:          cfg.SendTimeout,
 		ShutdownDrainTimeout: cfg.ShutdownDrainTimeout,
+		RpcDrainTimeout:      cfg.RpcDrainTimeout,
 		CallOptions: call.Options{
 			TmpDir: cfg.CallTmpDir,
 			Record: cfg.CallRecord,

@@ -23,8 +23,12 @@ func setupGroupGateway(t *testing.T, fake *fakeWAClient, channelID string) (conn
 
 func startGroupGateway(t *testing.T, infra *gatewayInfra, fake *fakeWAClient, name string) (context.CancelFunc, chan error) {
 	t.Helper()
+	return startGroupGatewayWith(t, infra, gatewayDepsOn(t, infra, fake, name))
+}
 
-	deps := gatewayDepsOn(t, infra, fake, name)
+func startGroupGatewayWith(t *testing.T, infra *gatewayInfra, deps gateway.Deps) (context.CancelFunc, chan error) {
+	t.Helper()
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	runErrCh := make(chan error, 1)

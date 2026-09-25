@@ -105,6 +105,9 @@ func (g *gateway) groupClient(ctx context.Context, tenantID, channelID string) (
 	if channelID == "" {
 		return nil, amqp.RpcInvalidRequest("channelId is required")
 	}
+	if g.stopping.Load() {
+		return nil, amqp.RpcUnavailable("gateway is shutting down, the channel is not reopened here")
+	}
 	if err := g.ensureChannelConnected(ctx, channelID); err != nil {
 		if errors.Is(err, session.ErrNoSession) {
 			return nil, amqp.RpcNotFound(err.Error())

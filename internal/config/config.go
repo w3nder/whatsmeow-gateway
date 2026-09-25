@@ -25,6 +25,7 @@ type Config struct {
 	ShardLockTTL         time.Duration
 	SendTimeout          time.Duration
 	ShutdownDrainTimeout time.Duration
+	RpcDrainTimeout      time.Duration
 	CallTmpDir           string
 	CallRecord           bool
 	CallMediaAddr        string
@@ -49,6 +50,7 @@ func Load() (Config, error) {
 		ShardLockTTL:         24 * time.Hour,
 		SendTimeout:          30 * time.Second,
 		ShutdownDrainTimeout: 20 * time.Second,
+		RpcDrainTimeout:      30 * time.Second,
 		CallTmpDir:           os.Getenv("GATEWAY_CALL_TMPDIR"),
 		CallRecord:           os.Getenv("GATEWAY_CALL_RECORD") != "false",
 		CallMediaAddr:        os.Getenv("CALL_MEDIA_ADDR"),

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -43,6 +44,7 @@ type Deps struct {
 	ShardLockTTL         time.Duration
 	SendTimeout          time.Duration
 	ShutdownDrainTimeout time.Duration
+	RpcDrainTimeout      time.Duration
 	CallOptions          call.Options
 	OnCallManager        func(*call.Manager)
 	Logger               *slog.Logger
@@ -64,9 +66,11 @@ type gateway struct {
 	shardLockTTL         time.Duration
 	sendTimeout          time.Duration
 	shutdownDrainTimeout time.Duration
+	rpcDrainTimeout      time.Duration
 	logger               *slog.Logger
 
-	workCtx context.Context
+	workCtx  context.Context
+	stopping atomic.Bool
 
 	tenantMu        sync.RWMutex
 	tenantByChannel map[string]string
@@ -88,6 +92,7 @@ func Run(ctx context.Context, deps Deps) error {
 		shardLockTTL:         deps.ShardLockTTL,
 		sendTimeout:          sendTimeout(deps.SendTimeout),
 		shutdownDrainTimeout: deps.ShutdownDrainTimeout,
+		rpcDrainTimeout:      rpcDrainTimeout(deps.RpcDrainTimeout),
 		logger:               deps.Logger,
 		workCtx:              context.WithoutCancel(ctx),
 		tenantByChannel:      make(map[string]string),
@@ -204,6 +209,15 @@ func sendTimeout(d time.Duration) time.Duration {
 	return d
 }
 
+const defaultRpcDrainTimeout = 30 * time.Second
+
+func rpcDrainTimeout(d time.Duration) time.Duration {
+	if d <= 0 {
+		return defaultRpcDrainTimeout
+	}
+	return d
+}
+
 func (g *gateway) run(ctx context.Context) error {
 	if err := g.ownership.ClaimAll(ctx, g.instanceID, g.shardLockTTL); err != nil {
 		return fmt.Errorf("gateway: claim shards: %w", err)
@@ -253,7 +267,8 @@ func (g *gateway) run(ctx context.Context) error {
 		g.logger.Error("gateway: rpc server died, shutting down for restart", "error", rpcErr)
 	}
 
-	g.closeConsumerWithDrainDeadline()
+	g.stopping.Store(true)
+	g.drainConsumers()
 
 	g.calls.AbortAll(g.workCtx, "gateway_shutdown")
 	g.calls.WaitForRecordings(g.shutdownDrainTimeout)
@@ -307,22 +322,33 @@ func (g *gateway) closeConsumerForFailedBoot() {
 	}
 }
 
-func (g *gateway) closeConsumerWithDrainDeadline() {
-	done := make(chan error, 1)
+func (g *gateway) drainConsumers() {
+	var drains sync.WaitGroup
+	drains.Add(2)
 	go func() {
-		rpcDone := make(chan error, 1)
-		go func() { rpcDone <- g.rpc.Close() }()
-		consumerErr := g.consumer.Close()
-		done <- errors.Join(consumerErr, <-rpcDone)
+		defer drains.Done()
+		g.drainWithin("consumer", g.shutdownDrainTimeout, g.consumer.Close)
 	}()
+	go func() {
+		defer drains.Done()
+		g.drainWithin("rpc", g.rpcDrainTimeout, g.rpc.Close)
+	}()
+	drains.Wait()
+}
 
+func (g *gateway) drainWithin(name string, timeout time.Duration, closeFn func() error) {
+	done := make(chan error, 1)
+	go func() { done <- closeFn() }()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case err := <-done:
 		if err != nil {
-			g.logger.Error("gateway: close consumer", "error", err)
+			g.logger.Error("gateway: close "+name, "error", err)
 		}
-	case <-time.After(g.shutdownDrainTimeout):
-		g.logger.Error("gateway: consumer drain deadline exceeded, proceeding with shutdown", "timeout", g.shutdownDrainTimeout)
+	case <-timer.C:
+		g.logger.Error("gateway: "+name+" drain deadline exceeded, proceeding with shutdown", "timeout", timeout)
 	}
 }
 
