@@ -308,6 +308,9 @@ func (g *gateway) applyGroupAction(ctx, work context.Context, run *groupCommandR
 	itemCtx, cancel := context.WithTimeout(work, groupItemTimeout)
 	defer cancel()
 	applied, err := groups.Apply(itemCtx, run.client, run.cmd.Action, jid, run.cmd.Params, run.photo)
+	if groups.IsUnavailable(err) && ctx.Err() != nil {
+		return result, errShuttingDown
+	}
 	if groups.IsUnavailable(err) {
 		return result, fmt.Errorf("gateway: whatsapp unavailable at %s/%s, halting the command for a later replay: %w", run.cmd.CommandID, raw, err)
 	}

@@ -397,6 +397,8 @@ func TestClassifyMapsWhatsmeowErrors(t *testing.T) {
 		whatsmeow.ErrIQRateOverLimit:       amqp.RpcCodeUnavailable,
 		whatsmeow.ErrIQInternalServerError: amqp.RpcCodeUnavailable,
 		whatsmeow.ErrIQServiceUnavailable:  amqp.RpcCodeUnavailable,
+		context.DeadlineExceeded:           amqp.RpcCodeUnavailable,
+		context.Canceled:                   amqp.RpcCodeUnavailable,
 		errors.New("anything else"):        amqp.RpcCodeInternal,
 	}
 	for in, want := range cases {
