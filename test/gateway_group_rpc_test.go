@@ -160,7 +160,7 @@ func TestGroupRpcRejectsInvalidPayload(t *testing.T) {
 	}
 }
 
-func TestGroupInfoUnknownGroupIsBadGateway(t *testing.T) {
+func TestGroupInfoUnknownGroupIsGone(t *testing.T) {
 	fake := newFakeWAClient()
 	fake.markPaired()
 	conn, cancel, runErrCh := setupGroupGateway(t, fake, "channel-groups")
@@ -168,7 +168,7 @@ func TestGroupInfoUnknownGroupIsBadGateway(t *testing.T) {
 
 	probe := newRpcProbe(t, conn)
 	reply := probe.call(t, "group.info", "u1", `{"tenantId":"t","channelId":"channel-groups","groupJid":"120363000000000099@g.us"}`, 10*time.Second)
-	if reply["ok"] != false || reply["error"].(map[string]any)["code"] != "bad_gateway" {
+	if reply["ok"] != false || reply["error"].(map[string]any)["code"] != "gone" || reply["error"].(map[string]any)["message"] != "group not found (404)" {
 		t.Fatalf("unknown group → %v", reply)
 	}
 }

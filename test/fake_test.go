@@ -352,6 +352,9 @@ func (f *fakeWAClient) SetGroupPhoto(ctx context.Context, jid types.JID, jpeg []
 		f.photoCalls = map[string][]byte{}
 	}
 	f.photoCalls[jid.String()] = jpeg
+	if err := f.groupErrs[jid.String()]; err != nil {
+		return "", err
+	}
 	return "pic-1", f.groupErr
 }
 
