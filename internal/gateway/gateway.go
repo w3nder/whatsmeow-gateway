@@ -541,12 +541,7 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 		return fmt.Errorf("gateway: mark sent %s: %w", dedupeKey, err)
 	}
 
-	if err := g.publisher.PublishStatus(ctx, mapper.StatusEvent{
-		ProviderMessageID: id,
-		OpaqueMessageID:   cmd.MessageID,
-		Status:            "sent",
-		Timestamp:         strconv.FormatInt(ts.Unix(), 10),
-	}); err != nil {
+	if err := g.publisher.PublishStatus(ctx, mapper.SentStatus(cmd, to, id, ts)); err != nil {
 		return fmt.Errorf("gateway: publish sent status %s: %w", cmd.MessageID, err)
 	}
 

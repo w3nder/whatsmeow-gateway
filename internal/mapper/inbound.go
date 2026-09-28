@@ -273,11 +273,13 @@ type StatusError struct {
 }
 
 type StatusEvent struct {
-	ProviderMessageID string       `json:"providerMessageId"`
-	OpaqueMessageID   string       `json:"opaqueMessageId,omitempty"`
-	Status            string       `json:"status"`
-	Timestamp         string       `json:"timestamp"`
-	Error             *StatusError `json:"error,omitempty"`
+	ProviderMessageID string             `json:"providerMessageId"`
+	OpaqueMessageID   string             `json:"opaqueMessageId,omitempty"`
+	Status            string             `json:"status"`
+	Timestamp         string             `json:"timestamp"`
+	Error             *StatusError       `json:"error,omitempty"`
+	TenantID          string             `json:"tenantId,omitempty"`
+	ResolvedRecipient *ResolvedRecipient `json:"resolvedRecipient,omitempty"`
 }
 
 func BuildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (InboundEvent, error) {
