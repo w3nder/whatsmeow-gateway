@@ -25,8 +25,15 @@ var stubUploadResponse = whatsmeow.UploadResponse{
 }
 
 type stubUploader struct {
-	resp whatsmeow.UploadResponse
-	err  error
+	resp   whatsmeow.UploadResponse
+	err    error
+	lids   map[types.JID]types.JID
+	lidErr error
+}
+
+func (u stubUploader) LIDForPN(ctx context.Context, pn types.JID) (types.JID, bool, error) {
+	lid, found := u.lids[pn]
+	return lid, found, u.lidErr
 }
 
 func (u stubUploader) Upload(ctx context.Context, data []byte, mt whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {
@@ -516,6 +523,108 @@ func TestBuildOutboundReactionRequiresTarget(t *testing.T) {
 	_, _, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err == nil {
 		t.Fatalf("expected an error when reaction has no targetProviderMessageId")
+	}
+}
+
+var migratedContact = stubUploader{lids: map[types.JID]types.JID{
+	types.NewJID("5511999", types.DefaultUserServer): types.NewJID("173907587899617", types.HiddenUserServer),
+}}
+
+func TestBuildOutboundReactionByPhoneGoesToTheContactLIDChat(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Kind: "reaction", TargetProviderMessageID: "3EB0THEM", Emoji: "❤️"}
+	to, msg, _, err := mapper.BuildOutbound(context.Background(), migratedContact, cmd, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	if to.String() != "173907587899617@lid" {
+		t.Fatalf("expected the reaction sent to the LID chat, got %v", to)
+	}
+	if got := msg.GetConversation(); got != "REACTION|173907587899617@lid|sender=173907587899617@lid|3EB0THEM|❤️" {
+		t.Fatalf("expected the reaction key in the LID chat, got %q", got)
+	}
+}
+
+func TestBuildOutboundReactionToOwnMessageByPhoneGoesToTheContactLIDChat(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Kind: "reaction", TargetProviderMessageID: "3EB0OWN", TargetFromMe: true, Emoji: "👍"}
+	to, msg, _, err := mapper.BuildOutbound(context.Background(), migratedContact, cmd, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	if to.String() != "173907587899617@lid" || msg.GetConversation() != "REACTION|173907587899617@lid|sender=|3EB0OWN|👍" {
+		t.Fatalf("expected the own-message reaction key in the LID chat, got to=%v msg=%q", to, msg.GetConversation())
+	}
+}
+
+func TestBuildOutboundEditByPhoneGoesToTheContactLIDChat(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Kind: "edit", TargetProviderMessageID: "3EB0ABC", Text: "corrigido"}
+	to, msg, _, err := mapper.BuildOutbound(context.Background(), migratedContact, cmd, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	if to.String() != "173907587899617@lid" || msg.GetConversation() != "EDIT|173907587899617@lid|3EB0ABC|corrigido" {
+		t.Fatalf("expected the edit key in the LID chat, got to=%v msg=%q", to, msg.GetConversation())
+	}
+}
+
+func TestBuildOutboundRevokeByPhoneGoesToTheContactLIDChat(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Kind: "revoke", TargetProviderMessageID: "3EB0XYZ"}
+	to, msg, _, err := mapper.BuildOutbound(context.Background(), migratedContact, cmd, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	if to.String() != "173907587899617@lid" || msg.GetConversation() != "REVOKE|173907587899617@lid|sender=|3EB0XYZ" {
+		t.Fatalf("expected the revoke key in the LID chat, got to=%v msg=%q", to, msg.GetConversation())
+	}
+}
+
+func TestBuildOutboundReactionByLIDKeepsTheLIDChat(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{To: "999000111@lid", Kind: "reaction", TargetProviderMessageID: "3EB0THEM", Emoji: "❤️"}
+	to, msg, _, err := mapper.BuildOutbound(context.Background(), migratedContact, cmd, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	if to.String() != "999000111@lid" || msg.GetConversation() != "REACTION|999000111@lid|sender=999000111@lid|3EB0THEM|❤️" {
+		t.Fatalf("expected the LID the backend sent to stay the chat, got to=%v msg=%q", to, msg.GetConversation())
+	}
+}
+
+func TestBuildOutboundReactionByPhoneWithoutLIDKeepsThePhoneChat(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{To: "5511888@s.whatsapp.net", Kind: "reaction", TargetProviderMessageID: "3EB0THEM", Emoji: "❤️"}
+	to, msg, _, err := mapper.BuildOutbound(context.Background(), migratedContact, cmd, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	if to.String() != "5511888@s.whatsapp.net" || msg.GetConversation() != "REACTION|5511888@s.whatsapp.net|sender=5511888@s.whatsapp.net|3EB0THEM|❤️" {
+		t.Fatalf("expected the phone chat when no LID exists, got to=%v msg=%q", to, msg.GetConversation())
+	}
+}
+
+func TestBuildOutboundReactionInGroupSkipsLIDResolution(t *testing.T) {
+	failing := stubUploader{lidErr: errors.New("must not be called")}
+	cmd := amqp.GatewaySendCommand{To: "120363000000000000@g.us", Kind: "reaction", TargetProviderMessageID: "3EB0GRP", TargetParticipantJID: "5511777@s.whatsapp.net", Emoji: "🔥"}
+	to, msg, _, err := mapper.BuildOutbound(context.Background(), failing, cmd, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	if to.String() != "120363000000000000@g.us" || msg.GetConversation() != "REACTION|120363000000000000@g.us|sender=5511777@s.whatsapp.net|3EB0GRP|🔥" {
+		t.Fatalf("expected the group chat and participant untouched, got to=%v msg=%q", to, msg.GetConversation())
+	}
+}
+
+func TestBuildOutboundReactionFailsWhenLIDLookupFails(t *testing.T) {
+	failing := stubUploader{lidErr: errors.New("lid store down")}
+	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Kind: "reaction", TargetProviderMessageID: "3EB0THEM", Emoji: "❤️"}
+	if _, _, _, err := mapper.BuildOutbound(context.Background(), failing, cmd, stubFetch(nil, nil)); err == nil || !strings.Contains(err.Error(), "lid store down") {
+		t.Fatalf("expected the lookup failure surfaced, got %v", err)
+	}
+}
+
+func TestBuildOutboundTextByPhoneSkipsLIDResolution(t *testing.T) {
+	failing := stubUploader{lidErr: errors.New("must not be called")}
+	cmd := amqp.GatewaySendCommand{To: "5511999@s.whatsapp.net", Type: "text", Text: "oi"}
+	to, _, _, err := mapper.BuildOutbound(context.Background(), failing, cmd, stubFetch(nil, nil))
+	if err != nil || to.String() != "5511999@s.whatsapp.net" {
+		t.Fatalf("expected a plain send left to whatsmeow's own LID routing, got to=%v err=%v", to, err)
 	}
 }
 

@@ -20,6 +20,7 @@ type Uploader interface {
 
 type MessageBuilder interface {
 	Uploader
+	LIDForPN(ctx context.Context, pn types.JID) (types.JID, bool, error)
 	BuildEdit(chat types.JID, id types.MessageID, newContent *waE2E.Message) *waE2E.Message
 	BuildRevoke(chat, sender types.JID, id types.MessageID) *waE2E.Message
 	BuildReaction(chat, sender types.JID, id types.MessageID, reaction string) *waE2E.Message
@@ -37,32 +38,8 @@ func BuildOutbound(ctx context.Context, cli MessageBuilder, cmd amqp.GatewaySend
 	}
 
 	switch cmd.Kind {
-	case "edit":
-		if cmd.TargetProviderMessageID == "" {
-			return types.JID{}, nil, nil, fmt.Errorf("mapper: edit requires targetProviderMessageId")
-		}
-		return to, cli.BuildEdit(to, types.MessageID(cmd.TargetProviderMessageID), &waE2E.Message{Conversation: proto.String(cmd.Text)}), nil, nil
-	case "revoke":
-		if cmd.TargetProviderMessageID == "" {
-			return types.JID{}, nil, nil, fmt.Errorf("mapper: revoke requires targetProviderMessageId")
-		}
-		return to, cli.BuildRevoke(to, types.EmptyJID, types.MessageID(cmd.TargetProviderMessageID)), nil, nil
-	case "reaction":
-		if cmd.TargetProviderMessageID == "" {
-			return types.JID{}, nil, nil, fmt.Errorf("mapper: reaction requires targetProviderMessageId")
-		}
-		sender := types.EmptyJID
-		if !cmd.TargetFromMe {
-			sender = to
-			if cmd.TargetParticipantJID != "" {
-				participant, err := types.ParseJID(cmd.TargetParticipantJID)
-				if err != nil {
-					return types.JID{}, nil, nil, fmt.Errorf("mapper: parse reaction participant jid %q: %w", cmd.TargetParticipantJID, err)
-				}
-				sender = participant
-			}
-		}
-		return to, cli.BuildReaction(to, sender, types.MessageID(cmd.TargetProviderMessageID), cmd.Emoji), nil, nil
+	case "edit", "revoke", "reaction":
+		return buildAction(ctx, cli, cmd, to)
 	}
 
 	msg, nodes, err := buildByType(ctx, cli, cmd, fetch)
@@ -73,6 +50,58 @@ func BuildOutbound(ctx context.Context, cli MessageBuilder, cmd amqp.GatewaySend
 		msg = markForwarded(msg)
 	}
 	return to, msg, nodes, nil
+}
+
+func buildAction(ctx context.Context, cli MessageBuilder, cmd amqp.GatewaySendCommand, to types.JID) (types.JID, *waE2E.Message, []waBinary.Node, error) {
+	if cmd.TargetProviderMessageID == "" {
+		return types.JID{}, nil, nil, fmt.Errorf("mapper: %s requires targetProviderMessageId", cmd.Kind)
+	}
+	chat, err := actionChat(ctx, cli, to)
+	if err != nil {
+		return types.JID{}, nil, nil, err
+	}
+	target := types.MessageID(cmd.TargetProviderMessageID)
+
+	switch cmd.Kind {
+	case "edit":
+		return chat, cli.BuildEdit(chat, target, &waE2E.Message{Conversation: proto.String(cmd.Text)}), nil, nil
+	case "revoke":
+		return chat, cli.BuildRevoke(chat, types.EmptyJID, target), nil, nil
+	default:
+		sender, err := reactionSender(cmd, chat)
+		if err != nil {
+			return types.JID{}, nil, nil, err
+		}
+		return chat, cli.BuildReaction(chat, sender, target, cmd.Emoji), nil, nil
+	}
+}
+
+func actionChat(ctx context.Context, cli MessageBuilder, to types.JID) (types.JID, error) {
+	if to.Server != types.DefaultUserServer {
+		return to, nil
+	}
+	lid, found, err := cli.LIDForPN(ctx, to)
+	if err != nil {
+		return types.JID{}, fmt.Errorf("mapper: resolve lid for %s: %w", to, err)
+	}
+	if !found {
+		return to, nil
+	}
+	return lid, nil
+}
+
+func reactionSender(cmd amqp.GatewaySendCommand, chat types.JID) (types.JID, error) {
+	if cmd.TargetFromMe {
+		return types.EmptyJID, nil
+	}
+	if cmd.TargetParticipantJID == "" {
+		return chat, nil
+	}
+	participant, err := types.ParseJID(cmd.TargetParticipantJID)
+	if err != nil {
+		return types.JID{}, fmt.Errorf("mapper: parse reaction participant jid %q: %w", cmd.TargetParticipantJID, err)
+	}
+	return participant, nil
 }
 
 func buildByType(ctx context.Context, up Uploader, cmd amqp.GatewaySendCommand, fetch MediaFetcher) (*waE2E.Message, []waBinary.Node, error) {

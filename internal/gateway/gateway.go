@@ -535,7 +535,7 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 		return g.publishSendFailure(ctx, cmd, providerID, fmt.Errorf("gateway: send %s: %w", cmd.MessageID, err))
 	}
 
-	g.logger.Info("gateway: message sent to whatsapp", "message_id", cmd.MessageID, "provider_message_id", id, "channel_id", cmd.ChannelID)
+	g.logger.Info("gateway: message sent to whatsapp", "message_id", cmd.MessageID, "provider_message_id", id, "channel_id", cmd.ChannelID, "chat", to.String())
 
 	if err := g.dedupe.MarkSent(ctx, dedupeKey); err != nil {
 		return fmt.Errorf("gateway: mark sent %s: %w", dedupeKey, err)
