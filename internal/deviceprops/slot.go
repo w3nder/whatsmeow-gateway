@@ -2,7 +2,9 @@ package deviceprops
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"time"
 
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/store"
@@ -12,15 +14,24 @@ import (
 
 const pairingCapacity = 1 << 20
 
+const SlotWait = 90 * time.Second
+
+var ErrSlotBusy = errors.New("deviceprops: another pairing kept the pairing slot past the wait")
+
 var pairings = semaphore.NewWeighted(pairingCapacity)
 
-func Acquire(ctx context.Context, importHistory bool) (func(), error) {
+func Acquire(ctx context.Context, importHistory bool, wait time.Duration) (func(), error) {
 	weight := int64(1)
 	if importHistory {
 		weight = pairingCapacity
 	}
-	if err := pairings.Acquire(ctx, weight); err != nil {
-		return nil, err
+	bounded, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	if err := pairings.Acquire(bounded, weight); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, ErrSlotBusy
 	}
 	previous := store.DeviceProps
 	if importHistory {

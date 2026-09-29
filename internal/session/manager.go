@@ -59,7 +59,8 @@ func (p *pairing) clear() {
 }
 
 type Manager struct {
-	factory ClientFactory
+	factory  ClientFactory
+	slotWait time.Duration
 
 	mu       sync.Mutex
 	sessions map[string]WAClient
@@ -69,12 +70,23 @@ type Manager struct {
 	handlers   []func(channelID string, evt any)
 }
 
-func NewManager(factory ClientFactory) *Manager {
-	return &Manager{
+type Option func(*Manager)
+
+func WithPairingSlotWait(wait time.Duration) Option {
+	return func(m *Manager) { m.slotWait = wait }
+}
+
+func NewManager(factory ClientFactory, options ...Option) *Manager {
+	m := &Manager{
 		factory:  factory,
+		slotWait: deviceprops.SlotWait,
 		sessions: make(map[string]WAClient),
 		pairings: make(map[string]*pairing),
 	}
+	for _, option := range options {
+		option(m)
+	}
+	return m
 }
 
 func (m *Manager) OnEvent(handler func(channelID string, evt any)) {
@@ -104,7 +116,7 @@ func (m *Manager) Pair(ctx context.Context, channelID string, importHistory bool
 		select {
 		case <-superseded.done:
 		case <-ctx.Done():
-			return nil, fmt.Errorf("session: wait for the pairing without history of %s to end: %w", channelID, ctx.Err())
+			return nil, fmt.Errorf("session: wait for the superseded pairing of %s to end: %w", channelID, ctx.Err())
 		}
 		return m.Pair(ctx, channelID, importHistory)
 	}
@@ -121,7 +133,7 @@ func (m *Manager) Pair(ctx context.Context, channelID string, importHistory bool
 	if importHistory {
 		client.TakeOverHistory()
 	}
-	release, err := deviceprops.Acquire(ctx, importHistory)
+	release, err := deviceprops.Acquire(ctx, importHistory, m.slotWait)
 	if err != nil {
 		m.endPairing(channelID, p, client)
 		close(p.done)
@@ -188,7 +200,7 @@ func (m *Manager) beginPairing(channelID string, importHistory bool) (*pairing, 
 	defer m.mu.Unlock()
 
 	if live, ok := m.pairings[channelID]; ok {
-		if importHistory && !live.importHistory {
+		if importHistory != live.importHistory {
 			live.halt()
 			return nil, nil, live
 		}

@@ -19,6 +19,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	gatewayamqp "github.com/w3nder/whatsmeow-gateway/internal/amqp"
+	"github.com/w3nder/whatsmeow-gateway/internal/deviceprops"
 	"github.com/w3nder/whatsmeow-gateway/internal/gateway"
 	"github.com/w3nder/whatsmeow-gateway/internal/logging"
 	"github.com/w3nder/whatsmeow-gateway/internal/ownership"
@@ -229,12 +230,12 @@ func TestGatewayImportsTheHistoryOfAFreshPairingAndEndsTheImport(t *testing.T) {
 	if err := json.Unmarshal(waitForHistoryMessage(t, h.deliveries, gatewayamqp.HistoryDoneKind, 20*time.Second), &done); err != nil {
 		t.Fatalf("unmarshal done: %v", err)
 	}
-	if done.ImportID != importID || done.TotalBatches != 1 {
-		t.Fatalf("done must close the import with its batch total, got %+v", done)
+	if done.ImportID != importID || done.TotalBatches != 1 || done.SkippedChats != 0 {
+		t.Fatalf("done must close the import with its batch total and no skipped chat (groups never count), got %+v", done)
 	}
-	waitFor(t, 10*time.Second, "the import to end in the registry", func() bool {
-		_, found, err := h.registry.ActiveHistoryImport(ctx, channelID)
-		return err == nil && !found
+	waitFor(t, 10*time.Second, "the import to be marked finished and kept for the chunks after the end", func() bool {
+		active, found, err := h.registry.ActiveHistoryImport(ctx, channelID)
+		return err == nil && found && active.Finished && active.ImportID == importID
 	})
 	waitFor(t, 10*time.Second, "the chunk to be released after the confirm", func() bool {
 		return fake.releaseCount() == 1
@@ -343,12 +344,12 @@ func TestGatewayEndsTheImportOfAnAlreadyPairedChannelWithNoBatches(t *testing.T)
 	if err := json.Unmarshal(waitForHistoryMessage(t, h.deliveries, gatewayamqp.HistoryDoneKind, pairWait), &done); err != nil {
 		t.Fatalf("unmarshal done: %v", err)
 	}
-	if done.ImportID != importID || done.TotalBatches != 0 {
+	if done.ImportID != importID || done.TotalBatches != 0 || done.SkippedChats != 0 {
 		t.Fatalf("an already paired channel gets no history, so its import ends empty, got %+v", done)
 	}
-	waitFor(t, 10*time.Second, "the empty import to end in the registry", func() bool {
-		_, found, err := h.registry.ActiveHistoryImport(context.Background(), channelID)
-		return err == nil && !found
+	waitFor(t, 10*time.Second, "the empty import to be marked finished in the registry", func() bool {
+		active, found, err := h.registry.ActiveHistoryImport(context.Background(), channelID)
+		return err == nil && found && active.Finished
 	})
 }
 
@@ -383,4 +384,55 @@ func TestGatewayRestartsAPairingWithoutHistoryWhenAnImportIsRequested(t *testing
 	if batch.ImportID != importID || len(batch.Chats) != 1 {
 		t.Fatalf("the restarted pairing must deliver the requested import, got %+v", batch)
 	}
+}
+
+func TestGatewayPairWithoutHistoryClearsAStaleImportOfTheChannel(t *testing.T) {
+	const channelID = "channel-history-7"
+	fake := newFakeWAClient()
+	fake.qrItems = []whatsmeow.QRChannelItem{{Event: "code", Code: "qr-history-7"}, whatsmeow.QRChannelSuccess}
+	fake.historyChunk = historyFinalChunk(time.Now())
+	h := startHistoryGateway(t, fake, func(store *registry.Store) error {
+		return store.BeginHistoryImport(context.Background(), channelID, "tenant-history-7", "import-stale")
+	})
+
+	publishPairCommand(t, h.probeCh, gatewayamqp.PairCommand{TenantID: "tenant-history-7", ChannelID: channelID, UserID: "user-history-7"})
+	waitForChannelStatus(t, h.deliveries, channelID, "connected", pairWait)
+
+	if _, found, err := h.registry.ActiveHistoryImport(context.Background(), channelID); err != nil || found {
+		t.Fatalf("a pairing without history must clear the import left for the channel, found %v err %v", found, err)
+	}
+	session, _, err := h.registry.Get(context.Background(), channelID)
+	if err != nil || session.ImportingHistory {
+		t.Fatalf("the channel must resume without taking over the history, got %+v err %v", session, err)
+	}
+	fake.emit(historyNotificationEvent())
+	assertNoHistoryMessage(t, h.deliveries, 2*time.Second)
+}
+
+func TestGatewayRestartsAPairingWithHistoryWhenAPairingWithoutHistoryIsRequested(t *testing.T) {
+	const channelID = "channel-history-8"
+	fake := newFakeWAClient()
+	fake.qrFeed = make(chan whatsmeow.QRChannelItem)
+	fake.historyChunk = historyFinalChunk(time.Now())
+	h := startHistoryGateway(t, fake)
+	ctx := context.Background()
+
+	publishPairCommand(t, h.probeCh, gatewayamqp.PairCommand{TenantID: "tenant-history-8", ChannelID: channelID, UserID: "user-importing", ImportHistory: true, ImportID: "import-history-8"})
+	feedQR(t, fake, whatsmeow.QRChannelItem{Event: "code", Code: "qr-importing", Timeout: time.Minute})
+	publishPairCommand(t, h.probeCh, gatewayamqp.PairCommand{TenantID: "tenant-history-8", ChannelID: channelID, UserID: "user-plain"})
+	waitFor(t, 10*time.Second, "the pairing with history to be dropped and its import cleared", func() bool {
+		_, found, err := h.registry.ActiveHistoryImport(ctx, channelID)
+		return err == nil && !found && fake.disconnectCount() > 0
+	})
+	feedQR(t, fake, whatsmeow.QRChannelItem{Event: "code", Code: "qr-plain", Timeout: time.Minute})
+	fake.markPaired()
+	feedQR(t, fake, whatsmeow.QRChannelSuccess)
+	close(fake.qrFeed)
+	waitForChannelStatus(t, h.deliveries, channelID, "connected", pairWait)
+
+	if props := fake.connectProps(); props.GetPlatformType() == deviceprops.HistoryPlatform {
+		t.Fatalf("the restarted pairing must connect with today's props, got %v", props)
+	}
+	fake.emit(historyNotificationEvent())
+	assertNoHistoryMessage(t, h.deliveries, 2*time.Second)
 }

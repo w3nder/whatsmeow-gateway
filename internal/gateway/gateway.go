@@ -23,6 +23,7 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/call"
 	"github.com/w3nder/whatsmeow-gateway/internal/channelsettings"
 	"github.com/w3nder/whatsmeow-gateway/internal/dedupe"
+	"github.com/w3nder/whatsmeow-gateway/internal/deviceprops"
 	"github.com/w3nder/whatsmeow-gateway/internal/groupinfo"
 	"github.com/w3nder/whatsmeow-gateway/internal/history"
 	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
@@ -382,14 +383,17 @@ func (g *gateway) drainWithin(name string, timeout time.Duration, closeFn func()
 func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand, accept func()) error {
 	g.setTenant(cmd.ChannelID, cmd.TenantID)
 
-	if cmd.ImportsHistory() {
-		if err := g.registry.BeginHistoryImport(ctx, cmd.ChannelID, cmd.TenantID, cmd.ImportID); err != nil {
-			g.publishChannelError(ctx, cmd.TenantID, cmd.UserID, cmd.ChannelID, err)
-			return fmt.Errorf("gateway: begin history import %s: %w", cmd.ChannelID, err)
-		}
+	if err := g.recordHistoryChoice(ctx, cmd); err != nil {
+		g.publishChannelError(ctx, cmd.TenantID, cmd.UserID, cmd.ChannelID, err)
+		return err
 	}
 
 	updates, err := g.manager.Pair(ctx, cmd.ChannelID, cmd.ImportsHistory())
+	if errors.Is(err, deviceprops.ErrSlotBusy) {
+		g.logger.Warn("gateway: pairing slot busy past the wait", "channel_id", cmd.ChannelID, "import_history", cmd.ImportsHistory(), "error", err)
+		g.publishChannelFailure(ctx, cmd.TenantID, cmd.UserID, cmd.ChannelID, pairingBusyReason(cmd.ImportsHistory()))
+		return nil
+	}
 	if err != nil {
 		g.publishChannelError(ctx, cmd.TenantID, cmd.UserID, cmd.ChannelID, err)
 		return fmt.Errorf("gateway: pair channel %s: %w", cmd.ChannelID, err)
@@ -467,12 +471,16 @@ func (g *gateway) persistSession(ctx context.Context, channelID, tenantID string
 }
 
 func (g *gateway) publishChannelError(ctx context.Context, tenantID, userID, channelID string, cause error) {
+	g.publishChannelFailure(ctx, tenantID, userID, channelID, cause.Error())
+}
+
+func (g *gateway) publishChannelFailure(ctx context.Context, tenantID, userID, channelID, reason string) {
 	if err := g.publisher.PublishChannelStatus(ctx, amqp.ChannelStatusEvent{
 		TenantID:  tenantID,
 		UserID:    userID,
 		ChannelID: channelID,
 		Status:    "error",
-		Reason:    cause.Error(),
+		Reason:    reason,
 	}); err != nil {
 		g.logger.Error("gateway: publish channel.status error", "channel_id", channelID, "error", err)
 	}

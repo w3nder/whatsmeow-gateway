@@ -2,6 +2,7 @@ package deviceprops_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -29,7 +30,7 @@ func carriesHistory(props *waCompanionReg.DeviceProps) bool {
 
 func acquire(t *testing.T, importHistory bool) func() {
 	t.Helper()
-	release, err := deviceprops.Acquire(context.Background(), importHistory)
+	release, err := deviceprops.Acquire(context.Background(), importHistory, deviceprops.SlotWait)
 	if err != nil {
 		t.Fatalf("Acquire(%v): %v", importHistory, err)
 	}
@@ -39,7 +40,7 @@ func acquire(t *testing.T, importHistory bool) func() {
 func acquireInBackground(importHistory bool, seen chan<- *waCompanionReg.DeviceProps) chan func() {
 	acquired := make(chan func(), 1)
 	go func() {
-		release, err := deviceprops.Acquire(context.Background(), importHistory)
+		release, err := deviceprops.Acquire(context.Background(), importHistory, deviceprops.SlotWait)
 		if err != nil {
 			close(acquired)
 			return
@@ -85,7 +86,7 @@ func TestReleaseIsIdempotent(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	again, err := deviceprops.Acquire(ctx, true)
+	again, err := deviceprops.Acquire(ctx, true, deviceprops.SlotWait)
 	if err != nil {
 		t.Fatalf("a double release must neither block nor leak the slot, got %v", err)
 	}
@@ -98,7 +99,7 @@ func TestPairingsWithoutHistoryRunTogether(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	second, err := deviceprops.Acquire(ctx, false)
+	second, err := deviceprops.Acquire(ctx, false, deviceprops.SlotWait)
 	if err != nil {
 		t.Fatalf("a pairing without history must not wait for another one without history, got %v", err)
 	}
@@ -156,8 +157,58 @@ func TestAcquireGivesUpWhenItsContextEnds(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if _, err := deviceprops.Acquire(ctx, false); err == nil {
-		t.Fatal("a pairing whose command was cancelled must stop waiting for the slot")
+	_, err := deviceprops.Acquire(ctx, false, deviceprops.SlotWait)
+	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, deviceprops.ErrSlotBusy) {
+		t.Fatalf("a pairing whose command was cancelled must stop waiting for the slot with its own error, got %v", err)
+	}
+}
+
+func TestAPairingGivesUpWithABusySlotAfterWaitingForAHistoryPairing(t *testing.T) {
+	importing := acquire(t, true)
+	defer importing()
+
+	started := time.Now()
+	_, err := deviceprops.Acquire(context.Background(), false, 100*time.Millisecond)
+
+	if !errors.Is(err, deviceprops.ErrSlotBusy) {
+		t.Fatalf("a pairing held behind a history pairing past the wait must fail as busy, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("the wait must be bounded, took %s", elapsed)
+	}
+}
+
+func TestAHistoryPairingGivesUpWithABusySlotAfterWaitingForThePairingsInFlight(t *testing.T) {
+	plain := acquire(t, false)
+	defer plain()
+
+	_, err := deviceprops.Acquire(context.Background(), true, 100*time.Millisecond)
+
+	if !errors.Is(err, deviceprops.ErrSlotBusy) {
+		t.Fatalf("a history pairing held behind pairings in flight past the wait must fail as busy, got %v", err)
+	}
+	if !proto.Equal(store.DeviceProps, currentProps()) || carriesHistory(store.DeviceProps) {
+		t.Fatal("a history pairing that never got the slot must leave the props untouched")
+	}
+}
+
+func TestAPairingWithoutHistoryWaitsBehindAQueuedHistoryPairingNoLongerThanTheWait(t *testing.T) {
+	plain := acquire(t, false)
+	defer plain()
+	queued := make(chan error, 1)
+	go func() {
+		_, err := deviceprops.Acquire(context.Background(), true, 300*time.Millisecond)
+		queued <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	release, err := deviceprops.Acquire(context.Background(), false, 2*time.Second)
+	if err != nil {
+		t.Fatalf("a pairing without history must run once the queued history pairing gives up, got %v", err)
+	}
+	release()
+	if err := <-queued; !errors.Is(err, deviceprops.ErrSlotBusy) {
+		t.Fatalf("the queued history pairing must give up as busy, got %v", err)
 	}
 }
 
@@ -172,7 +223,7 @@ func TestConcurrentPairingsEachRunWithTheirOwnProps(t *testing.T) {
 		pairings.Add(1)
 		go func() {
 			defer pairings.Done()
-			release, err := deviceprops.Acquire(context.Background(), importHistory)
+			release, err := deviceprops.Acquire(context.Background(), importHistory, deviceprops.SlotWait)
 			if err != nil {
 				wrong.Add(1)
 				return
