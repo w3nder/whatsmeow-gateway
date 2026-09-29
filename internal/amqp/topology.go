@@ -10,6 +10,7 @@ const EventsExchange = "sender.events"
 
 const (
 	InboundRoutingKey       = "whatsapp.inbound.v1"
+	HistoryRoutingKey       = "whatsapp.history.v1"
 	StatusRoutingKey        = "whatsapp.status.v1"
 	CallRoutingKey          = "whatsapp.call.v1"
 	ChannelQRRoutingKey     = "channel.qr"

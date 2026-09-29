@@ -1,5 +1,7 @@
 package amqp
 
+import "encoding/json"
+
 type MediaPayload struct {
 	URL             string `json:"url"`
 	Mime            string `json:"mime"`
@@ -92,9 +94,15 @@ type GatewayCallCommand struct {
 }
 
 type PairCommand struct {
-	TenantID  string `json:"tenantId"`
-	ChannelID string `json:"channelId"`
-	UserID    string `json:"userId"`
+	TenantID      string `json:"tenantId"`
+	ChannelID     string `json:"channelId"`
+	UserID        string `json:"userId"`
+	ImportHistory bool   `json:"importHistory"`
+	ImportID      string `json:"importId,omitempty"`
+}
+
+func (c PairCommand) ImportsHistory() bool {
+	return c.ImportHistory && c.ImportID != ""
 }
 
 type SettingsCommand struct {
@@ -104,6 +112,41 @@ type SettingsCommand struct {
 	ReceiveCalls      *bool   `json:"receiveCalls"`
 	CallRejectMessage *string `json:"callRejectMessage"`
 	SettingsVersion   int64   `json:"settingsVersion"`
+}
+
+const (
+	HistoryBatchKind     = "batch"
+	HistoryDoneKind      = "done"
+	HistorySourceGateway = "gateway"
+)
+
+type HistoryChat struct {
+	Phone       string            `json:"phone"`
+	Lid         *string           `json:"lid"`
+	ProfileName *string           `json:"profileName"`
+	Messages    []json.RawMessage `json:"messages"`
+}
+
+type HistoryBatch struct {
+	Kind           string        `json:"kind"`
+	TenantID       string        `json:"tenantId"`
+	ChannelID      string        `json:"channelId"`
+	ImportID       string        `json:"importId"`
+	Source         string        `json:"source"`
+	ChunkOrder     uint32        `json:"chunkOrder"`
+	SourceProgress uint32        `json:"sourceProgress"`
+	BatchIndex     int           `json:"batchIndex"`
+	BatchesInChunk int           `json:"batchesInChunk"`
+	Chats          []HistoryChat `json:"chats"`
+}
+
+type HistoryDone struct {
+	Kind         string `json:"kind"`
+	TenantID     string `json:"tenantId"`
+	ChannelID    string `json:"channelId"`
+	ImportID     string `json:"importId"`
+	Source       string `json:"source"`
+	TotalBatches int    `json:"totalBatches"`
 }
 
 type GroupActionParams struct {

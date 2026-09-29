@@ -3,6 +3,7 @@ package amqp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	rabbitmq "github.com/rabbitmq/amqp091-go"
@@ -29,7 +30,8 @@ type ChannelStatusEvent struct {
 }
 
 type Publisher struct {
-	channel *rabbitmq.Channel
+	channel   *rabbitmq.Channel
+	confirmed *rabbitmq.Channel
 }
 
 func NewPublisher(conn *rabbitmq.Connection) (*Publisher, error) {
@@ -41,7 +43,17 @@ func NewPublisher(conn *rabbitmq.Connection) (*Publisher, error) {
 		_ = ch.Close()
 		return nil, err
 	}
-	return &Publisher{channel: ch}, nil
+	confirmed, err := conn.Channel()
+	if err != nil {
+		_ = ch.Close()
+		return nil, fmt.Errorf("amqp: open confirmed publisher channel: %w", err)
+	}
+	if err := confirmed.Confirm(false); err != nil {
+		_ = ch.Close()
+		_ = confirmed.Close()
+		return nil, fmt.Errorf("amqp: enable confirms on the publisher: %w", err)
+	}
+	return &Publisher{channel: ch, confirmed: confirmed}, nil
 }
 
 func (p *Publisher) PublishInbound(ctx context.Context, evt any) error {
@@ -83,6 +95,41 @@ func (p *Publisher) PublishGroupParticipants(ctx context.Context, evt GroupParti
 	return p.publish(ctx, GroupParticipantsRoutingKey, evt)
 }
 
+func (p *Publisher) PublishHistoryBatch(ctx context.Context, batch HistoryBatch) error {
+	batch.Kind = HistoryBatchKind
+	batch.Source = HistorySourceGateway
+	return p.publishConfirmed(ctx, HistoryRoutingKey, batch)
+}
+
+func (p *Publisher) PublishHistoryDone(ctx context.Context, done HistoryDone) error {
+	done.Kind = HistoryDoneKind
+	done.Source = HistorySourceGateway
+	return p.publishConfirmed(ctx, HistoryRoutingKey, done)
+}
+
+func (p *Publisher) publishConfirmed(ctx context.Context, routingKey string, payload any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("amqp: marshal %s payload: %w", routingKey, err)
+	}
+	confirm, err := p.confirmed.PublishWithDeferredConfirmWithContext(ctx, EventsExchange, routingKey, false, false, rabbitmq.Publishing{
+		ContentType:  "application/json",
+		DeliveryMode: rabbitmq.Persistent,
+		Body:         body,
+	})
+	if err != nil {
+		return fmt.Errorf("amqp: publish %s: %w", routingKey, err)
+	}
+	acked, err := confirm.WaitContext(ctx)
+	if err != nil {
+		return fmt.Errorf("amqp: wait %s confirm: %w", routingKey, err)
+	}
+	if !acked {
+		return fmt.Errorf("amqp: broker refused %s", routingKey)
+	}
+	return nil
+}
+
 func (p *Publisher) publish(ctx context.Context, routingKey string, payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -100,5 +147,5 @@ func (p *Publisher) publish(ctx context.Context, routingKey string, payload any)
 }
 
 func (p *Publisher) Close() error {
-	return p.channel.Close()
+	return errors.Join(p.confirmed.Close(), p.channel.Close())
 }
