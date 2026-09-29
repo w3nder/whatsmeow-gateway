@@ -48,7 +48,7 @@ func startSettingsGateway(t *testing.T, channelID, tenantID string, fake *fakeWA
 	if err := registryStore.Save(ctx, channelID, storedJID.String(), tenantID); err != nil {
 		t.Fatalf("registry.Save failed: %v", err)
 	}
-	if err := registryStore.SaveSettings(ctx, channelID, tenantID, stored); err != nil {
+	if _, err := registryStore.SaveSettings(ctx, channelID, tenantID, stored); err != nil {
 		t.Fatalf("registry.SaveSettings failed: %v", err)
 	}
 
@@ -342,5 +342,27 @@ func TestGatewayRejectsWithoutAMessageWhenNoneIsStored(t *testing.T) {
 	}
 	if fake.sendCallCount() != 0 {
 		t.Fatalf("no message is stored, whatsapp sends = %d, want 0", fake.sendCallCount())
+	}
+}
+
+func TestGatewayNeverOverwritesAHigherStoredVersionEvenWhenItsMemoryIsBehind(t *testing.T) {
+	const channelID = "channel-settings-version-2"
+	const tenantID = "tenant-settings-version-2"
+	h := startSettingsGateway(t, channelID, tenantID, newFakeWAClient(), channelsettings.Settings{ListenGroups: true, ReceiveCalls: true, Version: 1})
+
+	ahead := channelsettings.Settings{ListenGroups: false, ReceiveCalls: false, CallRejectMessage: "Mais nova.", Version: 9}
+	if result, err := h.registry.SaveSettings(context.Background(), channelID, tenantID, ahead); err != nil || result != registry.SettingsSaved {
+		t.Fatalf("SaveSettings(ahead) = %v, %v, want saved", result, err)
+	}
+
+	h.publishSettings(t, gatewayamqp.SettingsCommand{TenantID: tenantID, ChannelID: channelID, ListenGroups: settingsBool(true), SettingsVersion: 7})
+	time.Sleep(2 * time.Second)
+
+	got, _, err := h.registry.Get(context.Background(), channelID)
+	if err != nil {
+		t.Fatalf("registry Get failed: %v", err)
+	}
+	if got.Settings != ahead {
+		t.Fatalf("a stale command must not overwrite the higher stored version, got %+v want %+v", got.Settings, ahead)
 	}
 }

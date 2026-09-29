@@ -187,7 +187,7 @@ func TestRegistryStoreSaveSettingsRoundTripsThroughGetAndForShards(t *testing.T)
 		t.Fatalf("Save failed: %v", err)
 	}
 	want := channelsettings.Settings{ListenGroups: false, ReceiveCalls: false, CallRejectMessage: "Não atendemos ligações.", Version: 6}
-	if err := store.SaveSettings(ctx, "channel-1", "tenant-1", want); err != nil {
+	if _, err := store.SaveSettings(ctx, "channel-1", "tenant-1", want); err != nil {
 		t.Fatalf("SaveSettings failed: %v", err)
 	}
 
@@ -222,11 +222,11 @@ func TestRegistryStoreSaveSettingsWithAnEmptyMessageClearsIt(t *testing.T) {
 		t.Fatalf("Save failed: %v", err)
 	}
 	withMessage := channelsettings.Settings{ListenGroups: true, ReceiveCalls: false, CallRejectMessage: "texto"}
-	if err := store.SaveSettings(ctx, "channel-1", "tenant-1", withMessage); err != nil {
+	if _, err := store.SaveSettings(ctx, "channel-1", "tenant-1", withMessage); err != nil {
 		t.Fatalf("SaveSettings(with message) failed: %v", err)
 	}
 	cleared := channelsettings.Settings{ListenGroups: true, ReceiveCalls: false}
-	if err := store.SaveSettings(ctx, "channel-1", "tenant-1", cleared); err != nil {
+	if _, err := store.SaveSettings(ctx, "channel-1", "tenant-1", cleared); err != nil {
 		t.Fatalf("SaveSettings(cleared) failed: %v", err)
 	}
 
@@ -254,7 +254,7 @@ func TestRegistryStoreSaveSettingsIgnoresAnotherTenantAndAnUnknownChannel(t *tes
 	}
 	muted := channelsettings.Settings{ListenGroups: false, ReceiveCalls: false}
 
-	if err := store.SaveSettings(ctx, "channel-1", "tenant-other", muted); err != nil {
+	if _, err := store.SaveSettings(ctx, "channel-1", "tenant-other", muted); err != nil {
 		t.Fatalf("SaveSettings with another tenant failed: %v", err)
 	}
 	got, _, err := store.Get(ctx, "channel-1")
@@ -265,7 +265,7 @@ func TestRegistryStoreSaveSettingsIgnoresAnotherTenantAndAnUnknownChannel(t *tes
 		t.Fatalf("another tenant must not change the settings, got %+v", got.Settings)
 	}
 
-	if err := store.SaveSettings(ctx, "channel-unknown", "tenant-1", muted); err != nil {
+	if _, err := store.SaveSettings(ctx, "channel-unknown", "tenant-1", muted); err != nil {
 		t.Fatalf("SaveSettings for an unknown channel failed: %v", err)
 	}
 	if _, found, err := store.Get(ctx, "channel-unknown"); err != nil || found {
@@ -307,5 +307,45 @@ func TestRegistryOpenAddsTheSettingsColumnsToAnExistingTableKeepingTheDefaults(t
 	}
 	if got.Settings != channelsettings.Defaults() {
 		t.Fatalf("an existing row must take the defaults, got %+v", got.Settings)
+	}
+}
+
+func TestRegistryStoreSaveSettingsWithAStaleVersionDoesNotOverwriteAHigherOne(t *testing.T) {
+	dsn := startPostgresForGateway(t)
+	ctx := context.Background()
+
+	store, err := registry.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("registry.Open failed: %v", err)
+	}
+	t.Cleanup(store.Close)
+
+	if err := store.Save(ctx, "channel-1", "jid@s.whatsapp.net", "tenant-1"); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	current := channelsettings.Settings{ListenGroups: false, ReceiveCalls: false, CallRejectMessage: "Atual.", Version: 5}
+	if result, err := store.SaveSettings(ctx, "channel-1", "tenant-1", current); err != nil || result != registry.SettingsSaved {
+		t.Fatalf("SaveSettings(current) = %v, %v, want saved", result, err)
+	}
+
+	stale := channelsettings.Settings{ListenGroups: true, ReceiveCalls: true, Version: 4}
+	if result, err := store.SaveSettings(ctx, "channel-1", "tenant-1", stale); err != nil || result != registry.SettingsStale {
+		t.Fatalf("SaveSettings(stale) = %v, %v, want stale", result, err)
+	}
+	got, _, err := store.Get(ctx, "channel-1")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if got.Settings != current {
+		t.Fatalf("a stale version must not overwrite, got %+v want %+v", got.Settings, current)
+	}
+
+	equal := channelsettings.Settings{ListenGroups: true, ReceiveCalls: true, Version: 5}
+	if result, err := store.SaveSettings(ctx, "channel-1", "tenant-1", equal); err != nil || result != registry.SettingsSaved {
+		t.Fatalf("SaveSettings(equal) = %v, %v, want saved", result, err)
+	}
+
+	if result, err := store.SaveSettings(ctx, "channel-unknown", "tenant-1", equal); err != nil || result != registry.SettingsNoSession {
+		t.Fatalf("SaveSettings(unknown) = %v, %v, want no session", result, err)
 	}
 }

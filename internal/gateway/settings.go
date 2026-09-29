@@ -7,6 +7,7 @@ import (
 
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
 	"github.com/w3nder/whatsmeow-gateway/internal/channelsettings"
+	"github.com/w3nder/whatsmeow-gateway/internal/registry"
 )
 
 func settingsFrom(cmd amqp.SettingsCommand) channelsettings.Settings {
@@ -41,8 +42,15 @@ func (g *gateway) SettingsHandler(ctx context.Context, cmd amqp.SettingsCommand)
 	}
 
 	next := settingsFrom(cmd)
-	if err := g.registry.SaveSettings(ctx, cmd.ChannelID, cmd.TenantID, next); err != nil {
+	saved, err := g.registry.SaveSettings(ctx, cmd.ChannelID, cmd.TenantID, next)
+	if err != nil {
 		return fmt.Errorf("gateway: persist settings %s: %w", cmd.ChannelID, err)
+	}
+	if saved == registry.SettingsStale {
+		g.logger.Info("gateway: stale channel settings ignored, the registry holds a higher version",
+			"channel_id", cmd.ChannelID,
+			"command_version", cmd.SettingsVersion)
+		return nil
 	}
 	g.settings.Set(cmd.ChannelID, next)
 

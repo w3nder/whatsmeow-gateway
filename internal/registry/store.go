@@ -83,19 +83,43 @@ func (s *Store) Save(ctx context.Context, channelID, jid, tenantID string) error
 	return nil
 }
 
-func (s *Store) SaveSettings(ctx context.Context, channelID, tenantID string, settings channelsettings.Settings) error {
+type SettingsSaveResult int
+
+const (
+	SettingsSaved SettingsSaveResult = iota
+	SettingsNoSession
+	SettingsStale
+)
+
+const saveSettingsSQL = `WITH current AS (
+	SELECT settings_version FROM gateway_channel_sessions WHERE channel_id = $1 AND tenant_id = $2
+), updated AS (
+	UPDATE gateway_channel_sessions
+	SET listen_groups = $3, receive_calls = $4, call_reject_message = $5, settings_version = $6
+	WHERE channel_id = $1 AND tenant_id = $2 AND settings_version <= $6
+	RETURNING 1
+)
+SELECT (SELECT count(*) FROM current), (SELECT count(*) FROM updated)`
+
+func (s *Store) SaveSettings(ctx context.Context, channelID, tenantID string, settings channelsettings.Settings) (SettingsSaveResult, error) {
 	var message *string
 	if settings.CallRejectMessage != "" {
 		message = &settings.CallRejectMessage
 	}
-	if _, err := s.pool.Exec(ctx,
-		`UPDATE gateway_channel_sessions SET listen_groups = $3, receive_calls = $4, call_reject_message = $5, settings_version = $6
-		 WHERE channel_id = $1 AND tenant_id = $2`,
+	var existing, updated int
+	if err := s.pool.QueryRow(ctx, saveSettingsSQL,
 		channelID, tenantID, settings.ListenGroups, settings.ReceiveCalls, message, settings.Version,
-	); err != nil {
-		return fmt.Errorf("registry: save settings %s: %w", channelID, err)
+	).Scan(&existing, &updated); err != nil {
+		return SettingsNoSession, fmt.Errorf("registry: save settings %s: %w", channelID, err)
 	}
-	return nil
+	switch {
+	case updated > 0:
+		return SettingsSaved, nil
+	case existing == 0:
+		return SettingsNoSession, nil
+	default:
+		return SettingsStale, nil
+	}
 }
 
 func (s *Store) Get(ctx context.Context, channelID string) (ChannelSession, bool, error) {
