@@ -30,6 +30,8 @@ type Options struct {
 	Now      func() time.Time
 	Settings SettingsSource
 	Replier  AutoReplier
+
+	ReplyTimeout time.Duration
 }
 
 type Manager struct {

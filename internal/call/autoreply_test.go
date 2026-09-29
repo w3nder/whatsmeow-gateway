@@ -14,6 +14,11 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/channelsettings"
 )
 
+func allowed(c *call.Cooldown, channelID string, callers ...string) bool {
+	_, ok := c.Allow(channelID, callers...)
+	return ok
+}
+
 type memReplier struct {
 	mu      sync.Mutex
 	replies []call.AutoReply
@@ -58,15 +63,15 @@ func TestCooldownAllowsTheFirstAndBlocksTheRepeatUntilTheWindowPasses(t *testing
 	clock := &fakeClock{now: time.Unix(1754300000, 0)}
 	c := call.NewCooldown(call.CallRejectMessageCooldown, clock.Now)
 
-	if !c.Allow("chan-a", "5511888887777") {
+	if !allowed(c, "chan-a", "5511888887777") {
 		t.Fatal("the first call of a caller must be allowed")
 	}
 	clock.advance(call.CallRejectMessageCooldown - time.Second)
-	if c.Allow("chan-a", "5511888887777") {
+	if allowed(c, "chan-a", "5511888887777") {
 		t.Fatal("a repeat inside the window must be blocked")
 	}
 	clock.advance(time.Second)
-	if !c.Allow("chan-a", "5511888887777") {
+	if !allowed(c, "chan-a", "5511888887777") {
 		t.Fatal("at exactly the window the caller may be answered again")
 	}
 }
@@ -75,12 +80,12 @@ func TestCooldownIsPerChannelAndPerCaller(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(1754300000, 0)}
 	c := call.NewCooldown(call.CallRejectMessageCooldown, clock.Now)
 
-	c.Allow("chan-a", "5511888887777")
+	allowed(c, "chan-a", "5511888887777")
 
-	if !c.Allow("chan-a", "5511999996666") {
+	if !allowed(c, "chan-a", "5511999996666") {
 		t.Error("another caller on the same channel must be allowed")
 	}
-	if !c.Allow("chan-b", "5511888887777") {
+	if !allowed(c, "chan-b", "5511888887777") {
 		t.Error("the same caller on another channel must be allowed")
 	}
 }
@@ -89,12 +94,12 @@ func TestCooldownForgetsExpiredEntries(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(1754300000, 0)}
 	c := call.NewCooldown(time.Minute, clock.Now)
 
-	c.Allow("chan-a", "old")
+	allowed(c, "chan-a", "old")
 	clock.advance(2 * time.Minute)
-	if !c.Allow("chan-a", "new") {
+	if !allowed(c, "chan-a", "new") {
 		t.Fatal("a new caller must be allowed")
 	}
-	if !c.Allow("chan-a", "old") {
+	if !allowed(c, "chan-a", "old") {
 		t.Fatal("an expired caller must be allowed again")
 	}
 }
@@ -241,16 +246,16 @@ func TestCooldownTreatsEveryKnownIdentityOfTheCallerAsTheSameCaller(t *testing.T
 	clock := &fakeClock{now: time.Unix(1754300000, 0)}
 	c := call.NewCooldown(call.CallRejectMessageCooldown, clock.Now)
 
-	if !c.Allow("chan-a", "173907587899617", "5511888887777") {
+	if !allowed(c, "chan-a", "173907587899617", "5511888887777") {
 		t.Fatal("the first call must be allowed")
 	}
-	if c.Allow("chan-a", "", "5511888887777") {
+	if allowed(c, "chan-a", "", "5511888887777") {
 		t.Error("the same caller seen only by phone must be blocked")
 	}
-	if c.Allow("chan-a", "173907587899617", "") {
+	if allowed(c, "chan-a", "173907587899617", "") {
 		t.Error("the same caller seen only by lid must be blocked")
 	}
-	if !c.Allow("chan-a", "999", "5511000000000") {
+	if !allowed(c, "chan-a", "999", "5511000000000") {
 		t.Error("an unrelated caller must be allowed")
 	}
 }
@@ -258,7 +263,7 @@ func TestCooldownTreatsEveryKnownIdentityOfTheCallerAsTheSameCaller(t *testing.T
 func TestCooldownReservationBlocksAnImmediateSecondAllow(t *testing.T) {
 	c := call.NewCooldown(call.CallRejectMessageCooldown, time.Now)
 
-	first, second := c.Allow("chan-a", "5511888887777"), c.Allow("chan-a", "5511888887777")
+	first, second := allowed(c, "chan-a", "5511888887777"), allowed(c, "chan-a", "5511888887777")
 	if !first || second {
 		t.Fatalf("allow results = %v, %v, want true then false", first, second)
 	}
@@ -267,10 +272,10 @@ func TestCooldownReservationBlocksAnImmediateSecondAllow(t *testing.T) {
 func TestCooldownReleaseFreesEveryKeyOfTheReservation(t *testing.T) {
 	c := call.NewCooldown(call.CallRejectMessageCooldown, time.Now)
 
-	c.Allow("chan-a", "173907587899617", "5511888887777")
-	c.Release("chan-a", "173907587899617", "5511888887777")
+	held, _ := c.Allow("chan-a", "173907587899617", "5511888887777")
+	c.Release(held)
 
-	if !c.Allow("chan-a", "", "5511888887777") || !c.Allow("chan-a", "173907587899617", "") {
+	if !allowed(c, "chan-a", "", "5511888887777") || !allowed(c, "chan-a", "173907587899617", "") {
 		t.Fatal("a released reservation must free both identities")
 	}
 }
@@ -289,5 +294,81 @@ func TestAutoRejectReleasesTheCooldownWhenTheMessageFailsToSend(t *testing.T) {
 
 	if got := len(replier.sent()); got != 2 {
 		t.Fatalf("a failed send must not suppress the next call, attempts = %d", got)
+	}
+}
+
+func TestCooldownStaleReleaseKeepsTheNewerReservationOfTheSameKeys(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1754300000, 0)}
+	c := call.NewCooldown(call.CallRejectMessageCooldown, clock.Now)
+
+	stale, _ := c.Allow("chan-a", "173907587899617", "5511888887777")
+	clock.advance(call.CallRejectMessageCooldown)
+	fresh, ok := c.Allow("chan-a", "173907587899617", "5511888887777")
+	if !ok {
+		t.Fatal("the window passed, the caller must be reservable again")
+	}
+
+	c.Release(stale)
+
+	if allowed(c, "chan-a", "5511888887777") || allowed(c, "chan-a", "173907587899617") {
+		t.Fatal("a stale release must not free the newer reservation")
+	}
+	c.Release(fresh)
+	if !allowed(c, "chan-a", "5511888887777") {
+		t.Fatal("the owner of the reservation must still release it")
+	}
+}
+
+type hangingReplier struct {
+	mu       sync.Mutex
+	attempts int
+}
+
+func (r *hangingReplier) Reply(ctx context.Context, _ call.AutoReply) error {
+	r.mu.Lock()
+	r.attempts++
+	first := r.attempts == 1
+	r.mu.Unlock()
+	if first {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return nil
+}
+
+func (r *hangingReplier) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.attempts
+}
+
+func TestAutoRejectSendThatExceedsTheTimeoutReleasesTheCooldown(t *testing.T) {
+	replier := &hangingReplier{}
+	m := call.NewManager(&memPublisher{}, newMemStore(),
+		func(channelID string) call.Identity {
+			return call.Identity{PhoneNumberID: channelID, TenantID: "t1"}
+		},
+		nil,
+		nil,
+		call.Options{
+			TmpDir:       t.TempDir(),
+			Now:          time.Now,
+			Settings:     messageSettings("chan-a", rejectText),
+			Replier:      replier,
+			ReplyTimeout: 50 * time.Millisecond,
+		},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	caller := &fakeCaller{}
+	m.Attach("chan-a", caller)
+	peer := "5511888887777@s.whatsapp.net"
+
+	caller.fireIncoming(&fakeCall{id: "C1", peer: peer})
+	m.WaitForReplies(5 * time.Second)
+	caller.fireIncoming(&fakeCall{id: "C2", peer: peer})
+	m.WaitForReplies(5 * time.Second)
+
+	if got := replier.count(); got != 2 {
+		t.Fatalf("a hung send must time out and free the next call, attempts = %d", got)
 	}
 }

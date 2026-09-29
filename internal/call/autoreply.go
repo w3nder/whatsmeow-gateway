@@ -6,7 +6,10 @@ import (
 	"time"
 )
 
-const CallRejectMessageCooldown = 10 * time.Minute
+const (
+	CallRejectMessageCooldown = 10 * time.Minute
+	CallRejectSendTimeout     = 30 * time.Second
+)
 
 type AutoReply struct {
 	ChannelID string
@@ -24,12 +27,23 @@ type Cooldown struct {
 	window time.Duration
 	now    func() time.Time
 
-	mu   sync.Mutex
-	last map[string]time.Time
+	mu      sync.Mutex
+	last    map[string]reservation
+	counter uint64
+}
+
+type reservation struct {
+	at    time.Time
+	token uint64
+}
+
+type Reservation struct {
+	keys  []string
+	token uint64
 }
 
 func NewCooldown(window time.Duration, now func() time.Time) *Cooldown {
-	return &Cooldown{window: window, now: now, last: make(map[string]time.Time)}
+	return &Cooldown{window: window, now: now, last: make(map[string]reservation)}
 }
 
 func cooldownKeys(channelID string, callers []string) []string {
@@ -42,37 +56,40 @@ func cooldownKeys(channelID string, callers []string) []string {
 	return keys
 }
 
-func (c *Cooldown) Allow(channelID string, callers ...string) bool {
+func (c *Cooldown) Allow(channelID string, callers ...string) (Reservation, bool) {
 	keys := cooldownKeys(channelID, callers)
 	if len(keys) == 0 {
-		return false
+		return Reservation{}, false
 	}
 	now := c.now()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	for k, at := range c.last {
-		if now.Sub(at) >= c.window {
+	for k, held := range c.last {
+		if now.Sub(held.at) >= c.window {
 			delete(c.last, k)
 		}
 	}
 	for _, key := range keys {
 		if _, cooling := c.last[key]; cooling {
-			return false
+			return Reservation{}, false
 		}
 	}
+	c.counter++
 	for _, key := range keys {
-		c.last[key] = now
+		c.last[key] = reservation{at: now, token: c.counter}
 	}
-	return true
+	return Reservation{keys: keys, token: c.counter}, true
 }
 
-func (c *Cooldown) Release(channelID string, callers ...string) {
+func (c *Cooldown) Release(held Reservation) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, key := range cooldownKeys(channelID, callers) {
-		delete(c.last, key)
+	for _, key := range held.keys {
+		if current, ok := c.last[key]; ok && current.token == held.token {
+			delete(c.last, key)
+		}
 	}
 }
 
@@ -87,7 +104,8 @@ func (m *Manager) autoReply(channelID string, lc LiveCall, message, senderLid, s
 		return
 	}
 
-	if !m.cooldown.Allow(channelID, senderLid, senderPn) {
+	held, allowed := m.cooldown.Allow(channelID, senderLid, senderPn)
+	if !allowed {
 		m.log.Info("call: auto reply skipped, the caller was answered recently",
 			"channel_id", channelID, "call_id", lc.ID())
 		return
@@ -98,12 +116,21 @@ func (m *Manager) autoReply(channelID string, lc LiveCall, message, senderLid, s
 	m.replyWG.Add(1)
 	go func() {
 		defer m.replyWG.Done()
-		if err := m.opts.Replier.Reply(context.Background(), reply); err != nil {
-			m.cooldown.Release(channelID, senderLid, senderPn)
+		ctx, cancel := context.WithTimeout(context.Background(), m.replyTimeout())
+		defer cancel()
+		if err := m.opts.Replier.Reply(ctx, reply); err != nil {
+			m.cooldown.Release(held)
 			m.log.Error("call: auto reply failed",
 				"channel_id", channelID, "call_id", reply.CallID, "error", err)
 		}
 	}()
+}
+
+func (m *Manager) replyTimeout() time.Duration {
+	if m.opts.ReplyTimeout > 0 {
+		return m.opts.ReplyTimeout
+	}
+	return CallRejectSendTimeout
 }
 
 func (m *Manager) WaitForReplies(timeout time.Duration) {
