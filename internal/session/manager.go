@@ -32,6 +32,19 @@ type pairing struct {
 	qr       string
 	emitted  time.Time
 	lifetime time.Duration
+
+	importHistory bool
+	stop          chan struct{}
+	stopOnce      sync.Once
+	done          chan struct{}
+}
+
+func newPairing(importHistory bool) *pairing {
+	return &pairing{importHistory: importHistory, stop: make(chan struct{}), done: make(chan struct{})}
+}
+
+func (p *pairing) halt() {
+	p.stopOnce.Do(func() { close(p.stop) })
 }
 
 func (p *pairing) validQR(now time.Time) (string, bool) {
@@ -86,7 +99,15 @@ func (m *Manager) Pair(ctx context.Context, channelID string, importHistory bool
 		return updates, nil
 	}
 
-	p, joined := m.beginPairing(channelID)
+	p, joined, superseded := m.beginPairing(channelID, importHistory)
+	if superseded != nil {
+		select {
+		case <-superseded.done:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("session: wait for the pairing without history of %s to end: %w", channelID, ctx.Err())
+		}
+		return m.Pair(ctx, channelID, importHistory)
+	}
 	if joined != nil {
 		return joined, nil
 	}
@@ -94,6 +115,7 @@ func (m *Manager) Pair(ctx context.Context, channelID string, importHistory bool
 	qr, err := client.QRChannel(ctx)
 	if err != nil {
 		m.endPairing(channelID, p, client)
+		close(p.done)
 		return nil, fmt.Errorf("session: open qr channel for %s: %w", channelID, err)
 	}
 	if importHistory {
@@ -102,16 +124,19 @@ func (m *Manager) Pair(ctx context.Context, channelID string, importHistory bool
 	release, err := deviceprops.Acquire(ctx, importHistory)
 	if err != nil {
 		m.endPairing(channelID, p, client)
+		close(p.done)
 		return nil, fmt.Errorf("session: wait for the pairing slot for %s: %w", channelID, err)
 	}
 	if err := client.Connect(); err != nil {
 		m.endPairing(channelID, p, client)
 		release()
+		close(p.done)
 		return nil, fmt.Errorf("session: connect for pairing %s: %w", channelID, err)
 	}
 
 	updates := make(chan PairUpdate)
 	go func() {
+		defer close(p.done)
 		defer close(updates)
 		defer release()
 		defer m.endPairing(channelID, p, client)
@@ -144,8 +169,12 @@ func (m *Manager) Pair(ctx context.Context, channelID string, importHistory bool
 				case updates <- update:
 				case <-ctx.Done():
 					return
+				case <-p.stop:
+					return
 				}
 			case <-ctx.Done():
+				return
+			case <-p.stop:
 				return
 			}
 		}
@@ -154,22 +183,26 @@ func (m *Manager) Pair(ctx context.Context, channelID string, importHistory bool
 	return updates, nil
 }
 
-func (m *Manager) beginPairing(channelID string) (*pairing, <-chan PairUpdate) {
+func (m *Manager) beginPairing(channelID string, importHistory bool) (*pairing, <-chan PairUpdate, *pairing) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if live, ok := m.pairings[channelID]; ok {
+		if importHistory && !live.importHistory {
+			live.halt()
+			return nil, nil, live
+		}
 		updates := make(chan PairUpdate, 1)
 		if code, valid := live.validQR(time.Now()); valid {
 			updates <- PairUpdate{QR: code}
 		}
 		close(updates)
-		return nil, updates
+		return nil, updates, nil
 	}
 
-	p := &pairing{}
+	p := newPairing(importHistory)
 	m.pairings[channelID] = p
-	return p, nil
+	return p, nil, nil
 }
 
 func (m *Manager) endPairing(channelID string, p *pairing, client WAClient) {

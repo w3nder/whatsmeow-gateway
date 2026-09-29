@@ -3,6 +3,7 @@ package test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -498,4 +499,162 @@ func TestManagerResumeOfAnIdleChannelLeavesTheHistoryToWhatsmeow(t *testing.T) {
 	if fake.TakesOverHistory() {
 		t.Fatal("a channel without an import must keep whatsmeow's automatic history download")
 	}
+}
+
+func managerOver(clients ...*fakeWAClient) *session.Manager {
+	var mu sync.Mutex
+	return session.NewManager(func(string, *types.JID) (session.WAClient, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		next := clients[0]
+		if len(clients) > 1 {
+			clients = clients[1:]
+		}
+		return next, nil
+	})
+}
+
+func pairInBackground(mgr *session.Manager, channelID string, importHistory bool) (<-chan session.PairUpdate, <-chan error) {
+	firstUpdates := make(chan (<-chan session.PairUpdate), 1)
+	failed := make(chan error, 1)
+	go func() {
+		updates, err := mgr.Pair(context.Background(), channelID, importHistory)
+		if err != nil {
+			failed <- err
+			return
+		}
+		firstUpdates <- updates
+	}()
+	select {
+	case updates := <-firstUpdates:
+		return updates, failed
+	case <-time.After(10 * time.Second):
+		return nil, failed
+	}
+}
+
+func waitClosed(t *testing.T, updates <-chan session.PairUpdate, what string) []session.PairUpdate {
+	t.Helper()
+	var got []session.PairUpdate
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case update, ok := <-updates:
+			if !ok {
+				return got
+			}
+			got = append(got, update)
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", what)
+		}
+	}
+}
+
+func TestManagerPairWithHistoryRestartsAPairingInFlightWithoutHistory(t *testing.T) {
+	plain := newFakeWAClient()
+	plain.qrFeed = make(chan whatsmeow.QRChannelItem)
+	importing := newFakeWAClient()
+	importing.qrItems = []whatsmeow.QRChannelItem{{Event: "code", Code: "qr-restarted"}, whatsmeow.QRChannelSuccess}
+	defaults := wastore.DeviceProps
+	mgr := managerOver(plain, importing)
+
+	first, err := mgr.Pair(context.Background(), "channel-restart", false)
+	if err != nil {
+		t.Fatalf("Pair(without history) failed: %v", err)
+	}
+	select {
+	case plain.qrFeed <- whatsmeow.QRChannelItem{Event: "code", Code: "qr-plain", Timeout: time.Minute}:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the pairing without history never read its QR")
+	}
+	if update := <-first; update.QR != "qr-plain" {
+		t.Fatalf("the pairing without history must show its QR first, got %+v", update)
+	}
+
+	second, failed := pairInBackground(mgr, "channel-restart", true)
+	if second == nil {
+		t.Fatalf("the pairing with history must restart the one in flight, got %v", <-failed)
+	}
+
+	waitClosed(t, first, "the pairing without history to end")
+	if plain.disconnectCount() == 0 {
+		t.Fatal("the client of the pairing without history must be dropped before the restart")
+	}
+	got := waitClosed(t, second, "the restarted pairing to finish")
+	if len(got) != 2 || got[0].QR != "qr-restarted" || !got[1].Connected {
+		t.Fatalf("the restarted pairing must show its own QR and connect, got %+v", got)
+	}
+	if !importing.tookOverHistoryBeforeConnecting() {
+		t.Fatal("the restarted pairing must download the history itself")
+	}
+	if props := importing.connectProps(); props == defaults || props.GetPlatformType() != deviceprops.HistoryPlatform {
+		t.Fatalf("the restarted pairing must connect with the history props, got %v", props)
+	}
+	if wastore.DeviceProps != defaults {
+		t.Fatal("the props must be restored after the restarted pairing")
+	}
+}
+
+func TestManagerPairWithHistoryJoinsAPairingInFlightThatAlreadyImports(t *testing.T) {
+	importing := newFakeWAClient()
+	importing.qrFeed = make(chan whatsmeow.QRChannelItem)
+	unused := newFakeWAClient()
+	mgr := managerOver(importing, unused)
+
+	first, err := mgr.Pair(context.Background(), "channel-join-history", true)
+	if err != nil {
+		t.Fatalf("Pair(with history) failed: %v", err)
+	}
+	select {
+	case importing.qrFeed <- whatsmeow.QRChannelItem{Event: "code", Code: "qr-history", Timeout: time.Minute}:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the pairing with history never read its QR")
+	}
+	<-first
+
+	second, err := mgr.Pair(context.Background(), "channel-join-history", true)
+	if err != nil {
+		t.Fatalf("the second pairing with history must join, got %v", err)
+	}
+	if got := waitClosed(t, second, "the joined replay"); len(got) != 1 || got[0].QR != "qr-history" {
+		t.Fatalf("the second request must receive the QR in flight, got %+v", got)
+	}
+	if importing.disconnectCount() != 0 || importing.connectCallCount() != 1 || unused.connectCallCount() != 0 {
+		t.Fatal("a pairing that already imports must never be restarted")
+	}
+
+	close(importing.qrFeed)
+	waitClosed(t, first, "the pairing with history to end")
+}
+
+func TestManagerPairWithoutHistoryJoinsAPairingInFlightWithoutHistory(t *testing.T) {
+	plain := newFakeWAClient()
+	plain.qrFeed = make(chan whatsmeow.QRChannelItem)
+	unused := newFakeWAClient()
+	mgr := managerOver(plain, unused)
+
+	first, err := mgr.Pair(context.Background(), "channel-join-plain", false)
+	if err != nil {
+		t.Fatalf("Pair(without history) failed: %v", err)
+	}
+	select {
+	case plain.qrFeed <- whatsmeow.QRChannelItem{Event: "code", Code: "qr-plain-join", Timeout: time.Minute}:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the pairing never read its QR")
+	}
+	<-first
+
+	second, err := mgr.Pair(context.Background(), "channel-join-plain", false)
+	if err != nil {
+		t.Fatalf("the second pairing without history must join, got %v", err)
+	}
+	if got := waitClosed(t, second, "the joined replay"); len(got) != 1 || got[0].QR != "qr-plain-join" {
+		t.Fatalf("the second request must receive the QR in flight, got %+v", got)
+	}
+	if plain.disconnectCount() != 0 || plain.TakesOverHistory() || unused.connectCallCount() != 0 {
+		t.Fatal("a request without history must never restart nor change the pairing in flight")
+	}
+
+	close(plain.qrFeed)
+	waitClosed(t, first, "the pairing to end")
 }

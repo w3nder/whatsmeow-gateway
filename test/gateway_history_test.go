@@ -351,3 +351,36 @@ func TestGatewayEndsTheImportOfAnAlreadyPairedChannelWithNoBatches(t *testing.T)
 		return err == nil && !found
 	})
 }
+
+func TestGatewayRestartsAPairingWithoutHistoryWhenAnImportIsRequested(t *testing.T) {
+	const (
+		channelID = "channel-history-6"
+		importID  = "import-history-6"
+	)
+	fake := newFakeWAClient()
+	fake.qrFeed = make(chan whatsmeow.QRChannelItem)
+	fake.historyChunk = historyFinalChunk(time.Now())
+	h := startHistoryGateway(t, fake)
+
+	publishPairCommand(t, h.probeCh, gatewayamqp.PairCommand{TenantID: "tenant-history-6", ChannelID: channelID, UserID: "user-plain"})
+	feedQR(t, fake, whatsmeow.QRChannelItem{Event: "code", Code: "qr-plain", Timeout: time.Minute})
+	publishPairCommand(t, h.probeCh, gatewayamqp.PairCommand{TenantID: "tenant-history-6", ChannelID: channelID, UserID: "user-importing", ImportHistory: true, ImportID: importID})
+	waitFor(t, 10*time.Second, "the pairing without history to be dropped and restarted with the history", func() bool {
+		return fake.disconnectCount() > 0 && fake.TakesOverHistory()
+	})
+	feedQR(t, fake, whatsmeow.QRChannelItem{Event: "code", Code: "qr-importing", Timeout: time.Minute})
+	fake.markPaired()
+	feedQR(t, fake, whatsmeow.QRChannelSuccess)
+	close(fake.qrFeed)
+	waitForChannelStatus(t, h.deliveries, channelID, "connected", pairWait)
+
+	fake.emit(historyNotificationEvent())
+
+	var batch gatewayamqp.HistoryBatch
+	if err := json.Unmarshal(waitForHistoryMessage(t, h.deliveries, gatewayamqp.HistoryBatchKind, 20*time.Second), &batch); err != nil {
+		t.Fatalf("unmarshal batch: %v", err)
+	}
+	if batch.ImportID != importID || len(batch.Chats) != 1 {
+		t.Fatalf("the restarted pairing must deliver the requested import, got %+v", batch)
+	}
+}
