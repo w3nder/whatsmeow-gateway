@@ -206,6 +206,10 @@ func (f *fakeWAClient) PNForLID(ctx context.Context, lid types.JID) (types.JID, 
 	return types.JID{}, false, nil
 }
 
+func (f *fakeWAClient) LIDForPN(ctx context.Context, pn types.JID) (types.JID, bool, error) {
+	return types.JID{}, false, nil
+}
+
 func (f *fakeWAClient) DecryptSecretEncryptedMessage(ctx context.Context, evt *events.Message) (*waE2E.Message, error) {
 	return nil, nil
 }

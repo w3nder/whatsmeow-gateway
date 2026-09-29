@@ -79,6 +79,10 @@ func (f *recordingClient) PNForLID(ctx context.Context, lid types.JID) (types.JI
 	return types.JID{}, false, nil
 }
 
+func (f *recordingClient) LIDForPN(ctx context.Context, pn types.JID) (types.JID, bool, error) {
+	return types.JID{}, false, nil
+}
+
 func (f *recordingClient) DecryptSecretEncryptedMessage(ctx context.Context, evt *events.Message) (*waE2E.Message, error) {
 	return nil, nil
 }

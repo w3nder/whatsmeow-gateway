@@ -38,6 +38,7 @@ type WAClient interface {
 	Upload(ctx context.Context, data []byte, mt whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
 	PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error)
+	LIDForPN(ctx context.Context, pn types.JID) (types.JID, bool, error)
 	DecryptSecretEncryptedMessage(ctx context.Context, evt *events.Message) (*waE2E.Message, error)
 	DecryptPollVote(ctx context.Context, evt *events.Message) (*waE2E.PollVoteMessage, error)
 	GetProfilePictureInfo(ctx context.Context, jid types.JID, params *whatsmeow.GetProfilePictureParams) (*types.ProfilePictureInfo, error)
@@ -150,6 +151,22 @@ func (w *waClient) PNForLID(ctx context.Context, lid types.JID) (types.JID, bool
 		return types.JID{}, false, err
 	}
 	return pn, !pn.IsEmpty(), nil
+}
+
+func (w *waClient) LIDForPN(ctx context.Context, pn types.JID) (types.JID, bool, error) {
+	lid, err := w.client.Store.LIDs.GetLIDForPN(ctx, pn)
+	if err != nil {
+		return types.JID{}, false, err
+	}
+	if !lid.IsEmpty() {
+		return lid, true, nil
+	}
+	info, err := w.client.GetUserInfo(ctx, []types.JID{pn})
+	if err != nil {
+		return types.JID{}, false, err
+	}
+	lid = info[pn].LID
+	return lid, !lid.IsEmpty(), nil
 }
 
 func (w *waClient) DecryptSecretEncryptedMessage(ctx context.Context, evt *events.Message) (*waE2E.Message, error) {

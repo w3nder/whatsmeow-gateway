@@ -7,10 +7,21 @@ import (
 	"testing"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/types"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
 	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
 )
+
+type realKeys struct {
+	*whatsmeow.Client
+	lids map[types.JID]types.JID
+}
+
+func (k realKeys) LIDForPN(ctx context.Context, pn types.JID) (types.JID, bool, error) {
+	lid, found := k.lids[pn]
+	return lid, found, nil
+}
 
 const groupReactionCommandLiteral = `{"tenantId":"1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c","channelId":"2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d","messageId":"3EB068F90C62346073B954:reaction","to":"120363422547615282@g.us","type":"text","kind":"reaction","targetProviderMessageId":"3EB068F90C62346073B954","targetFromMe":false,"targetParticipantJid":"2002125877314@lid","emoji":"❤️"}`
 
@@ -36,7 +47,7 @@ func TestGroupReactionContractLiteralBuildsParticipantScopedKey(t *testing.T) {
 		t.Fatalf("contract literal decoded to %+v, want %+v", cmd, expected)
 	}
 
-	var cli *whatsmeow.Client
+	cli := realKeys{}
 	to, msg, _, err := mapper.BuildOutbound(context.Background(), cli, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
@@ -76,7 +87,7 @@ func TestGroupReactionWithoutParticipantFallsBackToChatJID(t *testing.T) {
 		Emoji:                   "❤️",
 	}
 
-	var cli *whatsmeow.Client
+	cli := realKeys{}
 	_, msg, _, err := mapper.BuildOutbound(context.Background(), cli, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)
@@ -88,6 +99,37 @@ func TestGroupReactionWithoutParticipantFallsBackToChatJID(t *testing.T) {
 	}
 	if key.GetRemoteJID() != "5511999887766@s.whatsapp.net" {
 		t.Fatalf("expected remoteJID 5511999887766@s.whatsapp.net, got %q", key.GetRemoteJID())
+	}
+	if key.GetParticipant() != "" {
+		t.Fatalf("expected no participant in a one-to-one chat, got %q", key.GetParticipant())
+	}
+}
+
+const phoneReactionCommandLiteral = `{"tenantId":"1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c","channelId":"2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d","messageId":"3EB0PHONE:reaction","to":"5511999887766@s.whatsapp.net","type":"text","kind":"reaction","targetProviderMessageId":"3EB0PHONE","emoji":"❤️"}`
+
+func TestPhoneReactionContractLiteralKeysTheContactLIDChat(t *testing.T) {
+	var cmd amqp.GatewaySendCommand
+	if err := json.Unmarshal([]byte(phoneReactionCommandLiteral), &cmd); err != nil {
+		t.Fatalf("unmarshal contract literal: %v", err)
+	}
+
+	cli := realKeys{lids: map[types.JID]types.JID{
+		types.NewJID("5511999887766", types.DefaultUserServer): types.NewJID("2002125877314", types.HiddenUserServer),
+	}}
+	to, msg, _, err := mapper.BuildOutbound(context.Background(), cli, cmd, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	if to.String() != "2002125877314@lid" {
+		t.Fatalf("expected the LID chat as recipient, got %q", to.String())
+	}
+
+	key := msg.GetReactionMessage().GetKey()
+	if key.GetRemoteJID() != "2002125877314@lid" {
+		t.Fatalf("expected remoteJID 2002125877314@lid, got %q", key.GetRemoteJID())
+	}
+	if key.GetFromMe() {
+		t.Fatalf("expected fromMe=false for a reaction to the contact's message")
 	}
 	if key.GetParticipant() != "" {
 		t.Fatalf("expected no participant in a one-to-one chat, got %q", key.GetParticipant())

@@ -6,8 +6,6 @@ import (
 	"reflect"
 	"testing"
 
-	"go.mau.fi/whatsmeow"
-
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
 	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
 )
@@ -39,7 +37,7 @@ func TestInteractiveButtonsSendCommandQueueContractBuildsQuickReplyAndCtaURLButt
 		t.Fatalf("contract literal decoded to %+v, want %+v", cmd, expected)
 	}
 
-	var cli *whatsmeow.Client
+	cli := realKeys{}
 	to, msg, _, err := mapper.BuildOutbound(context.Background(), cli, cmd, stubFetch(nil, nil))
 	if err != nil {
 		t.Fatalf("BuildOutbound: %v", err)

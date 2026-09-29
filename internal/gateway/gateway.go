@@ -535,18 +535,13 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 		return g.publishSendFailure(ctx, cmd, providerID, fmt.Errorf("gateway: send %s: %w", cmd.MessageID, err))
 	}
 
-	g.logger.Info("gateway: message sent to whatsapp", "message_id", cmd.MessageID, "provider_message_id", id, "channel_id", cmd.ChannelID)
+	g.logger.Info("gateway: message sent to whatsapp", "message_id", cmd.MessageID, "provider_message_id", id, "channel_id", cmd.ChannelID, "chat", to.String())
 
 	if err := g.dedupe.MarkSent(ctx, dedupeKey); err != nil {
 		return fmt.Errorf("gateway: mark sent %s: %w", dedupeKey, err)
 	}
 
-	if err := g.publisher.PublishStatus(ctx, mapper.StatusEvent{
-		ProviderMessageID: id,
-		OpaqueMessageID:   cmd.MessageID,
-		Status:            "sent",
-		Timestamp:         strconv.FormatInt(ts.Unix(), 10),
-	}); err != nil {
+	if err := g.publisher.PublishStatus(ctx, mapper.SentStatus(cmd, to, id, ts)); err != nil {
 		return fmt.Errorf("gateway: publish sent status %s: %w", cmd.MessageID, err)
 	}
 
