@@ -3,16 +3,19 @@ package test
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
 	rabbitmq "github.com/rabbitmq/amqp091-go"
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 
 	gatewayamqp "github.com/w3nder/whatsmeow-gateway/internal/amqp"
+	"github.com/w3nder/whatsmeow-gateway/internal/call"
 	"github.com/w3nder/whatsmeow-gateway/internal/channelsettings"
 	"github.com/w3nder/whatsmeow-gateway/internal/gateway"
 	"github.com/w3nder/whatsmeow-gateway/internal/logging"
@@ -229,5 +232,82 @@ func TestGatewayKeepsPublishingGroupEventsWhenTheChannelListensToGroups(t *testi
 	}
 	if evt.ProviderMessageID != "GROUPMSG2" || evt.Group == nil || evt.Group.JID != group.String() {
 		t.Fatalf("unexpected group event: %+v", evt)
+	}
+}
+
+func TestGatewayRejectsTheCallAndAnswersWithTheStoredMessageWhenTheChannelDoesNotReceiveCalls(t *testing.T) {
+	const channelID = "channel-reject-calls-1"
+	const text = "Não atendemos ligações, escreva aqui."
+
+	caller := &fakeCaller{}
+	fake := newFakeWAClient()
+	fake.caller = caller
+	fake.sendResp = whatsmeow.SendResponse{ID: "3EB0AUTOREPLY", Timestamp: time.Unix(1754300000, 0)}
+	h := startSettingsGateway(t, channelID, "tenant-reject-calls-1", fake, channelsettings.Settings{
+		ListenGroups: true, ReceiveCalls: false, CallRejectMessage: text,
+	})
+	waitFor(t, 10*time.Second, "the calling client to be attached", func() bool {
+		return caller.incomingHandler() != nil
+	})
+
+	live := &fakeLiveCall{callID: "CALLREJECT1", peer: "5511888887777@s.whatsapp.net"}
+	caller.fireIncoming(live)
+
+	callDelivery := waitForDelivery(t, h.deliveries, gatewayamqp.InboundRoutingKey, 10*time.Second)
+	var callEvt call.InboundCallEvent
+	if err := json.Unmarshal(callDelivery.Body, &callEvt); err != nil {
+		t.Fatalf("failed to unmarshal call event: %v", err)
+	}
+	if callEvt.Type != "call" || callEvt.RichContent == nil || callEvt.RichContent.State != "auto_rejected" {
+		t.Fatalf("first event = %+v, want a call in state auto_rejected", callEvt)
+	}
+	if callEvt.ProviderMessageID != "CALLREJECT1" || callEvt.From != "5511888887777" {
+		t.Fatalf("call event identity = %+v", callEvt)
+	}
+
+	replyDelivery := waitForDelivery(t, h.deliveries, gatewayamqp.InboundRoutingKey, 10*time.Second)
+	var replyEvt mapper.InboundEvent
+	if err := json.Unmarshal(replyDelivery.Body, &replyEvt); err != nil {
+		t.Fatalf("failed to unmarshal reply event: %v", err)
+	}
+	if !replyEvt.FromMe || replyEvt.Origin != "call_auto_reply" || replyEvt.ProviderMessageID != "3EB0AUTOREPLY" {
+		t.Fatalf("reply event = %+v, want a fromMe message with origin call_auto_reply", replyEvt)
+	}
+	if replyEvt.Text == nil || replyEvt.Text.Body != text {
+		t.Fatalf("reply text = %+v, want %q", replyEvt.Text, text)
+	}
+
+	if got := live.recordedActions(); !reflect.DeepEqual(got, []string{"reject"}) {
+		t.Fatalf("live call actions = %v, want only reject", got)
+	}
+	if fake.sendCallCount() != 1 {
+		t.Fatalf("whatsapp sends = %d, want exactly 1", fake.sendCallCount())
+	}
+}
+
+func TestGatewayRejectsWithoutAMessageWhenNoneIsStored(t *testing.T) {
+	const channelID = "channel-reject-calls-2"
+
+	caller := &fakeCaller{}
+	fake := newFakeWAClient()
+	fake.caller = caller
+	h := startSettingsGateway(t, channelID, "tenant-reject-calls-2", fake, channelsettings.Settings{ListenGroups: true, ReceiveCalls: false})
+	waitFor(t, 10*time.Second, "the calling client to be attached", func() bool {
+		return caller.incomingHandler() != nil
+	})
+
+	live := &fakeLiveCall{callID: "CALLREJECT2", peer: "5511888887777@s.whatsapp.net"}
+	caller.fireIncoming(live)
+
+	callDelivery := waitForDelivery(t, h.deliveries, gatewayamqp.InboundRoutingKey, 10*time.Second)
+	var callEvt call.InboundCallEvent
+	if err := json.Unmarshal(callDelivery.Body, &callEvt); err != nil {
+		t.Fatalf("failed to unmarshal call event: %v", err)
+	}
+	if callEvt.RichContent == nil || callEvt.RichContent.State != "auto_rejected" {
+		t.Fatalf("event = %+v, want state auto_rejected", callEvt)
+	}
+	if fake.sendCallCount() != 0 {
+		t.Fatalf("no message is stored, whatsapp sends = %d, want 0", fake.sendCallCount())
 	}
 }

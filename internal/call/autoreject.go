@@ -41,5 +41,7 @@ func (m *Manager) autoReject(channelID string, lc LiveCall) bool {
 
 	m.log.Info("call: incoming call auto rejected",
 		"channel_id", channelID, "call_id", lc.ID(), "is_video", lc.IsVideo())
+
+	m.autoReply(channelID, lc, settings.CallRejectMessage, senderLid, senderPn)
 	return true
 }

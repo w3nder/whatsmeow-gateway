@@ -29,6 +29,7 @@ type Options struct {
 	Record   bool
 	Now      func() time.Time
 	Settings SettingsSource
+	Replier  AutoReplier
 }
 
 type Manager struct {
@@ -40,8 +41,10 @@ type Manager struct {
 	opts           Options
 	log            *slog.Logger
 	registry       *Registry
+	cooldown       *Cooldown
 
 	uploadWG sync.WaitGroup
+	replyWG  sync.WaitGroup
 }
 
 func NewManager(
@@ -65,6 +68,7 @@ func NewManager(
 		opts:           opts,
 		log:            log,
 		registry:       NewRegistry(),
+		cooldown:       NewCooldown(CallRejectMessageCooldown, opts.Now),
 	}
 }
 
@@ -339,15 +343,7 @@ func (m *Manager) uploadRecording(ctx context.Context, t *Tracked) {
 }
 
 func (m *Manager) WaitForRecordings(timeout time.Duration) {
-	done := make(chan struct{})
-	go func() {
-		m.uploadWG.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(timeout):
+	if !waitGroupWithin(&m.uploadWG, timeout) {
 		m.log.Error("call: shutdown timed out waiting for recording uploads", "timeout", timeout)
 	}
 }

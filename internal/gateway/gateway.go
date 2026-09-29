@@ -110,6 +110,7 @@ func Run(ctx context.Context, deps Deps) error {
 
 	callOptions := deps.CallOptions
 	callOptions.Settings = g.settings
+	callOptions.Replier = callAutoReplier{sender: deps.Manager, publisher: deps.Publisher, timeout: g.sendTimeout}
 
 	g.calls = call.NewManager(
 		callPublisher{deps.Publisher},
@@ -288,6 +289,7 @@ func (g *gateway) run(ctx context.Context) error {
 
 	g.calls.AbortAll(g.workCtx, "gateway_shutdown")
 	g.calls.WaitForRecordings(g.shutdownDrainTimeout)
+	g.calls.WaitForReplies(g.shutdownDrainTimeout)
 
 	g.manager.DisconnectAll()
 
