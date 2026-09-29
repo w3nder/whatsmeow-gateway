@@ -56,3 +56,10 @@ func NewInboundCallEvent(id Identity, channelID, callID, senderLid, senderPn, di
 		ProfilePicture: picture,
 	}
 }
+
+func (e InboundCallEvent) WithState(state string) InboundCallEvent {
+	rich := *e.RichContent
+	rich.State = state
+	e.RichContent = &rich
+	return e
+}

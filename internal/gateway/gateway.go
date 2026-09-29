@@ -21,6 +21,7 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
 	"github.com/w3nder/whatsmeow-gateway/internal/avatar"
 	"github.com/w3nder/whatsmeow-gateway/internal/call"
+	"github.com/w3nder/whatsmeow-gateway/internal/channelsettings"
 	"github.com/w3nder/whatsmeow-gateway/internal/dedupe"
 	"github.com/w3nder/whatsmeow-gateway/internal/groupinfo"
 	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
@@ -63,6 +64,7 @@ type gateway struct {
 	groups               *groupinfo.Cache
 	pacer                *channelPacer
 	calls                *call.Manager
+	settings             *channelsettings.Map
 	instanceID           string
 	shardLockTTL         time.Duration
 	sendTimeout          time.Duration
@@ -90,6 +92,7 @@ func Run(ctx context.Context, deps Deps) error {
 		avatars:              avatar.New(deps.MediaStore, fetchMediaURL, avatar.Options{}, deps.Logger),
 		groups:               groupinfo.New(groupinfo.Options{}, deps.Logger),
 		pacer:                newChannelPacer(),
+		settings:             channelsettings.NewMap(),
 		instanceID:           deps.InstanceID,
 		shardLockTTL:         deps.ShardLockTTL,
 		sendTimeout:          sendTimeout(deps.SendTimeout),
@@ -105,13 +108,17 @@ func Run(ctx context.Context, deps Deps) error {
 		return fmt.Errorf("gateway: media store does not support streaming uploads, which call recording requires")
 	}
 
+	callOptions := deps.CallOptions
+	callOptions.Settings = g.settings
+	callOptions.Replier = callAutoReplier{sender: deps.Manager, publisher: deps.Publisher, timeout: g.sendTimeout}
+
 	g.calls = call.NewManager(
 		callPublisher{deps.Publisher},
 		recordingStore,
 		g.callIdentity,
 		g.callSenderResolver,
 		g.callAvatars,
-		deps.CallOptions,
+		callOptions,
 		deps.Logger,
 	)
 
@@ -244,6 +251,11 @@ func (g *gateway) run(ctx context.Context) error {
 		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
 		return fmt.Errorf("gateway: start call consumer: %w", err)
 	}
+	if err := g.consumer.StartSettings(g.workCtx, g.SettingsHandler); err != nil {
+		g.closeConsumerForFailedBoot()
+		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
+		return fmt.Errorf("gateway: start settings consumer: %w", err)
+	}
 	groupCtx, cancelGroups := context.WithCancel(ctx)
 	defer cancelGroups()
 	if err := g.consumer.StartGroup(groupCtx, g.GroupHandler); err != nil {
@@ -277,6 +289,7 @@ func (g *gateway) run(ctx context.Context) error {
 
 	g.calls.AbortAll(g.workCtx, "gateway_shutdown")
 	g.calls.WaitForRecordings(g.shutdownDrainTimeout)
+	g.calls.WaitForReplies(g.shutdownDrainTimeout)
 
 	g.manager.DisconnectAll()
 
@@ -311,6 +324,7 @@ func (g *gateway) resumeOwnedSessions(ctx context.Context) {
 		}
 
 		g.setTenant(cs.ChannelID, cs.TenantID)
+		g.settings.Set(cs.ChannelID, cs.Settings)
 
 		if err := g.manager.Resume(ctx, cs.ChannelID, jid); err != nil {
 			g.logger.Error("gateway: resume session", "channel_id", cs.ChannelID, "error", err)
@@ -608,6 +622,7 @@ func (g *gateway) ensureChannelConnected(ctx context.Context, channelID string) 
 
 	g.logger.Info("gateway: resuming channel on demand", "channel_id", channelID, "jid", cs.JID)
 	g.setTenant(channelID, cs.TenantID)
+	g.settings.Set(channelID, cs.Settings)
 
 	if resumeErr := g.manager.Resume(ctx, channelID, jid); resumeErr != nil {
 		return resumeErr
@@ -621,6 +636,10 @@ func (g *gateway) handleSessionEvent(channelID string, evt any) {
 		g.calls.AbortChannel(g.workCtx, channelID, reason)
 	}
 
+	if g.ignoredByListenGroups(channelID, evt) {
+		return
+	}
+
 	switch e := evt.(type) {
 	case *events.Message:
 		g.handleInboundMessage(channelID, e)
@@ -630,6 +649,7 @@ func (g *gateway) handleSessionEvent(channelID string, evt any) {
 		g.handleGroupInfo(channelID, e)
 	case *events.LoggedOut:
 		g.clearTenant(channelID)
+		g.settings.Clear(channelID)
 		if err := g.registry.Delete(g.workCtx, channelID); err != nil {
 			g.logger.Error("gateway: delete session on logout", "channel_id", channelID, "error", err)
 		}

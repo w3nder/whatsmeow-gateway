@@ -97,6 +97,15 @@ type PairCommand struct {
 	UserID    string `json:"userId"`
 }
 
+type SettingsCommand struct {
+	TenantID          string  `json:"tenantId"`
+	ChannelID         string  `json:"channelId"`
+	ListenGroups      *bool   `json:"listenGroups"`
+	ReceiveCalls      *bool   `json:"receiveCalls"`
+	CallRejectMessage *string `json:"callRejectMessage"`
+	SettingsVersion   int64   `json:"settingsVersion"`
+}
+
 type GroupActionParams struct {
 	Phones      []string `json:"phones,omitempty"`
 	Name        string   `json:"name,omitempty"`

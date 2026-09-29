@@ -7,6 +7,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/w3nder/whatsmeow-gateway/internal/channelsettings"
 )
 
 const createTableSQL = `CREATE TABLE IF NOT EXISTS gateway_channel_sessions (
@@ -16,10 +18,35 @@ const createTableSQL = `CREATE TABLE IF NOT EXISTS gateway_channel_sessions (
 	paired_at timestamptz NOT NULL DEFAULT now()
 )`
 
+const addSettingsColumnsSQL = `ALTER TABLE gateway_channel_sessions
+	ADD COLUMN IF NOT EXISTS listen_groups boolean NOT NULL DEFAULT true,
+	ADD COLUMN IF NOT EXISTS receive_calls boolean NOT NULL DEFAULT true,
+	ADD COLUMN IF NOT EXISTS call_reject_message text,
+	ADD COLUMN IF NOT EXISTS settings_version bigint NOT NULL DEFAULT 0`
+
+const sessionColumns = `channel_id, jid, tenant_id, listen_groups, receive_calls, call_reject_message, settings_version`
+
 type ChannelSession struct {
 	ChannelID string
 	JID       string
 	TenantID  string
+	Settings  channelsettings.Settings
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanSession(row rowScanner) (ChannelSession, error) {
+	var cs ChannelSession
+	var message *string
+	if err := row.Scan(&cs.ChannelID, &cs.JID, &cs.TenantID, &cs.Settings.ListenGroups, &cs.Settings.ReceiveCalls, &message, &cs.Settings.Version); err != nil {
+		return ChannelSession{}, err
+	}
+	if message != nil {
+		cs.Settings.CallRejectMessage = *message
+	}
+	return cs, nil
 }
 
 type Store struct {
@@ -37,6 +64,11 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		return nil, fmt.Errorf("registry: create gateway_channel_sessions table: %w", err)
 	}
 
+	if _, err := pool.Exec(ctx, addSettingsColumnsSQL); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("registry: add settings columns to gateway_channel_sessions: %w", err)
+	}
+
 	return &Store{pool: pool}, nil
 }
 
@@ -51,12 +83,50 @@ func (s *Store) Save(ctx context.Context, channelID, jid, tenantID string) error
 	return nil
 }
 
+type SettingsSaveResult int
+
+const (
+	SettingsSaved SettingsSaveResult = iota
+	SettingsNoSession
+	SettingsStale
+)
+
+const saveSettingsSQL = `WITH current AS (
+	SELECT settings_version FROM gateway_channel_sessions WHERE channel_id = $1 AND tenant_id = $2
+), updated AS (
+	UPDATE gateway_channel_sessions
+	SET listen_groups = $3, receive_calls = $4, call_reject_message = $5, settings_version = $6
+	WHERE channel_id = $1 AND tenant_id = $2 AND settings_version <= $6
+	RETURNING 1
+)
+SELECT (SELECT count(*) FROM current), (SELECT count(*) FROM updated)`
+
+func (s *Store) SaveSettings(ctx context.Context, channelID, tenantID string, settings channelsettings.Settings) (SettingsSaveResult, error) {
+	var message *string
+	if settings.CallRejectMessage != "" {
+		message = &settings.CallRejectMessage
+	}
+	var existing, updated int
+	if err := s.pool.QueryRow(ctx, saveSettingsSQL,
+		channelID, tenantID, settings.ListenGroups, settings.ReceiveCalls, message, settings.Version,
+	).Scan(&existing, &updated); err != nil {
+		return SettingsNoSession, fmt.Errorf("registry: save settings %s: %w", channelID, err)
+	}
+	switch {
+	case updated > 0:
+		return SettingsSaved, nil
+	case existing == 0:
+		return SettingsNoSession, nil
+	default:
+		return SettingsStale, nil
+	}
+}
+
 func (s *Store) Get(ctx context.Context, channelID string) (ChannelSession, bool, error) {
-	var cs ChannelSession
-	err := s.pool.QueryRow(ctx,
-		`SELECT channel_id, jid, tenant_id FROM gateway_channel_sessions WHERE channel_id = $1`,
+	cs, err := scanSession(s.pool.QueryRow(ctx,
+		`SELECT `+sessionColumns+` FROM gateway_channel_sessions WHERE channel_id = $1`,
 		channelID,
-	).Scan(&cs.ChannelID, &cs.JID, &cs.TenantID)
+	))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ChannelSession{}, false, nil
 	}
@@ -79,7 +149,7 @@ func (s *Store) ForShards(ctx context.Context, shards []int, shardFn func(channe
 		owned[shard] = struct{}{}
 	}
 
-	rows, err := s.pool.Query(ctx, `SELECT channel_id, jid, tenant_id FROM gateway_channel_sessions`)
+	rows, err := s.pool.Query(ctx, `SELECT `+sessionColumns+` FROM gateway_channel_sessions`)
 	if err != nil {
 		return nil, fmt.Errorf("registry: list sessions: %w", err)
 	}
@@ -87,8 +157,8 @@ func (s *Store) ForShards(ctx context.Context, shards []int, shardFn func(channe
 
 	var sessions []ChannelSession
 	for rows.Next() {
-		var cs ChannelSession
-		if err := rows.Scan(&cs.ChannelID, &cs.JID, &cs.TenantID); err != nil {
+		cs, err := scanSession(rows)
+		if err != nil {
 			return nil, fmt.Errorf("registry: scan session row: %w", err)
 		}
 		if _, ok := owned[shardFn(cs.ChannelID)]; ok {

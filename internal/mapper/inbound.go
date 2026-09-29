@@ -74,6 +74,8 @@ type InboundDeps struct {
 	TenantID   string
 }
 
+const OriginCallAutoReply = "call_auto_reply"
+
 type InboundText struct {
 	Body string `json:"body,omitempty"`
 }
@@ -265,6 +267,7 @@ type InboundEvent struct {
 	Group              *InboundGroup       `json:"group,omitempty"`
 	InteractiveReplyID string              `json:"interactiveReplyId,omitempty"`
 	AdReferral         *InboundAdReferral  `json:"adReferral,omitempty"`
+	Origin             string              `json:"origin,omitempty"`
 }
 
 type StatusError struct {

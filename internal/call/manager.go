@@ -25,9 +25,13 @@ type Identity struct {
 }
 
 type Options struct {
-	TmpDir string
-	Record bool
-	Now    func() time.Time
+	TmpDir   string
+	Record   bool
+	Now      func() time.Time
+	Settings SettingsSource
+	Replier  AutoReplier
+
+	ReplyTimeout time.Duration
 }
 
 type Manager struct {
@@ -39,8 +43,10 @@ type Manager struct {
 	opts           Options
 	log            *slog.Logger
 	registry       *Registry
+	cooldown       *Cooldown
 
 	uploadWG sync.WaitGroup
+	replyWG  sync.WaitGroup
 }
 
 func NewManager(
@@ -64,6 +70,7 @@ func NewManager(
 		opts:           opts,
 		log:            log,
 		registry:       NewRegistry(),
+		cooldown:       NewCooldown(CallRejectMessageCooldown, opts.Now),
 	}
 }
 
@@ -73,6 +80,9 @@ func (m *Manager) Attach(channelID string, caller Caller) {
 	}
 
 	caller.OnIncomingCall(func(lc LiveCall) {
+		if m.autoReject(channelID, lc) {
+			return
+		}
 		t := m.Track(channelID, lc, DirectionInbound, m.opts.Record)
 		m.publishInbound(t)
 		m.publish(m.event(t, EventIncoming))
@@ -335,15 +345,7 @@ func (m *Manager) uploadRecording(ctx context.Context, t *Tracked) {
 }
 
 func (m *Manager) WaitForRecordings(timeout time.Duration) {
-	done := make(chan struct{})
-	go func() {
-		m.uploadWG.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(timeout):
+	if !waitGroupWithin(&m.uploadWG, timeout) {
 		m.log.Error("call: shutdown timed out waiting for recording uploads", "timeout", timeout)
 	}
 }
@@ -366,25 +368,30 @@ func (m *Manager) event(t *Tracked, eventType string) Event {
 }
 
 func (m *Manager) publishInbound(t *Tracked) {
+	m.publishInboundEvent(t.ChannelID, t.CallID, func() InboundCallEvent {
+		fromMe := t.Direction == DirectionOutbound
+		return NewInboundCallEvent(m.identity(t.ChannelID), t.ChannelID, t.CallID, t.SenderLid, t.SenderPn, t.Direction, fromMe, t.IsVideo,
+			strconv.FormatInt(m.opts.Now().Unix(), 10), t.ProfilePicture)
+	})
+}
+
+func (m *Manager) publishInboundEvent(channelID, callID string, build func() InboundCallEvent) {
 	defer func() {
 		if r := recover(); r != nil {
 			m.log.Error("call: panic while publishing inbound call event",
-				"channel_id", t.ChannelID, "call_id", t.CallID, "panic", r)
+				"channel_id", channelID, "call_id", callID, "panic", r)
 		}
 	}()
 
-	id := m.identity(t.ChannelID)
-	fromMe := t.Direction == DirectionOutbound
-	evt := NewInboundCallEvent(id, t.ChannelID, t.CallID, t.SenderLid, t.SenderPn, t.Direction, fromMe, t.IsVideo,
-		strconv.FormatInt(m.opts.Now().Unix(), 10), t.ProfilePicture)
+	evt := build()
 
 	if err := m.pub.PublishInbound(context.Background(), evt); err != nil {
 		m.log.Error("call: publish inbound call event",
-			"channel_id", t.ChannelID, "call_id", t.CallID, "error", err)
+			"channel_id", channelID, "call_id", callID, "error", err)
 		return
 	}
 
-	m.log.Info("call: inbound call event published", "channel_id", t.ChannelID, "call_id", t.CallID)
+	m.log.Info("call: inbound call event published", "channel_id", channelID, "call_id", callID)
 }
 
 func (m *Manager) publish(evt Event) {

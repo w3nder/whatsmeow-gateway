@@ -40,6 +40,7 @@ type LiveCall interface {
 	ID() string
 	Peer() string
 	IsVideo() bool
+	IsGroup() bool
 
 	Answer() error
 	Reject() error
