@@ -25,12 +25,20 @@ type Source interface {
 type Store interface {
 	ActiveHistoryImport(ctx context.Context, channelID string) (registry.HistoryImport, bool, error)
 	CountHistoryBatch(ctx context.Context, channelID, importID string) (int, error)
+	SkipHistoryChats(ctx context.Context, channelID, importID string, chats []string) (int, error)
 	FinishHistoryImport(ctx context.Context, channelID, importID string) error
 }
 
 type Publisher interface {
 	PublishHistoryBatch(ctx context.Context, batch amqp.HistoryBatch) error
 	PublishHistoryDone(ctx context.Context, done amqp.HistoryDone) error
+}
+
+const storeAttempts = 5
+
+type chunk struct {
+	source Source
+	notif  *waE2E.HistorySyncNotification
 }
 
 type Importer struct {
@@ -46,7 +54,7 @@ type Importer struct {
 
 	mu      sync.Mutex
 	closed  bool
-	lanes   map[string]*sync.Mutex
+	queues  map[string][]chunk
 	running sync.WaitGroup
 }
 
@@ -64,45 +72,62 @@ func NewImporter(ctx context.Context, store Store, publisher Publisher, media ma
 		ctx:       ctx,
 		cancel:    cancel,
 		chunks:    make(chan struct{}, limits.Chunks),
-		lanes:     make(map[string]*sync.Mutex),
+		queues:    make(map[string][]chunk),
 	}, nil
 }
 
 func (i *Importer) Accept(channelID string, source Source, notif *waE2E.HistorySyncNotification) {
-	lane, ok := i.enter(channelID)
-	if !ok {
-		i.logger.Warn("history: chunk arrived while the importer is closing, dropped", "channel_id", channelID)
-		return
-	}
-	go func() {
-		defer i.running.Done()
-		lane.Lock()
-		defer lane.Unlock()
-		select {
-		case i.chunks <- struct{}{}:
-		case <-i.ctx.Done():
-			return
-		}
-		defer func() { <-i.chunks }()
-		if err := i.Import(i.ctx, channelID, source, notif); err != nil {
-			i.logger.Error("history: import chunk", "channel_id", channelID, "error", err)
-		}
-	}()
-}
-
-func (i *Importer) enter(channelID string) (*sync.Mutex, bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.closed {
-		return nil, false
+		i.logger.Warn("history: chunk arrived while the importer is closing, dropped", "channel_id", channelID)
+		return
+	}
+	pending, draining := i.queues[channelID]
+	i.queues[channelID] = append(pending, chunk{source: source, notif: notif})
+	if draining {
+		return
 	}
 	i.running.Add(1)
-	lane, ok := i.lanes[channelID]
-	if !ok {
-		lane = &sync.Mutex{}
-		i.lanes[channelID] = lane
+	go i.drain(channelID)
+}
+
+func (i *Importer) drain(channelID string) {
+	defer i.running.Done()
+	for {
+		next, ok := i.next(channelID)
+		if !ok {
+			return
+		}
+		i.importQueued(channelID, next)
 	}
-	return lane, true
+}
+
+func (i *Importer) next(channelID string) (chunk, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	pending := i.queues[channelID]
+	if len(pending) == 0 {
+		delete(i.queues, channelID)
+		return chunk{}, false
+	}
+	i.queues[channelID] = pending[1:]
+	return pending[0], true
+}
+
+func (i *Importer) importQueued(channelID string, queued chunk) {
+	if i.ctx.Err() != nil {
+		return
+	}
+	select {
+	case i.chunks <- struct{}{}:
+	case <-i.ctx.Done():
+		return
+	}
+	defer func() { <-i.chunks }()
+	if err := i.Import(i.ctx, channelID, queued.source, queued.notif); err != nil {
+		i.logger.Error("history: import chunk", "channel_id", channelID, "error", err)
+	}
 }
 
 func (i *Importer) Close(timeout time.Duration) {
@@ -167,7 +192,14 @@ func (i *Importer) publishChunk(ctx context.Context, channelID string, active re
 	if err != nil {
 		return err
 	}
-	batches := Split(translation.Chats, i.limits.MaxMessages, i.limits.MaxBytes)
+	skipped, err := i.skipChats(ctx, channelID, active, translation.ChatsWithoutPhone)
+	if err != nil {
+		return err
+	}
+	batches, oversized := Split(translation.Chats, i.limits.MaxMessages, i.limits.MaxBytes)
+	for _, id := range oversized {
+		i.logger.Warn("history: message larger than a batch, dropped", "channel_id", channelID, "import_id", active.ImportID, "provider_message_id", id)
+	}
 	total := active.Batches
 	for n, chats := range batches {
 		if n > 0 {
@@ -193,7 +225,7 @@ func (i *Importer) publishChunk(ctx context.Context, channelID string, active re
 		}); err != nil {
 			return err
 		}
-		if total, err = i.store.CountHistoryBatch(ctx, channelID, active.ImportID); err != nil {
+		if total, err = i.countBatch(ctx, channelID, active.ImportID, total); err != nil {
 			return err
 		}
 	}
@@ -208,12 +240,14 @@ func (i *Importer) publishChunk(ctx context.Context, channelID string, active re
 		"messages", translation.Messages,
 		"out_of_window", translation.OutOfWindow,
 		"skipped", translation.Skipped,
-		"chats_without_phone", translation.ChatsWithoutPhone)
+		"oversized", len(oversized),
+		"chats_without_phone", len(translation.ChatsWithoutPhone),
+		"after_the_end", active.Finished)
 
-	if !finishesImport(data) {
+	if active.Finished || !finishesImport(data) {
 		return nil
 	}
-	done := amqp.HistoryDone{TenantID: active.TenantID, ChannelID: channelID, ImportID: active.ImportID, TotalBatches: total}
+	done := amqp.HistoryDone{TenantID: active.TenantID, ChannelID: channelID, ImportID: active.ImportID, TotalBatches: total, SkippedChats: skipped}
 	if err := i.retry(ctx, func(ctx context.Context) error {
 		if err := i.stillActive(ctx, channelID, active.ImportID); err != nil {
 			return err
@@ -222,7 +256,60 @@ func (i *Importer) publishChunk(ctx context.Context, channelID string, active re
 	}); err != nil {
 		return err
 	}
-	return i.store.FinishHistoryImport(ctx, channelID, active.ImportID)
+	return i.persist(ctx, "finish the import", channelID, func(ctx context.Context) error {
+		return i.store.FinishHistoryImport(ctx, channelID, active.ImportID)
+	})
+}
+
+func (i *Importer) skipChats(ctx context.Context, channelID string, active registry.HistoryImport, chats []string) (int, error) {
+	skipped := active.SkippedChats
+	if len(chats) == 0 {
+		return skipped, nil
+	}
+	err := i.persist(ctx, "record the chats without a phone", channelID, func(ctx context.Context) error {
+		recorded, err := i.store.SkipHistoryChats(ctx, channelID, active.ImportID, chats)
+		if err == nil {
+			skipped = recorded
+		}
+		return err
+	})
+	return skipped, err
+}
+
+func (i *Importer) countBatch(ctx context.Context, channelID, importID string, published int) (int, error) {
+	total := published + 1
+	err := i.persist(ctx, "count a published batch", channelID, func(ctx context.Context) error {
+		counted, err := i.store.CountHistoryBatch(ctx, channelID, importID)
+		if err == nil {
+			total = counted
+		}
+		return err
+	})
+	return total, err
+}
+
+func (i *Importer) persist(ctx context.Context, what, channelID string, write func(context.Context) error) error {
+	delay := i.limits.RetryFirst
+	var err error
+	for attempt := 1; ; attempt++ {
+		err = write(ctx)
+		if err == nil || errors.Is(err, registry.ErrNoHistoryImport) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if attempt == storeAttempts {
+			break
+		}
+		i.logger.Warn("history: registry write failed, retrying", "channel_id", channelID, "write", what, "error", err, "retry_in", delay)
+		if err := sleep(ctx, delay); err != nil {
+			return err
+		}
+		delay = min(delay*2, i.limits.RetryMax)
+	}
+	i.logger.Error("history: registry write failed, publishing on without it", "channel_id", channelID, "write", what, "attempts", storeAttempts, "error", err)
+	return nil
 }
 
 func (i *Importer) stillActive(ctx context.Context, channelID, importID string) error {

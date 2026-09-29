@@ -3,6 +3,7 @@ package history_test
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -41,7 +42,7 @@ func messageIDs(t *testing.T, batches [][]amqp.HistoryChat) []string {
 func TestSplitCapsEachBatchAtMaxMessagesAndRepeatsTheChatHeader(t *testing.T) {
 	chat := chatWith("5511999998888", 1200, 10)
 
-	batches := history.Split([]amqp.HistoryChat{chat}, 500, 1_000_000)
+	batches, _ := history.Split([]amqp.HistoryChat{chat}, 500, 1_000_000)
 
 	if len(batches) != 3 {
 		t.Fatalf("1200 messages make 3 batches of at most 500, got %d", len(batches))
@@ -67,7 +68,7 @@ func TestSplitKeepsEveryBatchUnderMaxBytes(t *testing.T) {
 	}
 	const maxBytes = 64 * 1024
 
-	batches := history.Split(chats, 500, maxBytes)
+	batches, _ := history.Split(chats, 500, maxBytes)
 
 	for n, chatsInBatch := range batches {
 		encoded, err := json.Marshal(amqp.HistoryBatch{
@@ -95,7 +96,32 @@ func TestSplitKeepsEveryBatchUnderMaxBytes(t *testing.T) {
 }
 
 func TestSplitOfNoChatsHasNoBatch(t *testing.T) {
-	if batches := history.Split(nil, 500, 1_000_000); len(batches) != 0 {
+	if batches, _ := history.Split(nil, 500, 1_000_000); len(batches) != 0 {
 		t.Fatalf("nothing to publish, got %d batches", len(batches))
+	}
+}
+
+func TestSplitDropsAMessageLargerThanABatchAndNamesIt(t *testing.T) {
+	chats := []amqp.HistoryChat{
+		chatWith("5511911111111", 2, 10),
+		chatWith("5511933333333", 1, 8192),
+		chatWith("5511922222222", 1, 10),
+	}
+
+	batches, oversized := history.Split(chats, 500, 4096)
+
+	if !reflect.DeepEqual(oversized, []string{"5511933333333-0"}) {
+		t.Fatalf("the oversized message is named by its provider id, got %v", oversized)
+	}
+	if ids := messageIDs(t, batches); !reflect.DeepEqual(ids, []string{"5511911111111-0", "5511911111111-1", "5511922222222-0"}) {
+		t.Fatalf("every other message stays, in order, got %v", ids)
+	}
+}
+
+func TestSplitOfOnlyOversizedMessagesHasNoBatch(t *testing.T) {
+	batches, oversized := history.Split([]amqp.HistoryChat{chatWith("5511922222222", 2, 8192)}, 500, 4096)
+
+	if len(batches) != 0 || len(oversized) != 2 {
+		t.Fatalf("a chat made only of oversized messages becomes no batch, got %d batches and %v", len(batches), oversized)
 	}
 }

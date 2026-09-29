@@ -1,20 +1,29 @@
 package history
 
-import "github.com/w3nder/whatsmeow-gateway/internal/amqp"
+import (
+	"encoding/json"
+
+	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
+)
 
 const (
 	batchEnvelopeBytes = 512
 	chatEnvelopeBytes  = 96
 )
 
-func Split(chats []amqp.HistoryChat, maxMessages, maxBytes int) [][]amqp.HistoryChat {
+func Split(chats []amqp.HistoryChat, maxMessages, maxBytes int) ([][]amqp.HistoryChat, []string) {
 	var batches [][]amqp.HistoryChat
+	var oversized []string
 	var current []amqp.HistoryChat
 	count, size := 0, batchEnvelopeBytes
 	for _, chat := range chats {
 		open := -1
 		header := chatHeaderBytes(chat)
 		for _, message := range chat.Messages {
+			if batchEnvelopeBytes+header+len(message)+1 > maxBytes {
+				oversized = append(oversized, providerMessageID(message))
+				continue
+			}
 			cost := len(message) + 1
 			if open < 0 {
 				cost += header
@@ -36,7 +45,15 @@ func Split(chats []amqp.HistoryChat, maxMessages, maxBytes int) [][]amqp.History
 	if count > 0 {
 		batches = append(batches, current)
 	}
-	return batches
+	return batches, oversized
+}
+
+func providerMessageID(message json.RawMessage) string {
+	var head struct {
+		ProviderMessageID string `json:"providerMessageId"`
+	}
+	_ = json.Unmarshal(message, &head)
+	return head.ProviderMessageID
 }
 
 func chatHeaderBytes(chat amqp.HistoryChat) int {

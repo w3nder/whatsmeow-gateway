@@ -147,6 +147,7 @@ type HistoryDone struct {
 	ImportID     string `json:"importId"`
 	Source       string `json:"source"`
 	TotalBatches int    `json:"totalBatches"`
+	SkippedChats int    `json:"skippedChats"`
 }
 
 type GroupActionParams struct {

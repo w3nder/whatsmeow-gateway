@@ -35,7 +35,7 @@ type Translation struct {
 	Messages          int
 	OutOfWindow       int
 	Skipped           int
-	ChatsWithoutPhone int
+	ChatsWithoutPhone []string
 }
 
 type candidate struct {
@@ -66,7 +66,7 @@ func Translate(ctx context.Context, deps TranslateDeps, data *waHistorySync.Hist
 		alt := chatAlt(chat, conv)
 		lid, pn := senderid.Resolve(ctx, deps.Source, chat, alt)
 		if pn == "" {
-			result.ChatsWithoutPhone++
+			result.ChatsWithoutPhone = append(result.ChatsWithoutPhone, conv.GetID())
 			continue
 		}
 		index := len(headers)

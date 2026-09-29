@@ -318,7 +318,7 @@ func TestTranslateSkipsALidChatWithoutAResolvablePhone(t *testing.T) {
 
 	got := translate(t, newFakeSource(), data, now)
 
-	if len(got.Chats) != 0 || got.ChatsWithoutPhone != 1 {
+	if len(got.Chats) != 0 || !reflect.DeepEqual(got.ChatsWithoutPhone, []string{mariaLid}) {
 		t.Fatalf("a chat without a resolvable phone creates no contact, got %+v", got)
 	}
 }

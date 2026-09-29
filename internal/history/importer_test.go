@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
 	"github.com/w3nder/whatsmeow-gateway/internal/history"
@@ -51,12 +53,14 @@ type memoryStore struct {
 	log               *recorder
 	mu                sync.Mutex
 	imports           map[string]registry.HistoryImport
+	skipped           map[string]map[string]bool
 	countErr          error
+	countFailures     int
 	replaceAfterCount *registry.HistoryImport
 }
 
 func newMemoryStore(log *recorder) *memoryStore {
-	return &memoryStore{log: log, imports: map[string]registry.HistoryImport{}}
+	return &memoryStore{log: log, imports: map[string]registry.HistoryImport{}, skipped: map[string]map[string]bool{}}
 }
 
 func (s *memoryStore) begin(channelID string, active registry.HistoryImport) {
@@ -78,6 +82,11 @@ func (s *memoryStore) CountHistoryBatch(_ context.Context, channelID, importID s
 	if s.countErr != nil {
 		return 0, s.countErr
 	}
+	if s.countFailures > 0 {
+		s.countFailures--
+		s.log.add("count failed")
+		return 0, errors.New("registry unreachable")
+	}
 	active, found := s.imports[channelID]
 	if !found || active.ImportID != importID {
 		return 0, registry.ErrNoHistoryImport
@@ -92,11 +101,30 @@ func (s *memoryStore) CountHistoryBatch(_ context.Context, channelID, importID s
 	return active.Batches, nil
 }
 
+func (s *memoryStore) SkipHistoryChats(_ context.Context, channelID, importID string, chats []string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	active, found := s.imports[channelID]
+	if !found || active.ImportID != importID {
+		return 0, registry.ErrNoHistoryImport
+	}
+	if s.skipped[channelID] == nil {
+		s.skipped[channelID] = map[string]bool{}
+	}
+	for _, chat := range chats {
+		s.skipped[channelID][chat] = true
+	}
+	active.SkippedChats = len(s.skipped[channelID])
+	s.imports[channelID] = active
+	return active.SkippedChats, nil
+}
+
 func (s *memoryStore) FinishHistoryImport(_ context.Context, channelID, importID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.imports[channelID].ImportID == importID {
-		delete(s.imports, channelID)
+	if active := s.imports[channelID]; active.ImportID == importID {
+		active.Finished = true
+		s.imports[channelID] = active
 	}
 	s.log.add("finish")
 	return nil
@@ -146,17 +174,21 @@ type chunkSource struct {
 	*fakeSource
 	log          *recorder
 	data         *waHistorySync.HistorySync
+	byPath       map[string]*waHistorySync.HistorySync
 	downloadHold time.Duration
 	downloading  atomic.Int32
 	downloadPeak atomic.Int32
 }
 
-func (s *chunkSource) DownloadHistory(context.Context, *waE2E.HistorySyncNotification) (*waHistorySync.HistorySync, error) {
+func (s *chunkSource) DownloadHistory(_ context.Context, notif *waE2E.HistorySyncNotification) (*waHistorySync.HistorySync, error) {
 	raisePeak(&s.downloadPeak, s.downloading.Add(1))
 	defer s.downloading.Add(-1)
 	s.log.add("download")
 	if s.downloadHold > 0 {
 		time.Sleep(s.downloadHold)
+	}
+	if data, ok := s.byPath[notif.GetDirectPath()]; ok {
+		return data, nil
 	}
 	return s.data, nil
 }
@@ -257,8 +289,8 @@ func TestImportEndsTheImportWithTheRegistryTotalAfterTheFinalChunk(t *testing.T)
 	if len(dones) != 1 || dones[0].TotalBatches != 6 || dones[0].ImportID != "import-1" || dones[0].TenantID != "tenant-1" {
 		t.Fatalf("done must carry the total of the whole import, got %+v", dones)
 	}
-	if _, found, _ := s.store.ActiveHistoryImport(context.Background(), "channel-1"); found {
-		t.Fatal("the import must be finished after the done")
+	if active, found, _ := s.store.ActiveHistoryImport(context.Background(), "channel-1"); !found || !active.Finished {
+		t.Fatalf("the import stays in the registry marked finished after the done, got %+v found %v", active, found)
 	}
 }
 
@@ -277,7 +309,7 @@ func TestImportOfAFinalChunkWithNothingToImportStillEndsTheImport(t *testing.T) 
 	if got := s.log.all(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("steps %v, want %v", got, want)
 	}
-	if _, dones := s.publisher.published(); dones[0].TotalBatches != 3 {
+	if _, dones := s.publisher.published(); dones[0].TotalBatches != 3 || dones[0].SkippedChats != 0 {
 		t.Fatalf("done must carry the batches already published, got %+v", dones)
 	}
 }
@@ -437,5 +469,189 @@ func TestCloseCancelsAChunkThatIsStillWaitingForItsConfirm(t *testing.T) {
 	}
 	if s.log.count("release") != 0 {
 		t.Fatalf("a cancelled chunk is never released, got %v", s.log.all())
+	}
+}
+
+func notificationAt(path string) *waE2E.HistorySyncNotification {
+	return &waE2E.HistorySyncNotification{DirectPath: proto.String(path)}
+}
+
+func TestImportNumbersTheBatchesOfAChunkFromOne(t *testing.T) {
+	limits := testLimits()
+	limits.MaxMessages = 2
+	s := newImporterSetup(t, textChunk(waHistorySync.HistorySync_RECENT, 40, 5), limits)
+	s.store.begin("channel-1", activeImport)
+
+	if err := s.importChunk(t); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+
+	batches, _ := s.publisher.published()
+	var got [][2]int
+	for _, batch := range batches {
+		got = append(got, [2]int{batch.BatchIndex, batch.BatchesInChunk})
+	}
+	if want := [][2]int{{1, 3}, {2, 3}, {3, 3}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the batches of a chunk are numbered 1 to N, got %v want %v", got, want)
+	}
+}
+
+func TestImportOfASmallChunkPublishesTheOnlyBatchAsOneOfOne(t *testing.T) {
+	s := newImporterSetup(t, textChunk(waHistorySync.HistorySync_RECENT, 40, 2), testLimits())
+	s.store.begin("channel-1", activeImport)
+
+	if err := s.importChunk(t); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+
+	batches, _ := s.publisher.published()
+	if len(batches) != 1 || batches[0].BatchIndex != 1 || batches[0].BatchesInChunk != 1 {
+		t.Fatalf("a chunk that fits one batch is batch 1 of 1, got %+v", batches)
+	}
+}
+
+func TestAcceptPublishesTheChunksOfAChannelInArrivalOrder(t *testing.T) {
+	s := newImporterSetup(t, nil, testLimits())
+	s.store.begin("channel-1", activeImport)
+	s.source.byPath = map[string]*waHistorySync.HistorySync{}
+	const chunks = 20
+	for n := range chunks {
+		data := textChunk(waHistorySync.HistorySync_FULL, 10, 1)
+		data.ChunkOrder = proto.Uint32(uint32(n))
+		s.source.byPath[fmt.Sprintf("/chunk/%d", n)] = data
+	}
+
+	for n := range chunks {
+		s.importer.Accept("channel-1", s.source, notificationAt(fmt.Sprintf("/chunk/%d", n)))
+	}
+	s.importer.Close(10 * time.Second)
+
+	batches, _ := s.publisher.published()
+	var order []uint32
+	for _, batch := range batches {
+		order = append(order, batch.ChunkOrder)
+	}
+	want := make([]uint32, chunks)
+	for n := range want {
+		want[n] = uint32(n)
+	}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("the chunks of a channel are published in the order they arrived, got %v", order)
+	}
+}
+
+func TestAcceptStillPublishesAChunkThatArrivesAfterTheFinalOne(t *testing.T) {
+	s := newImporterSetup(t, nil, testLimits())
+	s.store.begin("channel-1", activeImport)
+	final := textChunk(waHistorySync.HistorySync_INITIAL_BOOTSTRAP, 100, 1)
+	late := textChunk(waHistorySync.HistorySync_FULL, 100, 1)
+	late.ChunkOrder = proto.Uint32(7)
+	s.source.byPath = map[string]*waHistorySync.HistorySync{"/final": final, "/late": late}
+
+	s.importer.Accept("channel-1", s.source, notificationAt("/final"))
+	s.importer.Accept("channel-1", s.source, notificationAt("/late"))
+	s.importer.Close(10 * time.Second)
+
+	want := []string{"download", "batch 1/1", "count", "done", "finish", "release", "download", "batch 1/1", "count", "release"}
+	if got := s.log.all(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("steps %v, want %v", got, want)
+	}
+	batches, dones := s.publisher.published()
+	if len(batches) != 2 || batches[1].ChunkOrder != 7 || batches[1].ImportID != "import-1" {
+		t.Fatalf("a chunk after the end is still published to the import, got %+v", batches)
+	}
+	if len(dones) != 1 || dones[0].TotalBatches != 1 {
+		t.Fatalf("the end is published once, with the total known at that moment, got %+v", dones)
+	}
+	if active, _, _ := s.store.ActiveHistoryImport(context.Background(), "channel-1"); active.Batches != 2 {
+		t.Fatalf("the late batch still counts in the registry, got %+v", active)
+	}
+}
+
+func TestImportEndsWithTheChatsSkippedForLackOfAPhone(t *testing.T) {
+	now := time.Now()
+	data := chunkOf(waHistorySync.HistorySync_RECENT, 100,
+		conversation(maria, webMessage(maria, "3EB0P", false, "Maria", now.Add(-time.Hour), text("oi"))),
+		conversation(mariaLid, webMessage(mariaLid, "3EB0L", false, "Maria", now.Add(-time.Hour), text("oi"))),
+		conversation("120363000000000000@g.us", webMessage("120363000000000000@g.us", "3EB0G", false, "Ana", now.Add(-time.Hour), text("grupo"))),
+	)
+	s := newImporterSetup(t, data, testLimits())
+	s.store.begin("channel-1", activeImport)
+	s.store.skipped["channel-1"] = map[string]bool{"999@lid": true}
+
+	if err := s.importChunk(t); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+
+	_, dones := s.publisher.published()
+	if len(dones) != 1 || dones[0].SkippedChats != 2 {
+		t.Fatalf("the end carries every chat skipped for lack of a phone, never the groups, got %+v", dones)
+	}
+}
+
+func TestImportRetriesAFailedCountAndKeepsPublishing(t *testing.T) {
+	limits := testLimits()
+	limits.MaxMessages = 2
+	s := newImporterSetup(t, textChunk(waHistorySync.HistorySync_RECENT, 100, 3), limits)
+	s.store.begin("channel-1", activeImport)
+	s.store.countFailures = 2
+
+	if err := s.importChunk(t); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+
+	want := []string{"download", "batch 1/2", "count failed", "count failed", "count", "batch 2/2", "count", "done", "finish", "release"}
+	if got := s.log.all(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("steps %v, want %v", got, want)
+	}
+	if _, dones := s.publisher.published(); len(dones) != 1 || dones[0].TotalBatches != 2 {
+		t.Fatalf("the end carries the recovered count, got %+v", dones)
+	}
+}
+
+func TestImportPublishesTheRestOfTheChunkAndTheEndWhenTheCountNeverRecovers(t *testing.T) {
+	limits := testLimits()
+	limits.MaxMessages = 2
+	s := newImporterSetup(t, textChunk(waHistorySync.HistorySync_RECENT, 100, 3), limits)
+	s.store.begin("channel-1", activeImport)
+	s.store.countFailures = 1000
+
+	if err := s.importChunk(t); err != nil {
+		t.Fatalf("a registry that never counts must not lose the history, got %v", err)
+	}
+
+	batches, dones := s.publisher.published()
+	if len(batches) != 2 || len(dones) != 1 || s.log.count("release") != 1 {
+		t.Fatalf("every batch and the end are published and the chunk released, got %v", s.log.all())
+	}
+	if dones[0].TotalBatches != 2 {
+		t.Fatalf("the end carries the batches this gateway published, got %+v", dones)
+	}
+}
+
+func TestImportNeverTurnsAMessageLargerThanABatchIntoABatch(t *testing.T) {
+	limits := testLimits()
+	limits.MaxBytes = 4096
+	now := time.Now()
+	data := chunkOf(waHistorySync.HistorySync_RECENT, 100, conversation(maria,
+		webMessage(maria, "3EB0SMALL", false, "Maria", now.Add(-time.Hour), text("oi")),
+		webMessage(maria, "3EB0HUGE", false, "Maria", now.Add(-time.Hour), text(strings.Repeat("a", 8192))),
+	))
+	s := newImporterSetup(t, data, limits)
+	s.store.begin("channel-1", activeImport)
+
+	if err := s.importChunk(t); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+
+	batches, dones := s.publisher.published()
+	if len(batches) != 1 || len(batches[0].Chats) != 1 || len(batches[0].Chats[0].Messages) != 1 {
+		t.Fatalf("only the message that fits a batch is published, got %+v", batches)
+	}
+	if strings.Contains(string(batches[0].Chats[0].Messages[0]), "3EB0HUGE") {
+		t.Fatal("the oversized message must never be published")
+	}
+	if len(dones) != 1 || dones[0].TotalBatches != 1 {
+		t.Fatalf("the oversized message never counts as a batch, got %+v", dones)
 	}
 }
