@@ -631,6 +631,10 @@ func (g *gateway) handleSessionEvent(channelID string, evt any) {
 		g.calls.AbortChannel(g.workCtx, channelID, reason)
 	}
 
+	if g.ignoredByListenGroups(channelID, evt) {
+		return
+	}
+
 	switch e := evt.(type) {
 	case *events.Message:
 		g.handleInboundMessage(channelID, e)

@@ -7,12 +7,16 @@ import (
 	"time"
 
 	rabbitmq "github.com/rabbitmq/amqp091-go"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 
 	gatewayamqp "github.com/w3nder/whatsmeow-gateway/internal/amqp"
 	"github.com/w3nder/whatsmeow-gateway/internal/channelsettings"
 	"github.com/w3nder/whatsmeow-gateway/internal/gateway"
 	"github.com/w3nder/whatsmeow-gateway/internal/logging"
+	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
 	"github.com/w3nder/whatsmeow-gateway/internal/ownership"
 	"github.com/w3nder/whatsmeow-gateway/internal/registry"
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
@@ -162,4 +166,68 @@ func TestGatewayAppliesASettingsCommandAndPersistsItInTheRegistry(t *testing.T) 
 		got, found, err := h.registry.Get(context.Background(), channelID)
 		return err == nil && found && got.Settings == want
 	})
+}
+
+func emitTextMessage(fake *fakeWAClient, chat, sender types.JID, id, body string) {
+	fake.emit(&events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: chat, Sender: sender},
+			ID:            id,
+			Timestamp:     time.Now(),
+		},
+		Message: &waE2E.Message{Conversation: proto.String(body)},
+	})
+}
+
+func TestGatewayDropsGroupEventsForAChannelThatStoredListenGroupsOff(t *testing.T) {
+	const channelID = "channel-mute-groups-1"
+	fake := newFakeWAClient()
+	h := startSettingsGateway(t, channelID, "tenant-mute-groups-1", fake, channelsettings.Settings{ListenGroups: false, ReceiveCalls: true})
+
+	group := types.NewJID("120363000000000001", types.GroupServer)
+	member := types.NewJID("5511777776666", types.DefaultUserServer)
+	emitTextMessage(fake, group, member, "GROUPMSG1", "oi grupo")
+	emitTextMessage(fake, member, member, "PRIVATEMSG1", "oi")
+
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case d := <-h.deliveries:
+			if d.RoutingKey == gatewayamqp.GroupInboundRoutingKey {
+				t.Fatal("a group message was published although the channel does not listen to groups")
+			}
+			if d.RoutingKey != gatewayamqp.InboundRoutingKey {
+				continue
+			}
+			var evt mapper.InboundEvent
+			if err := json.Unmarshal(d.Body, &evt); err != nil {
+				t.Fatalf("failed to unmarshal inbound event: %v", err)
+			}
+			if evt.ProviderMessageID != "PRIVATEMSG1" {
+				t.Fatalf("first published message = %q, want the private one", evt.ProviderMessageID)
+			}
+			return
+		case <-deadline:
+			t.Fatal("timed out waiting for the private message")
+		}
+	}
+}
+
+func TestGatewayKeepsPublishingGroupEventsWhenTheChannelListensToGroups(t *testing.T) {
+	const channelID = "channel-listen-groups-1"
+	fake := newFakeWAClient()
+	h := startSettingsGateway(t, channelID, "tenant-listen-groups-1", fake, channelsettings.Defaults())
+
+	group := types.NewJID("120363000000000002", types.GroupServer)
+	member := types.NewJID("5511777776666", types.DefaultUserServer)
+	emitTextMessage(fake, group, member, "GROUPMSG2", "oi grupo")
+
+	d := waitForDelivery(t, h.deliveries, gatewayamqp.GroupInboundRoutingKey, 10*time.Second)
+	var evt mapper.InboundEvent
+	if err := json.Unmarshal(d.Body, &evt); err != nil {
+		t.Fatalf("failed to unmarshal group inbound event: %v", err)
+	}
+	if evt.ProviderMessageID != "GROUPMSG2" || evt.Group == nil || evt.Group.JID != group.String() {
+		t.Fatalf("unexpected group event: %+v", evt)
+	}
 }
