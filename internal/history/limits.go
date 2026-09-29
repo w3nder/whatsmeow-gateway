@@ -7,11 +7,17 @@ import (
 )
 
 type Limits struct {
-	Window time.Duration
+	Window           time.Duration
+	MediaConcurrency int
+	MediaTimeout     time.Duration
+	MediaBudget      time.Duration
 }
 
 func DefaultLimits() Limits {
 	return Limits{
-		Window: deviceprops.WindowDays * 24 * time.Hour,
+		Window:           deviceprops.WindowDays * 24 * time.Hour,
+		MediaConcurrency: 4,
+		MediaTimeout:     time.Minute,
+		MediaBudget:      10 * time.Minute,
 	}
 }

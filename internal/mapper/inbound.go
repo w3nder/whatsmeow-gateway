@@ -64,14 +64,15 @@ type MessageSecrets interface {
 }
 
 type InboundDeps struct {
-	Downloader Downloader
-	Resolver   PNResolver
-	Media      MediaStore
-	Avatars    AvatarSource
-	Groups     GroupNamer
-	Secrets    MessageSecrets
-	ChannelID  string
-	TenantID   string
+	Downloader           Downloader
+	Resolver             PNResolver
+	Media                MediaStore
+	Avatars              AvatarSource
+	Groups               GroupNamer
+	Secrets              MessageSecrets
+	ChannelID            string
+	TenantID             string
+	TolerateMediaFailure bool
 }
 
 const OriginCallAutoReply = "call_auto_reply"
@@ -428,7 +429,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 
 	case msg.GetImageMessage() != nil:
 		img := msg.GetImageMessage()
-		media, err := downloadAndStore(ctx, dl, s3, tenantID, evt.Info.ID, img.GetMimetype(), img)
+		media, err := storedMedia(ctx, deps, evt.Info.ID, img.GetMimetype(), img)
 		if err != nil {
 			return InboundEvent{}, err
 		}
@@ -439,7 +440,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 
 	case msg.GetVideoMessage() != nil:
 		video := msg.GetVideoMessage()
-		media, err := downloadAndStore(ctx, dl, s3, tenantID, evt.Info.ID, video.GetMimetype(), video)
+		media, err := storedMedia(ctx, deps, evt.Info.ID, video.GetMimetype(), video)
 		if err != nil {
 			return InboundEvent{}, err
 		}
@@ -450,7 +451,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 
 	case msg.GetAudioMessage() != nil:
 		audio := msg.GetAudioMessage()
-		media, err := downloadAndStore(ctx, dl, s3, tenantID, evt.Info.ID, audio.GetMimetype(), audio)
+		media, err := storedMedia(ctx, deps, evt.Info.ID, audio.GetMimetype(), audio)
 		if err != nil {
 			return InboundEvent{}, err
 		}
@@ -464,7 +465,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 
 	case msg.GetDocumentMessage() != nil:
 		doc := msg.GetDocumentMessage()
-		media, err := downloadAndStore(ctx, dl, s3, tenantID, evt.Info.ID, doc.GetMimetype(), doc)
+		media, err := storedMedia(ctx, deps, evt.Info.ID, doc.GetMimetype(), doc)
 		if err != nil {
 			return InboundEvent{}, err
 		}
@@ -503,7 +504,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 
 	case msg.GetStickerMessage() != nil:
 		sticker := msg.GetStickerMessage()
-		media, err := downloadAndStore(ctx, dl, s3, tenantID, evt.Info.ID, sticker.GetMimetype(), sticker)
+		media, err := storedMedia(ctx, deps, evt.Info.ID, sticker.GetMimetype(), sticker)
 		if err != nil {
 			return InboundEvent{}, err
 		}
@@ -513,7 +514,7 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 
 	case msg.GetPtvMessage() != nil:
 		ptv := msg.GetPtvMessage()
-		media, err := downloadAndStore(ctx, dl, s3, tenantID, evt.Info.ID, ptv.GetMimetype(), ptv)
+		media, err := storedMedia(ctx, deps, evt.Info.ID, ptv.GetMimetype(), ptv)
 		if err != nil {
 			return InboundEvent{}, err
 		}
@@ -1343,6 +1344,14 @@ func downloadAndStore(ctx context.Context, dl Downloader, s3 MediaStore, tenantI
 	}
 
 	return &InboundMedia{Key: key, MimeType: mime}, nil
+}
+
+func storedMedia(ctx context.Context, deps InboundDeps, providerMessageID, mime string, msg whatsmeow.DownloadableMessage) (*InboundMedia, error) {
+	media, err := downloadAndStore(ctx, deps.Downloader, deps.Media, deps.TenantID, providerMessageID, mime, msg)
+	if err != nil && deps.TolerateMediaFailure {
+		return &InboundMedia{MimeType: mime}, nil
+	}
+	return media, err
 }
 
 func BuildStatus(evt *events.Receipt) []StatusEvent {

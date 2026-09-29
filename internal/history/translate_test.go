@@ -6,6 +6,7 @@ import (
 	"errors"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,10 +30,23 @@ const (
 )
 
 type fakeSource struct {
-	own      types.JID
-	pns      map[string]types.JID
-	media    []byte
-	mediaErr error
+	own        types.JID
+	pns        map[string]types.JID
+	media      []byte
+	mediaErr   error
+	hold       time.Duration
+	blockMedia bool
+	inFlight   atomic.Int32
+	peak       atomic.Int32
+}
+
+func raisePeak(peak *atomic.Int32, current int32) {
+	for {
+		seen := peak.Load()
+		if current <= seen || peak.CompareAndSwap(seen, current) {
+			return
+		}
+	}
 }
 
 func newFakeSource() *fakeSource {
@@ -62,7 +76,16 @@ func (s *fakeSource) ParseWebMessage(chat types.JID, msg *waWeb.WebMessageInfo) 
 	return evt.UnwrapRaw(), nil
 }
 
-func (s *fakeSource) Download(context.Context, whatsmeow.DownloadableMessage) ([]byte, error) {
+func (s *fakeSource) Download(ctx context.Context, _ whatsmeow.DownloadableMessage) ([]byte, error) {
+	raisePeak(&s.peak, s.inFlight.Add(1))
+	defer s.inFlight.Add(-1)
+	if s.blockMedia {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if s.hold > 0 {
+		time.Sleep(s.hold)
+	}
 	return s.media, s.mediaErr
 }
 

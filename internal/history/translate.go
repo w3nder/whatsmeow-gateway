@@ -3,6 +3,7 @@ package history
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"time"
 
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
@@ -81,7 +82,9 @@ func Translate(ctx context.Context, deps TranslateDeps, data *waHistorySync.Hist
 		}
 	}
 
-	built := buildAll(ctx, deps, candidates)
+	budget, cancel := context.WithTimeout(ctx, limits.MediaBudget)
+	defer cancel()
+	built := buildAll(budget, deps, candidates, limits)
 	messages := make([][]mapper.InboundEvent, len(headers))
 	for n, c := range candidates {
 		if !built[n].ok {
@@ -105,22 +108,38 @@ func Translate(ctx context.Context, deps TranslateDeps, data *waHistorySync.Hist
 	return result, nil
 }
 
-func buildAll(ctx context.Context, deps TranslateDeps, candidates []candidate) []builtMessage {
+func buildAll(ctx context.Context, deps TranslateDeps, candidates []candidate, limits Limits) []builtMessage {
 	built := make([]builtMessage, len(candidates))
-	for n, c := range candidates {
-		built[n].event, built[n].ok = buildOne(ctx, deps, c.evt)
+	next := make(chan int)
+	var workers sync.WaitGroup
+	for range min(limits.MediaConcurrency, len(candidates)) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for n := range next {
+				built[n].event, built[n].ok = buildOne(ctx, deps, candidates[n].evt, limits.MediaTimeout)
+			}
+		}()
 	}
+	for n := range candidates {
+		next <- n
+	}
+	close(next)
+	workers.Wait()
 	return built
 }
 
-func buildOne(ctx context.Context, deps TranslateDeps, evt *events.Message) (mapper.InboundEvent, bool) {
+func buildOne(ctx context.Context, deps TranslateDeps, evt *events.Message, timeout time.Duration) (mapper.InboundEvent, bool) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	out, err := mapper.BuildInbound(ctx, mapper.InboundDeps{
-		Downloader: deps.Source,
-		Resolver:   deps.Source,
-		Media:      deps.Media,
-		Secrets:    deps.Source,
-		ChannelID:  deps.ChannelID,
-		TenantID:   deps.TenantID,
+		Downloader:           deps.Source,
+		Resolver:             deps.Source,
+		Media:                deps.Media,
+		Secrets:              deps.Source,
+		ChannelID:            deps.ChannelID,
+		TenantID:             deps.TenantID,
+		TolerateMediaFailure: true,
 	}, evt)
 	if err != nil || out.ChangesAnotherMessage() {
 		return mapper.InboundEvent{}, false
