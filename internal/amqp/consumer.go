@@ -19,6 +19,8 @@ type CallHandler func(ctx context.Context, cmd GatewayCallCommand) error
 
 type GroupHandler func(ctx context.Context, cmd GatewayGroupCommand) error
 
+type SettingsHandler func(ctx context.Context, cmd SettingsCommand) error
+
 type ConsumerConfig struct {
 	Prefetch         int
 	GroupPrefetch    int
@@ -26,15 +28,17 @@ type ConsumerConfig struct {
 }
 
 type Consumer struct {
-	sendCh  *rabbitmq.Channel
-	pairCh  *rabbitmq.Channel
-	callCh  *rabbitmq.Channel
-	groupCh *rabbitmq.Channel
+	sendCh     *rabbitmq.Channel
+	pairCh     *rabbitmq.Channel
+	callCh     *rabbitmq.Channel
+	groupCh    *rabbitmq.Channel
+	settingsCh *rabbitmq.Channel
 
-	sendStarted  bool
-	pairStarted  bool
-	callStarted  bool
-	groupStarted bool
+	sendStarted     bool
+	pairStarted     bool
+	callStarted     bool
+	groupStarted    bool
+	settingsStarted bool
 
 	groupPrefetch    int
 	groupLaneBacklog int
@@ -137,11 +141,37 @@ func NewConsumer(conn *rabbitmq.Connection, cfg ConsumerConfig) (*Consumer, erro
 		return nil, fmt.Errorf("amqp: enable confirms on gateway.group channel: %w", err)
 	}
 
+	settingsCh, err := conn.Channel()
+	if err != nil {
+		_ = sendCh.Close()
+		_ = pairCh.Close()
+		_ = callCh.Close()
+		_ = groupCh.Close()
+		return nil, fmt.Errorf("amqp: open gateway.settings channel: %w", err)
+	}
+	if err := declareCommandTopology(settingsCh, GatewaySettingsExchange, GatewaySettingsQueue, GatewaySettingsDLX, GatewaySettingsDLQ); err != nil {
+		_ = sendCh.Close()
+		_ = pairCh.Close()
+		_ = callCh.Close()
+		_ = groupCh.Close()
+		_ = settingsCh.Close()
+		return nil, err
+	}
+	if err := settingsCh.Qos(cfg.Prefetch, 0, false); err != nil {
+		_ = sendCh.Close()
+		_ = pairCh.Close()
+		_ = callCh.Close()
+		_ = groupCh.Close()
+		_ = settingsCh.Close()
+		return nil, fmt.Errorf("amqp: set qos on gateway.settings channel: %w", err)
+	}
+
 	return &Consumer{
 		sendCh:           sendCh,
 		pairCh:           pairCh,
 		callCh:           callCh,
 		groupCh:          groupCh,
+		settingsCh:       settingsCh,
 		groupPrefetch:    orDefault(cfg.GroupPrefetch, DefaultGroupPrefetch),
 		groupLaneBacklog: orDefault(cfg.GroupLaneBacklog, DefaultGroupLaneBacklog),
 		failed:           make(chan error, 1),
@@ -178,6 +208,23 @@ func (c *Consumer) StartGroup(ctx context.Context, handler GroupHandler) error {
 			return laneJob{}, err
 		}
 		return laneJob{channelID: cmd.ChannelID, handle: func() error { return handler(ctx, cmd) }}, nil
+	})
+	return nil
+}
+
+func (c *Consumer) StartSettings(ctx context.Context, handler SettingsHandler) error {
+	deliveries, err := c.settingsCh.Consume(GatewaySettingsQueue, GatewaySettingsConsumer, false, false, false, false, nil)
+	if err != nil {
+		return fmt.Errorf("amqp: consume %s: %w", GatewaySettingsQueue, err)
+	}
+	c.settingsStarted = true
+	c.wg.Add(1)
+	go c.consumeSerially(GatewaySettingsQueue, deliveries, func(d rabbitmq.Delivery) error {
+		var cmd SettingsCommand
+		if err := json.Unmarshal(d.Body, &cmd); err != nil {
+			return err
+		}
+		return handler(ctx, cmd)
 	})
 	return nil
 }
@@ -292,6 +339,11 @@ func (c *Consumer) Close() error {
 			errs = append(errs, fmt.Errorf("amqp: cancel %s consumer: %w", GatewayGroupQueue, err))
 		}
 	}
+	if c.settingsStarted {
+		if err := c.settingsCh.Cancel(GatewaySettingsConsumer, false); err != nil {
+			errs = append(errs, fmt.Errorf("amqp: cancel %s consumer: %w", GatewaySettingsQueue, err))
+		}
+	}
 	c.wg.Wait()
 	if err := c.sendCh.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("amqp: close gateway.send channel: %w", err))
@@ -304,6 +356,9 @@ func (c *Consumer) Close() error {
 	}
 	if err := c.groupCh.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("amqp: close gateway.group channel: %w", err))
+	}
+	if err := c.settingsCh.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("amqp: close gateway.settings channel: %w", err))
 	}
 	return errors.Join(errs...)
 }
