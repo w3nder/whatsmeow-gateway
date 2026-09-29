@@ -12,6 +12,8 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+
+	"github.com/w3nder/whatsmeow-gateway/internal/deviceprops"
 )
 
 var ErrNoSession = errors.New("session: channel has no live session")
@@ -68,7 +70,7 @@ func (m *Manager) OnEvent(handler func(channelID string, evt any)) {
 	m.handlers = append(m.handlers[:len(m.handlers):len(m.handlers)], handler)
 }
 
-func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate, error) {
+func (m *Manager) Pair(ctx context.Context, channelID string, importHistory bool) (<-chan PairUpdate, error) {
 	client, err := m.client(channelID)
 	if err != nil {
 		return nil, err
@@ -94,14 +96,21 @@ func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate
 		m.endPairing(channelID, p, client)
 		return nil, fmt.Errorf("session: open qr channel for %s: %w", channelID, err)
 	}
+	release, err := deviceprops.Acquire(ctx, importHistory)
+	if err != nil {
+		m.endPairing(channelID, p, client)
+		return nil, fmt.Errorf("session: wait for the pairing slot for %s: %w", channelID, err)
+	}
 	if err := client.Connect(); err != nil {
 		m.endPairing(channelID, p, client)
+		release()
 		return nil, fmt.Errorf("session: connect for pairing %s: %w", channelID, err)
 	}
 
 	updates := make(chan PairUpdate)
 	go func() {
 		defer close(updates)
+		defer release()
 		defer m.endPairing(channelID, p, client)
 
 		for {

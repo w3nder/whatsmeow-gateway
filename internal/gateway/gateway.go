@@ -374,7 +374,7 @@ func (g *gateway) drainWithin(name string, timeout time.Duration, closeFn func()
 func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand, accept func()) error {
 	g.setTenant(cmd.ChannelID, cmd.TenantID)
 
-	updates, err := g.manager.Pair(ctx, cmd.ChannelID)
+	updates, err := g.manager.Pair(ctx, cmd.ChannelID, cmd.ImportsHistory())
 	if err != nil {
 		g.publishChannelError(ctx, cmd.TenantID, cmd.UserID, cmd.ChannelID, err)
 		return fmt.Errorf("gateway: pair channel %s: %w", cmd.ChannelID, err)

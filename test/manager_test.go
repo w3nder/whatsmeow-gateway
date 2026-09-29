@@ -7,9 +7,11 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 
+	"github.com/w3nder/whatsmeow-gateway/internal/deviceprops"
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
 )
 
@@ -24,7 +26,7 @@ func TestManagerPairEmitsQRThenSuccess(t *testing.T) {
 		return fake, nil
 	})
 
-	updates, err := mgr.Pair(context.Background(), "channel-1")
+	updates, err := mgr.Pair(context.Background(), "channel-1", false)
 	if err != nil {
 		t.Fatalf("Pair failed: %v", err)
 	}
@@ -299,7 +301,7 @@ func TestManagerPairGoroutineStopsOnContextCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	updates, err := mgr.Pair(ctx, "channel-5")
+	updates, err := mgr.Pair(ctx, "channel-5", false)
 	if err != nil {
 		t.Fatalf("Pair failed: %v", err)
 	}
@@ -321,5 +323,131 @@ func TestManagerPairGoroutineStopsOnContextCancel(t *testing.T) {
 		case <-deadline:
 			t.Fatal("Pair goroutine did not stop after context cancellation (leak)")
 		}
+	}
+}
+
+func managerFor(clients map[string]*fakeWAClient) *session.Manager {
+	return session.NewManager(func(channelID string, _ *types.JID) (session.WAClient, error) {
+		return clients[channelID], nil
+	})
+}
+
+func drainPairing(t *testing.T, mgr *session.Manager, channelID string, importHistory bool) {
+	t.Helper()
+	updates, err := mgr.Pair(context.Background(), channelID, importHistory)
+	if err != nil {
+		t.Fatalf("Pair failed: %v", err)
+	}
+	for range updates {
+	}
+}
+
+func TestManagerPairWithHistoryConnectsWithTheHistoryPropsAndRestoresThemOnSuccess(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.qrItems = []whatsmeow.QRChannelItem{{Event: "code", Code: "qr-history-ok"}, whatsmeow.QRChannelSuccess}
+	defaults := wastore.DeviceProps
+
+	drainPairing(t, managerFor(map[string]*fakeWAClient{"channel-history-ok": fake}), "channel-history-ok", true)
+
+	props := fake.connectProps()
+	if props == defaults || props.GetPlatformType() != deviceprops.HistoryPlatform || props.GetHistorySyncConfig().GetFullSyncDaysLimit() != deviceprops.WindowDays {
+		t.Fatalf("the pairing connect must carry the history props, got %v", props)
+	}
+	if wastore.DeviceProps != defaults {
+		t.Fatal("the props must be restored once the pairing succeeds")
+	}
+}
+
+func TestManagerPairWithHistoryRestoresThePropsWhenTheQRTimesOut(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.qrItems = []whatsmeow.QRChannelItem{{Event: "code", Code: "qr-history-timeout"}, whatsmeow.QRChannelTimeout}
+	defaults := wastore.DeviceProps
+
+	drainPairing(t, managerFor(map[string]*fakeWAClient{"channel-history-timeout": fake}), "channel-history-timeout", true)
+
+	if wastore.DeviceProps != defaults {
+		t.Fatal("the props must be restored once the QR times out")
+	}
+}
+
+func TestManagerPairWithHistoryRestoresThePropsWhenThePairingFails(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.qrItems = []whatsmeow.QRChannelItem{{Event: "code", Code: "qr-history-err"}, {Event: "err-client-outdated"}}
+	defaults := wastore.DeviceProps
+
+	drainPairing(t, managerFor(map[string]*fakeWAClient{"channel-history-err": fake}), "channel-history-err", true)
+
+	if wastore.DeviceProps != defaults {
+		t.Fatal("the props must be restored once the pairing fails")
+	}
+}
+
+func TestManagerPairWithHistoryRestoresThePropsWhenTheConnectFails(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.connectErr = errors.New("dial refused")
+	defaults := wastore.DeviceProps
+
+	if _, err := managerFor(map[string]*fakeWAClient{"channel-history-dial": fake}).Pair(context.Background(), "channel-history-dial", true); err == nil {
+		t.Fatal("a failed connect must fail the pairing")
+	}
+	if wastore.DeviceProps != defaults {
+		t.Fatal("the props must be restored when the pairing connect fails")
+	}
+}
+
+func TestManagerPairWithoutHistoryConnectsWithTodaysProps(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.qrItems = []whatsmeow.QRChannelItem{{Event: "code", Code: "qr-default-props"}, whatsmeow.QRChannelSuccess}
+	defaults := wastore.DeviceProps
+
+	drainPairing(t, managerFor(map[string]*fakeWAClient{"channel-default-props": fake}), "channel-default-props", false)
+
+	if fake.connectProps() != defaults {
+		t.Fatal("an opted-out pairing must connect with today's props")
+	}
+}
+
+func TestManagerPairOfAnotherChannelWaitsForAHistoryPairingToFinish(t *testing.T) {
+	importing := newFakeWAClient()
+	importing.qrFeed = make(chan whatsmeow.QRChannelItem)
+	waiting := newFakeWAClient()
+	waiting.qrItems = []whatsmeow.QRChannelItem{{Event: "code", Code: "qr-waiting"}, whatsmeow.QRChannelSuccess}
+	defaults := wastore.DeviceProps
+	mgr := managerFor(map[string]*fakeWAClient{"channel-importing": importing, "channel-waiting": waiting})
+
+	first, err := mgr.Pair(context.Background(), "channel-importing", true)
+	if err != nil {
+		t.Fatalf("Pair(importing) failed: %v", err)
+	}
+	go func() {
+		for range first {
+		}
+	}()
+	secondDone := make(chan error, 1)
+	go func() {
+		updates, err := mgr.Pair(context.Background(), "channel-waiting", false)
+		if err == nil {
+			for range updates {
+			}
+		}
+		secondDone <- err
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	if waiting.connectCallCount() != 0 {
+		t.Fatal("no other pairing may connect while a history pairing is still showing its QR")
+	}
+
+	close(importing.qrFeed)
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("Pair(waiting) failed: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the waiting pairing must run once the history pairing ends")
+	}
+	if waiting.connectProps() != defaults {
+		t.Fatal("the pairing after a history pairing must connect with today's props")
 	}
 }

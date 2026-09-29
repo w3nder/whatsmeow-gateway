@@ -10,7 +10,9 @@ import (
 	"go.mau.fi/whatsmeow"
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waCommon"
+	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -37,6 +39,7 @@ type fakeWAClient struct {
 	qrChannelCalls    int
 	waitCalls         int
 	handlersAtConnect int
+	propsAtConnect    *waCompanionReg.DeviceProps
 
 	sendResp  whatsmeow.SendResponse
 	sendErr   error
@@ -122,6 +125,7 @@ func (f *fakeWAClient) Connect() error {
 	f.mu.Lock()
 	f.connectCalls++
 	f.handlersAtConnect = len(f.handlers)
+	f.propsAtConnect = wastore.DeviceProps
 	err := f.connectErr
 	if err == nil && !f.staysDown {
 		f.connected = true
@@ -486,4 +490,10 @@ func (f *fakeWAClient) emit(evt any) {
 	for _, h := range handlers {
 		h(evt)
 	}
+}
+
+func (f *fakeWAClient) connectProps() *waCompanionReg.DeviceProps {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.propsAtConnect
 }
