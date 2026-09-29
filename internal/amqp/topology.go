@@ -45,6 +45,12 @@ const (
 	GatewayGroupDLX      = "gateway.group.dlx"
 	GatewayGroupDLQ      = "gateway.group.dlq"
 	GatewayGroupConsumer = "whatsmeow-gateway.group"
+
+	GatewaySettingsExchange = "whatsapp.gateway.settings"
+	GatewaySettingsQueue    = "gateway.settings"
+	GatewaySettingsDLX      = "gateway.settings.dlx"
+	GatewaySettingsDLQ      = "gateway.settings.dlq"
+	GatewaySettingsConsumer = "whatsmeow-gateway.settings"
 )
 
 const RpcQueuePrefix = "rpc.gateway."
