@@ -353,3 +353,59 @@ limite da fila) não entra na gravação, porque nunca foi ouvido.
   socket. Com mais de uma instância ativa, um comando pode cair na instância errada e
   falhar com `call_not_found`. Hoje não acontece porque cada instância reivindica todos os
   shards. Roteamento por shard fica para quando houver escala horizontal.
+
+## Recusa automática (canal que não recebe chamadas)
+
+Quando as opções do canal (ver [`settings-contract.md`](./settings-contract.md)) têm
+`receiveCalls: false`, o gateway trata a chamada recebida no próprio `OnIncomingCall`:
+
+1. chama `Reject()` na chamada (síncrono: envia o nó de recusa ao WhatsApp e devolve o erro);
+2. **não rastreia** a chamada nem a oferece ao operador: não há `call.Event` de ciclo de
+   vida (`incoming`, `ended`) para ela em `whatsapp.call.v1`, e ela não aparece em
+   `Manager.Get`;
+3. publica o evento de mensagem de chamada (`InboundCallEvent`, `type: "call"`) com
+   `richContent.state = "auto_rejected"`, pelo mesmo caminho do `ringing` de hoje
+   (`sender.events`, chave `whatsapp.inbound.v1`).
+
+```json
+{
+  "phoneNumberId": "channel-1",
+  "tenantId": "tenant-1",
+  "channelId": "channel-1",
+  "from": "5511888887777",
+  "senderPn": "5511888887777",
+  "providerMessageId": "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4",
+  "timestamp": "1754300000",
+  "type": "call",
+  "richContent": { "kind": "call", "direction": "inbound", "state": "auto_rejected" }
+}
+```
+
+Os estados de `richContent.state` são `ringing` (chamada oferecida ao operador) e
+`auto_rejected` (recusada pelo gateway). `providerMessageId` é o id da chamada, então o
+consumo é idempotente por ele.
+
+### Mensagem ao recusar
+
+Se `callRejectMessage` não for vazio **e** a chamada for 1 a 1, o gateway envia o texto ao
+número que ligou (telefone quando conhecido, LID quando não) e publica esse envio como
+mensagem de saída, pelo mesmo caminho das mensagens recebidas (`whatsapp.inbound.v1`):
+
+```json
+{"phoneNumberId":"channel-1","from":"5511888887777","senderPn":"5511888887777","fromMe":true,"providerMessageId":"3EB0AUTOREPLY","timestamp":"1754300000","type":"text","text":{"body":"Não atendemos ligações, escreva aqui."},"origin":"call_auto_reply"}
+```
+
+`origin` é um campo opcional, ausente nas mensagens comuns; `call_auto_reply` marca a
+mensagem automática da recusa. `providerMessageId` é o id devolvido pelo envio.
+
+Regras:
+
+- **Chamada de grupo** é recusada e publicada como `auto_rejected`, mas nunca recebe mensagem.
+- **No máximo uma mensagem por canal e por número a cada 10 minutos** (`CallRejectMessageCooldown`),
+  controlado em memória no gateway (o canal tem um único dono). As chamadas seguintes dentro
+  da janela continuam recusadas e publicadas, sem mensagem. Um reinício do gateway pode
+  repetir uma mensagem uma vez; isso é aceito.
+- **Se `Reject()` falhar**, o gateway registra o erro, não envia mensagem e não publica
+  `auto_rejected`: a chamada segue o fluxo normal para o operador.
+- **Se o envio da mensagem falhar**, nada é publicado como mensagem de saída (não entra no
+  histórico o que não foi enviado); a recusa já publicada continua valendo.
