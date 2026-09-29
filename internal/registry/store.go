@@ -24,13 +24,23 @@ const addSettingsColumnsSQL = `ALTER TABLE gateway_channel_sessions
 	ADD COLUMN IF NOT EXISTS call_reject_message text,
 	ADD COLUMN IF NOT EXISTS settings_version bigint NOT NULL DEFAULT 0`
 
-const sessionColumns = `channel_id, jid, tenant_id, listen_groups, receive_calls, call_reject_message, settings_version`
+const createHistoryImportsTableSQL = `CREATE TABLE IF NOT EXISTS gateway_history_imports (
+	channel_id text PRIMARY KEY,
+	tenant_id text NOT NULL,
+	import_id text NOT NULL,
+	batches integer NOT NULL DEFAULT 0,
+	started_at timestamptz NOT NULL DEFAULT now()
+)`
+
+const sessionColumns = `channel_id, jid, tenant_id, listen_groups, receive_calls, call_reject_message, settings_version,
+	EXISTS (SELECT 1 FROM gateway_history_imports h WHERE h.channel_id = gateway_channel_sessions.channel_id)`
 
 type ChannelSession struct {
-	ChannelID string
-	JID       string
-	TenantID  string
-	Settings  channelsettings.Settings
+	ChannelID        string
+	JID              string
+	TenantID         string
+	Settings         channelsettings.Settings
+	ImportingHistory bool
 }
 
 type rowScanner interface {
@@ -40,7 +50,7 @@ type rowScanner interface {
 func scanSession(row rowScanner) (ChannelSession, error) {
 	var cs ChannelSession
 	var message *string
-	if err := row.Scan(&cs.ChannelID, &cs.JID, &cs.TenantID, &cs.Settings.ListenGroups, &cs.Settings.ReceiveCalls, &message, &cs.Settings.Version); err != nil {
+	if err := row.Scan(&cs.ChannelID, &cs.JID, &cs.TenantID, &cs.Settings.ListenGroups, &cs.Settings.ReceiveCalls, &message, &cs.Settings.Version, &cs.ImportingHistory); err != nil {
 		return ChannelSession{}, err
 	}
 	if message != nil {
@@ -67,6 +77,11 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 	if _, err := pool.Exec(ctx, addSettingsColumnsSQL); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("registry: add settings columns to gateway_channel_sessions: %w", err)
+	}
+
+	if _, err := pool.Exec(ctx, createHistoryImportsTableSQL); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("registry: create gateway_history_imports table: %w", err)
 	}
 
 	return &Store{pool: pool}, nil
@@ -137,7 +152,11 @@ func (s *Store) Get(ctx context.Context, channelID string) (ChannelSession, bool
 }
 
 func (s *Store) Delete(ctx context.Context, channelID string) error {
-	if _, err := s.pool.Exec(ctx, `DELETE FROM gateway_channel_sessions WHERE channel_id = $1`, channelID); err != nil {
+	if _, err := s.pool.Exec(ctx,
+		`WITH ended AS (DELETE FROM gateway_history_imports WHERE channel_id = $1)
+		 DELETE FROM gateway_channel_sessions WHERE channel_id = $1`,
+		channelID,
+	); err != nil {
 		return fmt.Errorf("registry: delete %s: %w", channelID, err)
 	}
 	return nil
