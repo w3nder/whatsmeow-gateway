@@ -50,7 +50,10 @@ type Importer struct {
 	running sync.WaitGroup
 }
 
-func NewImporter(ctx context.Context, store Store, publisher Publisher, media mapper.MediaStore, limits Limits, logger *slog.Logger) *Importer {
+func NewImporter(ctx context.Context, store Store, publisher Publisher, media mapper.MediaStore, limits Limits, logger *slog.Logger) (*Importer, error) {
+	if err := limits.validate(); err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	return &Importer{
 		store:     store,
@@ -62,7 +65,7 @@ func NewImporter(ctx context.Context, store Store, publisher Publisher, media ma
 		cancel:    cancel,
 		chunks:    make(chan struct{}, limits.Chunks),
 		lanes:     make(map[string]*sync.Mutex),
-	}
+	}, nil
 }
 
 func (i *Importer) Accept(channelID string, source Source, notif *waE2E.HistorySyncNotification) {

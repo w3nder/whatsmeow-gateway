@@ -49,6 +49,9 @@ type builtMessage struct {
 }
 
 func Translate(ctx context.Context, deps TranslateDeps, data *waHistorySync.HistorySync, limits Limits, now time.Time) (Translation, error) {
+	if err := limits.validate(); err != nil {
+		return Translation{}, err
+	}
 	var result Translation
 	oldest := now.Add(-limits.Window)
 	var headers []amqp.HistoryChat

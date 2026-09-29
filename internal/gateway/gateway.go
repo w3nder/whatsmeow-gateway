@@ -104,7 +104,11 @@ func Run(ctx context.Context, deps Deps) error {
 		workCtx:              context.WithoutCancel(ctx),
 		tenantByChannel:      make(map[string]string),
 	}
-	g.importer = history.NewImporter(g.workCtx, deps.Registry, deps.Publisher, deps.MediaStore, history.DefaultLimits(), deps.Logger)
+	importer, err := history.NewImporter(g.workCtx, deps.Registry, deps.Publisher, deps.MediaStore, history.DefaultLimits(), deps.Logger)
+	if err != nil {
+		return fmt.Errorf("gateway: history importer: %w", err)
+	}
+	g.importer = importer
 
 	recordingStore, ok := deps.MediaStore.(call.RecordingStore)
 	if !ok {

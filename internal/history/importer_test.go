@@ -201,7 +201,11 @@ func newImporterSetup(t *testing.T, data *waHistorySync.HistorySync, limits hist
 		publisher: &memoryPublisher{log: log},
 		source:    &chunkSource{fakeSource: newFakeSource(), log: log, data: data},
 	}
-	setup.importer = history.NewImporter(context.Background(), setup.store, setup.publisher, &memoryMedia{}, limits, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	importer, err := history.NewImporter(context.Background(), setup.store, setup.publisher, &memoryMedia{}, limits, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewImporter: %v", err)
+	}
+	setup.importer = importer
 	t.Cleanup(func() { setup.importer.Close(time.Second) })
 	return setup
 }
