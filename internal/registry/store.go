@@ -32,8 +32,13 @@ const createHistoryImportsTableSQL = `CREATE TABLE IF NOT EXISTS gateway_history
 	started_at timestamptz NOT NULL DEFAULT now()
 )`
 
-const sessionColumns = `channel_id, jid, tenant_id, listen_groups, receive_calls, call_reject_message, settings_version,
-	EXISTS (SELECT 1 FROM gateway_history_imports h WHERE h.channel_id = gateway_channel_sessions.channel_id)`
+const addHistoryImportColumnsSQL = `ALTER TABLE gateway_history_imports
+	ADD COLUMN IF NOT EXISTS skipped_chats text[] NOT NULL DEFAULT '{}',
+	ADD COLUMN IF NOT EXISTS finished_at timestamptz,
+	ADD COLUMN IF NOT EXISTS touched_at timestamptz NOT NULL DEFAULT now()`
+
+var sessionColumns = `channel_id, jid, tenant_id, listen_groups, receive_calls, call_reject_message, settings_version,
+	EXISTS (SELECT 1 FROM gateway_history_imports h WHERE h.channel_id = gateway_channel_sessions.channel_id AND ` + liveHistoryImport + `)`
 
 type ChannelSession struct {
 	ChannelID        string
@@ -82,6 +87,11 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 	if _, err := pool.Exec(ctx, createHistoryImportsTableSQL); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("registry: create gateway_history_imports table: %w", err)
+	}
+
+	if _, err := pool.Exec(ctx, addHistoryImportColumnsSQL); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("registry: add columns to gateway_history_imports: %w", err)
 	}
 
 	return &Store{pool: pool}, nil
