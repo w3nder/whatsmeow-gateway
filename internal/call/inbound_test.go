@@ -55,3 +55,23 @@ func TestInboundCallEventUsesTheCallIDAsProviderMessageID(t *testing.T) {
 		t.Errorf("providerMessageId = %q, want CALL1", inbound[0].ProviderMessageID)
 	}
 }
+
+func TestInboundCallEventWithStateKeepsTheOriginalUntouched(t *testing.T) {
+	ringing := call.NewInboundCallEvent(call.Identity{PhoneNumberID: "chan-a", TenantID: "t1"},
+		"chan-a", "CALL1", "", "5511888888888", call.DirectionInbound, false, true, "1754300000", nil)
+
+	rejected := ringing.WithState(call.InboundStateAutoRejected)
+
+	if rejected.RichContent.State != "auto_rejected" {
+		t.Errorf("state = %q, want auto_rejected", rejected.RichContent.State)
+	}
+	if ringing.RichContent.State != "ringing" {
+		t.Errorf("the original must stay ringing, got %q", ringing.RichContent.State)
+	}
+	if rejected.RichContent.Kind != "call" || rejected.RichContent.Direction != "inbound" || !rejected.RichContent.IsVideo {
+		t.Errorf("the other rich fields must be kept, got %+v", rejected.RichContent)
+	}
+	if rejected.ProviderMessageID != "CALL1" || rejected.From != "5511888888888" {
+		t.Errorf("identity fields must be kept, got %+v", rejected)
+	}
+}

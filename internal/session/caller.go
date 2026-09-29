@@ -91,6 +91,11 @@ func (c *liveCallAdapter) ID() string    { return c.call.ID() }
 func (c *liveCallAdapter) Peer() string  { return jidString(c.call.Peer()) }
 func (c *liveCallAdapter) IsVideo() bool { return c.call.IsVideo() }
 
+func (c *liveCallAdapter) IsGroup() bool {
+	_, isGroup := c.call.GroupState()
+	return isGroup
+}
+
 func (c *liveCallAdapter) Answer() error { return c.call.Answer() }
 func (c *liveCallAdapter) Reject() error { return c.call.Reject() }
 func (c *liveCallAdapter) Hangup() error { return c.call.Hangup() }

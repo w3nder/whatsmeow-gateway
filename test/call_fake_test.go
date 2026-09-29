@@ -125,6 +125,7 @@ func (f *fakeLiveCall) feedAudio(frame []float32) {
 func (f *fakeLiveCall) ID() string    { return f.callID }
 func (f *fakeLiveCall) Peer() string  { return f.peer }
 func (f *fakeLiveCall) IsVideo() bool { return f.video }
+func (f *fakeLiveCall) IsGroup() bool { return false }
 
 func (f *fakeLiveCall) Answer() error                         { return f.record("answer") }
 func (f *fakeLiveCall) Reject() error                         { return f.record("reject") }

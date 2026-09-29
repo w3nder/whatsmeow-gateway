@@ -25,9 +25,10 @@ type Identity struct {
 }
 
 type Options struct {
-	TmpDir string
-	Record bool
-	Now    func() time.Time
+	TmpDir   string
+	Record   bool
+	Now      func() time.Time
+	Settings SettingsSource
 }
 
 type Manager struct {
@@ -73,6 +74,9 @@ func (m *Manager) Attach(channelID string, caller Caller) {
 	}
 
 	caller.OnIncomingCall(func(lc LiveCall) {
+		if m.autoReject(channelID, lc) {
+			return
+		}
 		t := m.Track(channelID, lc, DirectionInbound, m.opts.Record)
 		m.publishInbound(t)
 		m.publish(m.event(t, EventIncoming))
@@ -366,25 +370,28 @@ func (m *Manager) event(t *Tracked, eventType string) Event {
 }
 
 func (m *Manager) publishInbound(t *Tracked) {
-	defer func() {
-		if r := recover(); r != nil {
-			m.log.Error("call: panic while publishing inbound call event",
-				"channel_id", t.ChannelID, "call_id", t.CallID, "panic", r)
-		}
-	}()
-
 	id := m.identity(t.ChannelID)
 	fromMe := t.Direction == DirectionOutbound
 	evt := NewInboundCallEvent(id, t.ChannelID, t.CallID, t.SenderLid, t.SenderPn, t.Direction, fromMe, t.IsVideo,
 		strconv.FormatInt(m.opts.Now().Unix(), 10), t.ProfilePicture)
+	m.publishInboundEvent(evt)
+}
+
+func (m *Manager) publishInboundEvent(evt InboundCallEvent) {
+	defer func() {
+		if r := recover(); r != nil {
+			m.log.Error("call: panic while publishing inbound call event",
+				"channel_id", evt.ChannelID, "call_id", evt.ProviderMessageID, "panic", r)
+		}
+	}()
 
 	if err := m.pub.PublishInbound(context.Background(), evt); err != nil {
 		m.log.Error("call: publish inbound call event",
-			"channel_id", t.ChannelID, "call_id", t.CallID, "error", err)
+			"channel_id", evt.ChannelID, "call_id", evt.ProviderMessageID, "error", err)
 		return
 	}
 
-	m.log.Info("call: inbound call event published", "channel_id", t.ChannelID, "call_id", t.CallID)
+	m.log.Info("call: inbound call event published", "channel_id", evt.ChannelID, "call_id", evt.ProviderMessageID)
 }
 
 func (m *Manager) publish(evt Event) {

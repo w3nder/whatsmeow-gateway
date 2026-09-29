@@ -108,13 +108,16 @@ func Run(ctx context.Context, deps Deps) error {
 		return fmt.Errorf("gateway: media store does not support streaming uploads, which call recording requires")
 	}
 
+	callOptions := deps.CallOptions
+	callOptions.Settings = g.settings
+
 	g.calls = call.NewManager(
 		callPublisher{deps.Publisher},
 		recordingStore,
 		g.callIdentity,
 		g.callSenderResolver,
 		g.callAvatars,
-		deps.CallOptions,
+		callOptions,
 		deps.Logger,
 	)
 

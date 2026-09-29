@@ -14,6 +14,9 @@ type fakeCall struct {
 	id    string
 	peer  string
 	video bool
+	group bool
+
+	rejectErr error
 
 	mu       sync.Mutex
 	actions  []string
@@ -83,9 +86,15 @@ func (f *fakeCall) playedSrc() io.ReadCloser {
 func (f *fakeCall) ID() string    { return f.id }
 func (f *fakeCall) Peer() string  { return f.peer }
 func (f *fakeCall) IsVideo() bool { return f.video }
+func (f *fakeCall) IsGroup() bool { return f.group }
 
-func (f *fakeCall) Answer() error                  { return f.record("answer") }
-func (f *fakeCall) Reject() error                  { return f.record("reject") }
+func (f *fakeCall) Answer() error { return f.record("answer") }
+func (f *fakeCall) Reject() error {
+	if err := f.record("reject"); err != nil {
+		return err
+	}
+	return f.rejectErr
+}
 func (f *fakeCall) Hangup() error                  { return f.record("hangup") }
 func (f *fakeCall) StartVideo() error              { return f.record("video.start") }
 func (f *fakeCall) AcceptVideo() error             { return f.record("video.accept") }
