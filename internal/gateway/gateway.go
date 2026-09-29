@@ -24,6 +24,7 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/channelsettings"
 	"github.com/w3nder/whatsmeow-gateway/internal/dedupe"
 	"github.com/w3nder/whatsmeow-gateway/internal/groupinfo"
+	"github.com/w3nder/whatsmeow-gateway/internal/history"
 	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
 	"github.com/w3nder/whatsmeow-gateway/internal/ownership"
 	"github.com/w3nder/whatsmeow-gateway/internal/registry"
@@ -65,6 +66,7 @@ type gateway struct {
 	pacer                *channelPacer
 	calls                *call.Manager
 	settings             *channelsettings.Map
+	importer             *history.Importer
 	instanceID           string
 	shardLockTTL         time.Duration
 	sendTimeout          time.Duration
@@ -102,6 +104,7 @@ func Run(ctx context.Context, deps Deps) error {
 		workCtx:              context.WithoutCancel(ctx),
 		tenantByChannel:      make(map[string]string),
 	}
+	g.importer = history.NewImporter(g.workCtx, deps.Registry, deps.Publisher, deps.MediaStore, history.DefaultLimits(), deps.Logger)
 
 	recordingStore, ok := deps.MediaStore.(call.RecordingStore)
 	if !ok {
@@ -286,6 +289,7 @@ func (g *gateway) run(ctx context.Context) error {
 	g.stopping.Store(true)
 	cancelGroups()
 	g.drainConsumers()
+	g.importer.Close(g.shutdownDrainTimeout)
 
 	g.calls.AbortAll(g.workCtx, "gateway_shutdown")
 	g.calls.WaitForRecordings(g.shutdownDrainTimeout)
@@ -326,7 +330,7 @@ func (g *gateway) resumeOwnedSessions(ctx context.Context) {
 		g.setTenant(cs.ChannelID, cs.TenantID)
 		g.settings.Set(cs.ChannelID, cs.Settings)
 
-		if err := g.manager.Resume(ctx, cs.ChannelID, jid); err != nil {
+		if err := g.manager.Resume(ctx, cs.ChannelID, jid, cs.ImportingHistory); err != nil {
 			g.logger.Error("gateway: resume session", "channel_id", cs.ChannelID, "error", err)
 			continue
 		}
@@ -374,6 +378,13 @@ func (g *gateway) drainWithin(name string, timeout time.Duration, closeFn func()
 func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand, accept func()) error {
 	g.setTenant(cmd.ChannelID, cmd.TenantID)
 
+	if cmd.ImportsHistory() {
+		if err := g.registry.BeginHistoryImport(ctx, cmd.ChannelID, cmd.TenantID, cmd.ImportID); err != nil {
+			g.publishChannelError(ctx, cmd.TenantID, cmd.UserID, cmd.ChannelID, err)
+			return fmt.Errorf("gateway: begin history import %s: %w", cmd.ChannelID, err)
+		}
+	}
+
 	updates, err := g.manager.Pair(ctx, cmd.ChannelID, cmd.ImportsHistory())
 	if err != nil {
 		g.publishChannelError(ctx, cmd.TenantID, cmd.UserID, cmd.ChannelID, err)
@@ -388,6 +399,7 @@ func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand, accept 
 }
 
 func (g *gateway) followPairing(ctx context.Context, cmd amqp.PairCommand, updates <-chan session.PairUpdate) error {
+	freshPairing := false
 	for update := range updates {
 		switch {
 		case update.Err != nil:
@@ -396,6 +408,11 @@ func (g *gateway) followPairing(ctx context.Context, cmd amqp.PairCommand, updat
 		case update.Connected:
 			if err := g.persistSession(ctx, cmd.ChannelID, cmd.TenantID); err != nil {
 				return fmt.Errorf("gateway: persist session %s: %w", cmd.ChannelID, err)
+			}
+			if cmd.ImportsHistory() && !freshPairing {
+				if err := g.endEmptyImport(ctx, cmd); err != nil {
+					g.logger.Error("gateway: end the history import of an already paired channel", "channel_id", cmd.ChannelID, "import_id", cmd.ImportID, "error", err)
+				}
 			}
 			g.attachCalls(cmd.ChannelID)
 			phone, displayName, picture := g.connectedIdentity(ctx, cmd.ChannelID)
@@ -411,6 +428,7 @@ func (g *gateway) followPairing(ctx context.Context, cmd amqp.PairCommand, updat
 				return fmt.Errorf("gateway: publish channel.status connected: %w", err)
 			}
 		case update.QR != "":
+			freshPairing = true
 			if err := g.publisher.PublishChannelQR(ctx, amqp.ChannelQREvent{
 				TenantID:  cmd.TenantID,
 				UserID:    cmd.UserID,
@@ -624,7 +642,7 @@ func (g *gateway) ensureChannelConnected(ctx context.Context, channelID string) 
 	g.setTenant(channelID, cs.TenantID)
 	g.settings.Set(channelID, cs.Settings)
 
-	if resumeErr := g.manager.Resume(ctx, channelID, jid); resumeErr != nil {
+	if resumeErr := g.manager.Resume(ctx, channelID, jid, cs.ImportingHistory); resumeErr != nil {
 		return resumeErr
 	}
 	g.attachCalls(channelID)
@@ -642,6 +660,9 @@ func (g *gateway) handleSessionEvent(channelID string, evt any) {
 
 	switch e := evt.(type) {
 	case *events.Message:
+		if notif := historyNotification(e); notif != nil && g.acceptHistory(channelID, notif) {
+			return
+		}
 		g.handleInboundMessage(channelID, e)
 	case *events.Receipt:
 		g.handleReceipt(channelID, e)

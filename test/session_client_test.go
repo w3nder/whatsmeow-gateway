@@ -41,3 +41,20 @@ func TestConfigureAutoReconnectKeepsRetryingWithCappedBackoff(t *testing.T) {
 		t.Fatalf("expected reconnect backoff capped at %s, got %s", session.MaxAutoReconnectDelay, backoff)
 	}
 }
+
+func TestTakeOverHistoryTouchesOnlyTheClientThatImports(t *testing.T) {
+	importing := &whatsmeow.Client{}
+	idle := &whatsmeow.Client{}
+	if importing.ManualHistorySyncDownload || idle.ManualHistorySyncDownload {
+		t.Fatal("a client starts with whatsmeow's automatic history download")
+	}
+
+	session.TakeOverHistory(importing)
+
+	if !importing.ManualHistorySyncDownload {
+		t.Fatal("the importing client must leave the chunk download to the gateway")
+	}
+	if idle.ManualHistorySyncDownload {
+		t.Fatal("a client without an import must keep the automatic download")
+	}
+}

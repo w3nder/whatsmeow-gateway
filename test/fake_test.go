@@ -2,6 +2,7 @@ package test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -12,6 +13,8 @@ import (
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -51,7 +54,12 @@ type fakeWAClient struct {
 
 	disconnectCalls int
 
-	handlers []func(any)
+	handlers          []func(any)
+	historyChunk      *waHistorySync.HistorySync
+	historyTakenOver  bool
+	takeOverAtConnect int
+	historyDownloads  int
+	releases          int
 
 	caller call.Caller
 
@@ -496,4 +504,74 @@ func (f *fakeWAClient) connectProps() *waCompanionReg.DeviceProps {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.propsAtConnect
+}
+
+func (f *fakeWAClient) TakeOverHistory() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.historyTakenOver = true
+	f.takeOverAtConnect = f.connectCalls
+}
+
+func (f *fakeWAClient) TakesOverHistory() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.historyTakenOver
+}
+
+func (f *fakeWAClient) tookOverHistoryBeforeConnecting() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.historyTakenOver && f.takeOverAtConnect == 0
+}
+
+func (f *fakeWAClient) historyDownloadCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.historyDownloads
+}
+
+func (f *fakeWAClient) DownloadHistory(context.Context, *waE2E.HistorySyncNotification) (*waHistorySync.HistorySync, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.historyDownloads++
+	if f.historyChunk == nil {
+		return nil, errors.New("fake: no history chunk scripted")
+	}
+	return f.historyChunk, nil
+}
+
+func (f *fakeWAClient) ReleaseHistory(context.Context, *waE2E.HistorySyncNotification) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.releases++
+	return nil
+}
+
+func (f *fakeWAClient) ParseWebMessage(chat types.JID, msg *waWeb.WebMessageInfo) (*events.Message, error) {
+	f.mu.Lock()
+	own := f.deviceJID
+	f.mu.Unlock()
+	fromMe := msg.GetKey().GetFromMe()
+	sender := chat
+	if fromMe && own != nil {
+		sender = *own
+	}
+	info := types.MessageInfo{
+		MessageSource: types.MessageSource{Chat: chat, Sender: sender, IsFromMe: fromMe},
+		ID:            msg.GetKey().GetID(),
+		PushName:      msg.GetPushName(),
+		Timestamp:     time.Unix(int64(msg.GetMessageTimestamp()), 0),
+	}
+	evt := &events.Message{
+		RawMessage: msg.GetMessage(),
+		Info:       info,
+	}
+	return evt.UnwrapRaw(), nil
+}
+
+func (f *fakeWAClient) releaseCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.releases
 }

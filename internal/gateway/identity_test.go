@@ -12,6 +12,8 @@ import (
 	"go.mau.fi/whatsmeow"
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 
@@ -96,6 +98,17 @@ func (c *identityClient) GetJoinedGroups(context.Context) ([]*types.GroupInfo, e
 func (c *identityClient) AddEventHandler(func(any)) uint32 { return 0 }
 func (c *identityClient) Calls() call.Caller               { return nil }
 func (c *identityClient) Disconnect()                      {}
+func (c *identityClient) DownloadHistory(context.Context, *waE2E.HistorySyncNotification) (*waHistorySync.HistorySync, error) {
+	return nil, nil
+}
+func (c *identityClient) ReleaseHistory(context.Context, *waE2E.HistorySyncNotification) error {
+	return nil
+}
+func (c *identityClient) ParseWebMessage(types.JID, *waWeb.WebMessageInfo) (*events.Message, error) {
+	return nil, nil
+}
+func (c *identityClient) TakeOverHistory()       {}
+func (c *identityClient) TakesOverHistory() bool { return false }
 
 type identityStore struct {
 	mu   sync.Mutex
@@ -132,7 +145,7 @@ func newIdentityGateway(t *testing.T, store avatar.Store, fetch avatar.Fetch, cl
 		empty := types.JID{}
 		jid = &empty
 	}
-	if err := mgr.Resume(context.Background(), "channel-1", *jid); err != nil {
+	if err := mgr.Resume(context.Background(), "channel-1", *jid, false); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
 

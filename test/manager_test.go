@@ -66,7 +66,7 @@ func TestManagerDispatchesMessageEventWithChannelID(t *testing.T) {
 	})
 
 	jid := types.NewJID("15551234567", types.DefaultUserServer)
-	if err := mgr.Resume(context.Background(), "channel-2", jid); err != nil {
+	if err := mgr.Resume(context.Background(), "channel-2", jid, false); err != nil {
 		t.Fatalf("Resume failed: %v", err)
 	}
 
@@ -98,7 +98,7 @@ func TestManagerDropsSessionOnLoggedOut(t *testing.T) {
 	})
 
 	jid := types.NewJID("15551234567", types.DefaultUserServer)
-	if err := mgr.Resume(context.Background(), "channel-3", jid); err != nil {
+	if err := mgr.Resume(context.Background(), "channel-3", jid, false); err != nil {
 		t.Fatalf("Resume failed: %v", err)
 	}
 	if callCount != 1 {
@@ -134,7 +134,7 @@ func TestManagerEnsureConnectedReconnectsAfterSocketDrop(t *testing.T) {
 	})
 
 	jid := types.NewJID("15551234567", types.DefaultUserServer)
-	if err := mgr.Resume(context.Background(), "channel-drop-1", jid); err != nil {
+	if err := mgr.Resume(context.Background(), "channel-drop-1", jid, false); err != nil {
 		t.Fatalf("Resume failed: %v", err)
 	}
 	if fake.connectCallCount() != 1 {
@@ -161,7 +161,7 @@ func TestManagerEnsureConnectedToleratesConcurrentAutoReconnect(t *testing.T) {
 	})
 
 	jid := types.NewJID("15551234567", types.DefaultUserServer)
-	if err := mgr.Resume(context.Background(), "channel-race-1", jid); err != nil {
+	if err := mgr.Resume(context.Background(), "channel-race-1", jid, false); err != nil {
 		t.Fatalf("Resume failed: %v", err)
 	}
 
@@ -198,7 +198,7 @@ func TestManagerResumeRegistersEventHandlerBeforeConnecting(t *testing.T) {
 	})
 
 	jid := types.NewJID("15551234567", types.DefaultUserServer)
-	if err := mgr.Resume(context.Background(), "channel-handler-1", jid); err != nil {
+	if err := mgr.Resume(context.Background(), "channel-handler-1", jid, false); err != nil {
 		t.Fatalf("Resume failed: %v", err)
 	}
 
@@ -216,7 +216,7 @@ func TestManagerSendReturnsIDAndTimestamp(t *testing.T) {
 		return fake, nil
 	})
 
-	if err := mgr.Resume(context.Background(), "channel-4", types.NewJID("15550001111", types.DefaultUserServer)); err != nil {
+	if err := mgr.Resume(context.Background(), "channel-4", types.NewJID("15550001111", types.DefaultUserServer), false); err != nil {
 		t.Fatalf("Resume failed: %v", err)
 	}
 
@@ -247,7 +247,7 @@ func TestManagerResumeConnectsWithoutQR(t *testing.T) {
 
 	jid := types.NewJID("15551234567", types.DefaultUserServer)
 
-	if err := mgr.Resume(context.Background(), "channel-resume-1", jid); err != nil {
+	if err := mgr.Resume(context.Background(), "channel-resume-1", jid, false); err != nil {
 		t.Fatalf("Resume failed: %v", err)
 	}
 
@@ -272,7 +272,7 @@ func TestManagerResumeRegistersSessionForSubsequentUse(t *testing.T) {
 	})
 
 	jid := types.NewJID("15551234567", types.DefaultUserServer)
-	if err := mgr.Resume(context.Background(), "channel-resume-2", jid); err != nil {
+	if err := mgr.Resume(context.Background(), "channel-resume-2", jid, false); err != nil {
 		t.Fatalf("Resume failed: %v", err)
 	}
 	if factoryCalls != 1 {
@@ -449,5 +449,53 @@ func TestManagerPairOfAnotherChannelWaitsForAHistoryPairingToFinish(t *testing.T
 	}
 	if waiting.connectProps() != defaults {
 		t.Fatal("the pairing after a history pairing must connect with today's props")
+	}
+}
+
+func TestManagerPairWithHistoryTakesOverTheHistoryBeforeConnecting(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.qrItems = []whatsmeow.QRChannelItem{{Event: "code", Code: "qr-takeover"}, whatsmeow.QRChannelSuccess}
+
+	drainPairing(t, managerFor(map[string]*fakeWAClient{"channel-takeover": fake}), "channel-takeover", true)
+
+	if !fake.tookOverHistoryBeforeConnecting() {
+		t.Fatal("an importing pairing must switch its client to manual history download before connecting")
+	}
+}
+
+func TestManagerPairWithoutHistoryLeavesTheHistoryToWhatsmeow(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.qrItems = []whatsmeow.QRChannelItem{{Event: "code", Code: "qr-automatic"}, whatsmeow.QRChannelSuccess}
+
+	drainPairing(t, managerFor(map[string]*fakeWAClient{"channel-automatic": fake}), "channel-automatic", false)
+
+	if fake.TakesOverHistory() {
+		t.Fatal("a pairing without import must keep whatsmeow's automatic history download")
+	}
+}
+
+func TestManagerResumeOfAnImportingChannelTakesOverTheHistoryBeforeConnecting(t *testing.T) {
+	fake := newFakeWAClient()
+	mgr := managerFor(map[string]*fakeWAClient{"channel-resume-importing": fake})
+
+	if err := mgr.Resume(context.Background(), "channel-resume-importing", types.NewJID("15550002222", types.DefaultUserServer), true); err != nil {
+		t.Fatalf("Resume failed: %v", err)
+	}
+
+	if !fake.tookOverHistoryBeforeConnecting() {
+		t.Fatal("a channel resumed in the middle of an import must switch to manual history download before connecting")
+	}
+}
+
+func TestManagerResumeOfAnIdleChannelLeavesTheHistoryToWhatsmeow(t *testing.T) {
+	fake := newFakeWAClient()
+	mgr := managerFor(map[string]*fakeWAClient{"channel-resume-idle": fake})
+
+	if err := mgr.Resume(context.Background(), "channel-resume-idle", types.NewJID("15550003333", types.DefaultUserServer), false); err != nil {
+		t.Fatalf("Resume failed: %v", err)
+	}
+
+	if fake.TakesOverHistory() {
+		t.Fatal("a channel without an import must keep whatsmeow's automatic history download")
 	}
 }

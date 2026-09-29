@@ -96,6 +96,9 @@ func (m *Manager) Pair(ctx context.Context, channelID string, importHistory bool
 		m.endPairing(channelID, p, client)
 		return nil, fmt.Errorf("session: open qr channel for %s: %w", channelID, err)
 	}
+	if importHistory {
+		client.TakeOverHistory()
+	}
 	release, err := deviceprops.Acquire(ctx, importHistory)
 	if err != nil {
 		m.endPairing(channelID, p, client)
@@ -294,7 +297,7 @@ func (m *Manager) client(channelID string) (WAClient, error) {
 	return c, nil
 }
 
-func (m *Manager) Resume(ctx context.Context, channelID string, jid types.JID) error {
+func (m *Manager) Resume(ctx context.Context, channelID string, jid types.JID, importingHistory bool) error {
 	m.mu.Lock()
 	if _, ok := m.sessions[channelID]; ok {
 		m.mu.Unlock()
@@ -310,6 +313,9 @@ func (m *Manager) Resume(ctx context.Context, channelID string, jid types.JID) e
 	m.register(channelID, c)
 	m.mu.Unlock()
 
+	if importingHistory {
+		c.TakeOverHistory()
+	}
 	if err := c.Connect(); err != nil {
 		m.drop(channelID, c)
 		return fmt.Errorf("session: connect resumed channel %s: %w", channelID, err)
