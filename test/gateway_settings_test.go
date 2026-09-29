@@ -162,12 +162,45 @@ func TestGatewayAppliesASettingsCommandAndPersistsItInTheRegistry(t *testing.T) 
 		ListenGroups:      settingsBool(false),
 		ReceiveCalls:      settingsBool(false),
 		CallRejectMessage: settingsString("Não atendemos ligações, escreva aqui."),
+		SettingsVersion:   3,
 	})
 
-	want := channelsettings.Settings{ListenGroups: false, ReceiveCalls: false, CallRejectMessage: "Não atendemos ligações, escreva aqui."}
+	want := channelsettings.Settings{ListenGroups: false, ReceiveCalls: false, CallRejectMessage: "Não atendemos ligações, escreva aqui.", Version: 3}
 	waitFor(t, 10*time.Second, "the settings command to reach the registry", func() bool {
 		got, found, err := h.registry.Get(context.Background(), channelID)
 		return err == nil && found && got.Settings == want
+	})
+}
+
+func TestGatewayIgnoresALowerSettingsVersionAndAppliesEqualAndHigherOnes(t *testing.T) {
+	const channelID = "channel-settings-version-1"
+	const tenantID = "tenant-settings-version-1"
+	h := startSettingsGateway(t, channelID, tenantID, newFakeWAClient(), channelsettings.Settings{ListenGroups: true, ReceiveCalls: true, Version: 5})
+
+	storedSettings := func() channelsettings.Settings {
+		got, _, err := h.registry.Get(context.Background(), channelID)
+		if err != nil {
+			t.Fatalf("registry Get failed: %v", err)
+		}
+		return got.Settings
+	}
+
+	h.publishSettings(t, gatewayamqp.SettingsCommand{TenantID: tenantID, ChannelID: channelID, ListenGroups: settingsBool(false), SettingsVersion: 4})
+	time.Sleep(2 * time.Second)
+	if got := storedSettings(); got.Version != 5 || !got.ListenGroups {
+		t.Fatalf("a lower version must be ignored, stored %+v", got)
+	}
+
+	h.publishSettings(t, gatewayamqp.SettingsCommand{TenantID: tenantID, ChannelID: channelID, ListenGroups: settingsBool(false), SettingsVersion: 5})
+	waitFor(t, 10*time.Second, "the equal version to be applied", func() bool {
+		got := storedSettings()
+		return got.Version == 5 && !got.ListenGroups
+	})
+
+	h.publishSettings(t, gatewayamqp.SettingsCommand{TenantID: tenantID, ChannelID: channelID, ReceiveCalls: settingsBool(false), SettingsVersion: 8})
+	waitFor(t, 10*time.Second, "the higher version to be applied", func() bool {
+		got := storedSettings()
+		return got.Version == 8 && got.ListenGroups && !got.ReceiveCalls
 	})
 }
 

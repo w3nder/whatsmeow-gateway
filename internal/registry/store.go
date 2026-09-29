@@ -21,9 +21,10 @@ const createTableSQL = `CREATE TABLE IF NOT EXISTS gateway_channel_sessions (
 const addSettingsColumnsSQL = `ALTER TABLE gateway_channel_sessions
 	ADD COLUMN IF NOT EXISTS listen_groups boolean NOT NULL DEFAULT true,
 	ADD COLUMN IF NOT EXISTS receive_calls boolean NOT NULL DEFAULT true,
-	ADD COLUMN IF NOT EXISTS call_reject_message text`
+	ADD COLUMN IF NOT EXISTS call_reject_message text,
+	ADD COLUMN IF NOT EXISTS settings_version bigint NOT NULL DEFAULT 0`
 
-const sessionColumns = `channel_id, jid, tenant_id, listen_groups, receive_calls, call_reject_message`
+const sessionColumns = `channel_id, jid, tenant_id, listen_groups, receive_calls, call_reject_message, settings_version`
 
 type ChannelSession struct {
 	ChannelID string
@@ -39,7 +40,7 @@ type rowScanner interface {
 func scanSession(row rowScanner) (ChannelSession, error) {
 	var cs ChannelSession
 	var message *string
-	if err := row.Scan(&cs.ChannelID, &cs.JID, &cs.TenantID, &cs.Settings.ListenGroups, &cs.Settings.ReceiveCalls, &message); err != nil {
+	if err := row.Scan(&cs.ChannelID, &cs.JID, &cs.TenantID, &cs.Settings.ListenGroups, &cs.Settings.ReceiveCalls, &message, &cs.Settings.Version); err != nil {
 		return ChannelSession{}, err
 	}
 	if message != nil {
@@ -88,9 +89,9 @@ func (s *Store) SaveSettings(ctx context.Context, channelID, tenantID string, se
 		message = &settings.CallRejectMessage
 	}
 	if _, err := s.pool.Exec(ctx,
-		`UPDATE gateway_channel_sessions SET listen_groups = $3, receive_calls = $4, call_reject_message = $5
+		`UPDATE gateway_channel_sessions SET listen_groups = $3, receive_calls = $4, call_reject_message = $5, settings_version = $6
 		 WHERE channel_id = $1 AND tenant_id = $2`,
-		channelID, tenantID, settings.ListenGroups, settings.ReceiveCalls, message,
+		channelID, tenantID, settings.ListenGroups, settings.ReceiveCalls, message, settings.Version,
 	); err != nil {
 		return fmt.Errorf("registry: save settings %s: %w", channelID, err)
 	}

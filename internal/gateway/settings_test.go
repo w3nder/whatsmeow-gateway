@@ -64,3 +64,29 @@ func TestSettingsHandlerRefusesAnotherTenantsCommandForAKnownChannel(t *testing.
 		t.Fatalf("a refused command must not change the map, got %+v", got)
 	}
 }
+
+func TestSettingsHandlerIgnoresACommandWithALowerVersionThanTheCurrentOne(t *testing.T) {
+	g := &gateway{settings: channelsettings.NewMap(), logger: slog.New(slog.DiscardHandler), tenantByChannel: map[string]string{}}
+	current := channelsettings.Settings{ListenGroups: true, ReceiveCalls: false, Version: 5}
+	g.settings.Set("channel-1", current)
+
+	err := g.SettingsHandler(context.Background(), amqp.SettingsCommand{
+		TenantID:        "tenant-1",
+		ChannelID:       "channel-1",
+		ListenGroups:    settingsBool(false),
+		ReceiveCalls:    settingsBool(true),
+		SettingsVersion: 4,
+	})
+	if err != nil {
+		t.Fatalf("a stale command is acked, got %v", err)
+	}
+	if got := g.settings.For("channel-1"); got != current {
+		t.Fatalf("a stale command must not change the map, got %+v", got)
+	}
+}
+
+func TestSettingsFromCarriesTheCommandVersion(t *testing.T) {
+	if got := settingsFrom(amqp.SettingsCommand{SettingsVersion: 7}); got.Version != 7 {
+		t.Fatalf("version = %d, want 7", got.Version)
+	}
+}

@@ -11,6 +11,7 @@ import (
 
 func settingsFrom(cmd amqp.SettingsCommand) channelsettings.Settings {
 	settings := channelsettings.Defaults()
+	settings.Version = cmd.SettingsVersion
 	if cmd.ListenGroups != nil {
 		settings.ListenGroups = *cmd.ListenGroups
 	}
@@ -31,12 +32,19 @@ func (g *gateway) SettingsHandler(ctx context.Context, cmd amqp.SettingsCommand)
 		return fmt.Errorf("gateway: settings command for channel %s comes from tenant %s, the channel belongs to another", cmd.ChannelID, cmd.TenantID)
 	}
 
-	next := settingsFrom(cmd)
-	g.settings.Set(cmd.ChannelID, next)
+	if current := g.settings.For(cmd.ChannelID).Version; cmd.SettingsVersion < current {
+		g.logger.Info("gateway: stale channel settings ignored",
+			"channel_id", cmd.ChannelID,
+			"command_version", cmd.SettingsVersion,
+			"current_version", current)
+		return nil
+	}
 
+	next := settingsFrom(cmd)
 	if err := g.registry.SaveSettings(ctx, cmd.ChannelID, cmd.TenantID, next); err != nil {
 		return fmt.Errorf("gateway: persist settings %s: %w", cmd.ChannelID, err)
 	}
+	g.settings.Set(cmd.ChannelID, next)
 
 	g.logger.Info("gateway: channel settings applied",
 		"channel_id", cmd.ChannelID,

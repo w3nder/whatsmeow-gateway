@@ -366,28 +366,30 @@ func (m *Manager) event(t *Tracked, eventType string) Event {
 }
 
 func (m *Manager) publishInbound(t *Tracked) {
-	id := m.identity(t.ChannelID)
-	fromMe := t.Direction == DirectionOutbound
-	evt := NewInboundCallEvent(id, t.ChannelID, t.CallID, t.SenderLid, t.SenderPn, t.Direction, fromMe, t.IsVideo,
-		strconv.FormatInt(m.opts.Now().Unix(), 10), t.ProfilePicture)
-	m.publishInboundEvent(evt)
+	m.publishInboundEvent(t.ChannelID, t.CallID, func() InboundCallEvent {
+		fromMe := t.Direction == DirectionOutbound
+		return NewInboundCallEvent(m.identity(t.ChannelID), t.ChannelID, t.CallID, t.SenderLid, t.SenderPn, t.Direction, fromMe, t.IsVideo,
+			strconv.FormatInt(m.opts.Now().Unix(), 10), t.ProfilePicture)
+	})
 }
 
-func (m *Manager) publishInboundEvent(evt InboundCallEvent) {
+func (m *Manager) publishInboundEvent(channelID, callID string, build func() InboundCallEvent) {
 	defer func() {
 		if r := recover(); r != nil {
 			m.log.Error("call: panic while publishing inbound call event",
-				"channel_id", evt.ChannelID, "call_id", evt.ProviderMessageID, "panic", r)
+				"channel_id", channelID, "call_id", callID, "panic", r)
 		}
 	}()
 
+	evt := build()
+
 	if err := m.pub.PublishInbound(context.Background(), evt); err != nil {
 		m.log.Error("call: publish inbound call event",
-			"channel_id", evt.ChannelID, "call_id", evt.ProviderMessageID, "error", err)
+			"channel_id", channelID, "call_id", callID, "error", err)
 		return
 	}
 
-	m.log.Info("call: inbound call event published", "channel_id", evt.ChannelID, "call_id", evt.ProviderMessageID)
+	m.log.Info("call: inbound call event published", "channel_id", channelID, "call_id", callID)
 }
 
 func (m *Manager) publish(evt Event) {

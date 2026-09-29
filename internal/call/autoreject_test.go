@@ -134,3 +134,26 @@ func TestAutoRejectFailureLeavesTheCallToTheOperatorWithoutARejectedState(t *tes
 		t.Error("a call whose reject failed must follow the normal flow")
 	}
 }
+
+func TestAutoRejectSurvivesAPanicWhileBuildingTheInboundEvent(t *testing.T) {
+	pub := &memPublisher{}
+	m := call.NewManager(pub, newMemStore(),
+		func(string) call.Identity { panic("identity lookup failed") },
+		nil,
+		nil,
+		call.Options{TmpDir: t.TempDir(), Now: time.Now, Settings: rejectingSettings("chan-a")},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	caller := &fakeCaller{}
+	m.Attach("chan-a", caller)
+	lc := &fakeCall{id: "C1", peer: "5511888887777@s.whatsapp.net"}
+
+	caller.fireIncoming(lc)
+
+	if got := lc.recordedActions(); !reflect.DeepEqual(got, []string{"reject"}) {
+		t.Fatalf("actions = %v, want only reject", got)
+	}
+	if len(pub.inboundEvents()) != 0 {
+		t.Fatalf("a panic while building the event must publish nothing")
+	}
+}

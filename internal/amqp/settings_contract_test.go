@@ -8,9 +8,9 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/amqp"
 )
 
-const settingsCommandLiteral = `{"tenantId":"1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c","channelId":"2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d","listenGroups":true,"receiveCalls":false,"callRejectMessage":"Não atendemos ligações, escreva aqui."}`
+const settingsCommandLiteral = `{"tenantId":"1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c","channelId":"2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d","listenGroups":true,"receiveCalls":false,"callRejectMessage":"Não atendemos ligações, escreva aqui.","settingsVersion":3}`
 
-const settingsCommandNullMessageLiteral = `{"tenantId":"1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c","channelId":"2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d","listenGroups":false,"receiveCalls":true,"callRejectMessage":null}`
+const settingsCommandNullMessageLiteral = `{"tenantId":"1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c","channelId":"2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d","listenGroups":false,"receiveCalls":true,"callRejectMessage":null,"settingsVersion":3}`
 
 const settingsCommandAbsentFieldsLiteral = `{"tenantId":"1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c","channelId":"2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d"}`
 
@@ -35,6 +35,7 @@ func TestSettingsCommandContractLiteral(t *testing.T) {
 		ListenGroups:      settingsBool(true),
 		ReceiveCalls:      settingsBool(false),
 		CallRejectMessage: settingsString("Não atendemos ligações, escreva aqui."),
+		SettingsVersion:   3,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("decoded %+v, want %+v", got, want)
@@ -45,6 +46,9 @@ func TestSettingsCommandAcceptsANullMessage(t *testing.T) {
 	got := decodeSettings(t, settingsCommandNullMessageLiteral)
 	if got.CallRejectMessage != nil {
 		t.Fatalf("a null callRejectMessage must decode to nil, got %q", *got.CallRejectMessage)
+	}
+	if got.SettingsVersion != 3 {
+		t.Fatalf("settingsVersion decoded %d, want 3", got.SettingsVersion)
 	}
 	if got.ListenGroups == nil || *got.ListenGroups || got.ReceiveCalls == nil || !*got.ReceiveCalls {
 		t.Fatalf("booleans decoded wrong: %+v", got)

@@ -402,7 +402,9 @@ Regras:
 
 - **Chamada de grupo** é recusada e publicada como `auto_rejected`, mas nunca recebe mensagem.
 - **No máximo uma mensagem por canal e por número a cada 10 minutos** (`CallRejectMessageCooldown`),
-  controlado em memória no gateway (o canal tem um único dono). As chamadas seguintes dentro
+  controlado em memória no gateway (o canal tem um único dono). O número vale por todas as
+  identidades conhecidas (LID e telefone): basta uma dentro da janela para bloquear, e a reserva
+  marca todas antes do envio. Se o envio falhar, a reserva é liberada. As chamadas seguintes dentro
   da janela continuam recusadas e publicadas, sem mensagem. Um reinício do gateway pode
   repetir uma mensagem uma vez; isso é aceito.
 - **Se `Reject()` falhar**, o gateway registra o erro, não envia mensagem e não publica

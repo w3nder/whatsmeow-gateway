@@ -32,8 +32,21 @@ func NewCooldown(window time.Duration, now func() time.Time) *Cooldown {
 	return &Cooldown{window: window, now: now, last: make(map[string]time.Time)}
 }
 
-func (c *Cooldown) Allow(channelID, caller string) bool {
-	key := channelID + "|" + caller
+func cooldownKeys(channelID string, callers []string) []string {
+	keys := make([]string, 0, len(callers))
+	for _, caller := range callers {
+		if caller != "" {
+			keys = append(keys, channelID+"|"+caller)
+		}
+	}
+	return keys
+}
+
+func (c *Cooldown) Allow(channelID string, callers ...string) bool {
+	keys := cooldownKeys(channelID, callers)
+	if len(keys) == 0 {
+		return false
+	}
 	now := c.now()
 
 	c.mu.Lock()
@@ -44,11 +57,23 @@ func (c *Cooldown) Allow(channelID, caller string) bool {
 			delete(c.last, k)
 		}
 	}
-	if _, cooling := c.last[key]; cooling {
-		return false
+	for _, key := range keys {
+		if _, cooling := c.last[key]; cooling {
+			return false
+		}
 	}
-	c.last[key] = now
+	for _, key := range keys {
+		c.last[key] = now
+	}
 	return true
+}
+
+func (c *Cooldown) Release(channelID string, callers ...string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, key := range cooldownKeys(channelID, callers) {
+		delete(c.last, key)
+	}
 }
 
 func (m *Manager) autoReply(channelID string, lc LiveCall, message, senderLid, senderPn string) {
@@ -56,17 +81,13 @@ func (m *Manager) autoReply(channelID string, lc LiveCall, message, senderLid, s
 		return
 	}
 
-	caller := senderLid
-	if caller == "" {
-		caller = senderPn
-	}
-	if caller == "" {
+	if senderLid == "" && senderPn == "" {
 		m.log.Warn("call: auto reply skipped, the caller has no known identity",
 			"channel_id", channelID, "call_id", lc.ID())
 		return
 	}
 
-	if !m.cooldown.Allow(channelID, caller) {
+	if !m.cooldown.Allow(channelID, senderLid, senderPn) {
 		m.log.Info("call: auto reply skipped, the caller was answered recently",
 			"channel_id", channelID, "call_id", lc.ID())
 		return
@@ -78,6 +99,7 @@ func (m *Manager) autoReply(channelID string, lc LiveCall, message, senderLid, s
 	go func() {
 		defer m.replyWG.Done()
 		if err := m.opts.Replier.Reply(context.Background(), reply); err != nil {
+			m.cooldown.Release(channelID, senderLid, senderPn)
 			m.log.Error("call: auto reply failed",
 				"channel_id", channelID, "call_id", reply.CallID, "error", err)
 		}

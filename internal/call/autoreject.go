@@ -34,10 +34,11 @@ func (m *Manager) autoReject(channelID string, lc LiveCall) bool {
 	peer := m.parsePeerJID(channelID, lc.Peer())
 	senderLid, senderPn := m.resolveSenderIdentity(channelID, peer)
 
-	evt := NewInboundCallEvent(m.identity(channelID), channelID, lc.ID(), senderLid, senderPn,
-		DirectionInbound, false, lc.IsVideo(), strconv.FormatInt(m.opts.Now().Unix(), 10), nil).
-		WithState(InboundStateAutoRejected)
-	m.publishInboundEvent(evt)
+	m.publishInboundEvent(channelID, lc.ID(), func() InboundCallEvent {
+		return NewInboundCallEvent(m.identity(channelID), channelID, lc.ID(), senderLid, senderPn,
+			DirectionInbound, false, lc.IsVideo(), strconv.FormatInt(m.opts.Now().Unix(), 10), nil).
+			WithState(InboundStateAutoRejected)
+	})
 
 	m.log.Info("call: incoming call auto rejected",
 		"channel_id", channelID, "call_id", lc.ID(), "is_video", lc.IsVideo())

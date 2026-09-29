@@ -236,3 +236,58 @@ func TestAutoRejectUsesTheLidAsTheCooldownKeyWhenThePhoneIsUnknown(t *testing.T)
 		t.Fatalf("two calls from the same lid must produce one reply carrying the lid, got %+v", got)
 	}
 }
+
+func TestCooldownTreatsEveryKnownIdentityOfTheCallerAsTheSameCaller(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1754300000, 0)}
+	c := call.NewCooldown(call.CallRejectMessageCooldown, clock.Now)
+
+	if !c.Allow("chan-a", "173907587899617", "5511888887777") {
+		t.Fatal("the first call must be allowed")
+	}
+	if c.Allow("chan-a", "", "5511888887777") {
+		t.Error("the same caller seen only by phone must be blocked")
+	}
+	if c.Allow("chan-a", "173907587899617", "") {
+		t.Error("the same caller seen only by lid must be blocked")
+	}
+	if !c.Allow("chan-a", "999", "5511000000000") {
+		t.Error("an unrelated caller must be allowed")
+	}
+}
+
+func TestCooldownReservationBlocksAnImmediateSecondAllow(t *testing.T) {
+	c := call.NewCooldown(call.CallRejectMessageCooldown, time.Now)
+
+	first, second := c.Allow("chan-a", "5511888887777"), c.Allow("chan-a", "5511888887777")
+	if !first || second {
+		t.Fatalf("allow results = %v, %v, want true then false", first, second)
+	}
+}
+
+func TestCooldownReleaseFreesEveryKeyOfTheReservation(t *testing.T) {
+	c := call.NewCooldown(call.CallRejectMessageCooldown, time.Now)
+
+	c.Allow("chan-a", "173907587899617", "5511888887777")
+	c.Release("chan-a", "173907587899617", "5511888887777")
+
+	if !c.Allow("chan-a", "", "5511888887777") || !c.Allow("chan-a", "173907587899617", "") {
+		t.Fatal("a released reservation must free both identities")
+	}
+}
+
+func TestAutoRejectReleasesTheCooldownWhenTheMessageFailsToSend(t *testing.T) {
+	replier := &memReplier{err: errors.New("whatsapp unreachable")}
+	m := newAutoReplyManager(t, &memPublisher{}, messageSettings("chan-a", rejectText), replier, time.Now)
+	caller := &fakeCaller{}
+	m.Attach("chan-a", caller)
+	peer := "5511888887777@s.whatsapp.net"
+
+	caller.fireIncoming(&fakeCall{id: "C1", peer: peer})
+	m.WaitForReplies(5 * time.Second)
+	caller.fireIncoming(&fakeCall{id: "C2", peer: peer})
+	m.WaitForReplies(5 * time.Second)
+
+	if got := len(replier.sent()); got != 2 {
+		t.Fatalf("a failed send must not suppress the next call, attempts = %d", got)
+	}
+}

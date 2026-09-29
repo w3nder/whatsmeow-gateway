@@ -103,6 +103,7 @@ type SettingsCommand struct {
 	ListenGroups      *bool   `json:"listenGroups"`
 	ReceiveCalls      *bool   `json:"receiveCalls"`
 	CallRejectMessage *string `json:"callRejectMessage"`
+	SettingsVersion   int64   `json:"settingsVersion"`
 }
 
 type GroupActionParams struct {

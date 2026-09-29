@@ -186,7 +186,7 @@ func TestRegistryStoreSaveSettingsRoundTripsThroughGetAndForShards(t *testing.T)
 	if err := store.Save(ctx, "channel-1", "jid@s.whatsapp.net", "tenant-1"); err != nil {
 		t.Fatalf("Save failed: %v", err)
 	}
-	want := channelsettings.Settings{ListenGroups: false, ReceiveCalls: false, CallRejectMessage: "Não atendemos ligações."}
+	want := channelsettings.Settings{ListenGroups: false, ReceiveCalls: false, CallRejectMessage: "Não atendemos ligações.", Version: 6}
 	if err := store.SaveSettings(ctx, "channel-1", "tenant-1", want); err != nil {
 		t.Fatalf("SaveSettings failed: %v", err)
 	}
