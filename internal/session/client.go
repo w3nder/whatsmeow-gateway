@@ -9,6 +9,8 @@ import (
 	"go.mau.fi/whatsmeow"
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -37,6 +39,11 @@ type WAClient interface {
 	BuildReaction(chat, sender types.JID, id types.MessageID, reaction string) *waE2E.Message
 	Upload(ctx context.Context, data []byte, mt whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
+	DownloadHistory(ctx context.Context, notif *waE2E.HistorySyncNotification) (*waHistorySync.HistorySync, error)
+	ReleaseHistory(ctx context.Context, notif *waE2E.HistorySyncNotification) error
+	ParseWebMessage(chat types.JID, msg *waWeb.WebMessageInfo) (*events.Message, error)
+	TakeOverHistory()
+	TakesOverHistory() bool
 	PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error)
 	LIDForPN(ctx context.Context, pn types.JID) (types.JID, bool, error)
 	DecryptSecretEncryptedMessage(ctx context.Context, evt *events.Message) (*waE2E.Message, error)
@@ -79,6 +86,10 @@ func ConfigureAutoReconnect(client *whatsmeow.Client) {
 		}
 		return true
 	}
+}
+
+func TakeOverHistory(client *whatsmeow.Client) {
+	client.ManualHistorySyncDownload = true
 }
 
 func (w *waClient) QRChannel(ctx context.Context) (<-chan whatsmeow.QRChannelItem, error) {
@@ -143,6 +154,26 @@ func (w *waClient) Upload(ctx context.Context, data []byte, mt whatsmeow.MediaTy
 
 func (w *waClient) Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error) {
 	return w.client.Download(ctx, msg)
+}
+
+func (w *waClient) DownloadHistory(ctx context.Context, notif *waE2E.HistorySyncNotification) (*waHistorySync.HistorySync, error) {
+	return w.client.DownloadHistorySync(ctx, notif, true)
+}
+
+func (w *waClient) ReleaseHistory(ctx context.Context, notif *waE2E.HistorySyncNotification) error {
+	return w.client.DeleteMedia(ctx, whatsmeow.MediaHistory, notif.GetDirectPath(), notif.GetFileEncSHA256(), notif.GetEncHandle())
+}
+
+func (w *waClient) ParseWebMessage(chat types.JID, msg *waWeb.WebMessageInfo) (*events.Message, error) {
+	return w.client.ParseWebMessage(chat, msg)
+}
+
+func (w *waClient) TakeOverHistory() {
+	TakeOverHistory(w.client)
+}
+
+func (w *waClient) TakesOverHistory() bool {
+	return w.client.ManualHistorySyncDownload
 }
 
 func (w *waClient) PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error) {

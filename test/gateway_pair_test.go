@@ -23,6 +23,11 @@ import (
 
 func setupPairGateway(t *testing.T, factory session.ClientFactory) (probeCh *rabbitmq.Channel, deliveries <-chan rabbitmq.Delivery, cancel context.CancelFunc, runErrCh chan error) {
 	t.Helper()
+	return setupPairGatewayWith(t, session.NewManager(factory))
+}
+
+func setupPairGatewayWith(t *testing.T, manager *session.Manager) (probeCh *rabbitmq.Channel, deliveries <-chan rabbitmq.Delivery, cancel context.CancelFunc, runErrCh chan error) {
+	t.Helper()
 
 	conn := startRabbitMQ(t)
 	redisClient := startRedis(t)
@@ -95,7 +100,7 @@ func setupPairGateway(t *testing.T, factory session.ClientFactory) (probeCh *rab
 			Rpc:                  gatewayamqp.NewRpcServer(conn, 4, logger),
 			Consumer:             consumer,
 			Publisher:            publisher,
-			Manager:              session.NewManager(factory),
+			Manager:              manager,
 			Ownership:            ownership.NewStore(redisClient, 4),
 			Registry:             registryStore,
 			MediaStore:           mediaStore,
@@ -306,5 +311,50 @@ func TestGatewayPairFailureIsAckedUnlessThePairingNeverStarted(t *testing.T) {
 		t.Fatalf("expected a pairing that could not be started at all to reach %s", gatewayamqp.GatewayPairDLQ)
 	}
 
+	shutdownStatusRoundtripGateway(t, cancel, runErrCh)
+}
+
+func TestGatewayPairHeldBehindAHistoryPairingFailsAsBusyAndIsAcked(t *testing.T) {
+	const (
+		importingChannel = "channel-pair-importing-1"
+		waitingChannel   = "channel-pair-waiting-1"
+	)
+
+	importing := newFakeWAClient()
+	importing.qrFeed = make(chan whatsmeow.QRChannelItem)
+	waiting := newFakeWAClient()
+
+	probeCh, deliveries, cancel, runErrCh := setupPairGatewayWith(t, session.NewManager(func(channelID string, jid *types.JID) (session.WAClient, error) {
+		if channelID == waitingChannel {
+			return waiting, nil
+		}
+		return importing, nil
+	}, session.WithPairingSlotWait(time.Second)))
+
+	dlq, err := probeCh.Consume(gatewayamqp.GatewayPairDLQ, "", true, false, false, false, nil)
+	if err != nil {
+		t.Fatalf("failed to consume %s: %v", gatewayamqp.GatewayPairDLQ, err)
+	}
+
+	publishPairCommand(t, probeCh, gatewayamqp.PairCommand{TenantID: "tenant-pair-importing", ChannelID: importingChannel, UserID: "user-importing", ImportHistory: true, ImportID: "import-pair-1"})
+	feedQR(t, importing, whatsmeow.QRChannelItem{Event: "code", Code: "qr-importing", Timeout: time.Minute})
+	waitForChannelQR(t, deliveries, importingChannel, pairWait)
+
+	publishPairCommand(t, probeCh, gatewayamqp.PairCommand{TenantID: "tenant-pair-waiting", ChannelID: waitingChannel, UserID: "user-waiting"})
+
+	evt := waitForChannelStatus(t, deliveries, waitingChannel, "error", pairWait)
+	if evt.Reason != "Outro pareamento com histórico está em andamento neste servidor. Tente novamente em instantes." {
+		t.Fatalf("the operator must be told another history pairing holds the server, got %+v", evt)
+	}
+	if waiting.connectCallCount() != 0 {
+		t.Fatal("a pairing that never got the slot must never connect")
+	}
+	select {
+	case d := <-dlq:
+		t.Fatalf("a busy pairing must be acked, got it dead-lettered: %s", d.Body)
+	case <-time.After(3 * time.Second):
+	}
+
+	close(importing.qrFeed)
 	shutdownStatusRoundtripGateway(t, cancel, runErrCh)
 }

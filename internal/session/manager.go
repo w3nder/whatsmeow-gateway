@@ -12,6 +12,8 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+
+	"github.com/w3nder/whatsmeow-gateway/internal/deviceprops"
 )
 
 var ErrNoSession = errors.New("session: channel has no live session")
@@ -30,6 +32,19 @@ type pairing struct {
 	qr       string
 	emitted  time.Time
 	lifetime time.Duration
+
+	importHistory bool
+	stop          chan struct{}
+	stopOnce      sync.Once
+	done          chan struct{}
+}
+
+func newPairing(importHistory bool) *pairing {
+	return &pairing{importHistory: importHistory, stop: make(chan struct{}), done: make(chan struct{})}
+}
+
+func (p *pairing) halt() {
+	p.stopOnce.Do(func() { close(p.stop) })
 }
 
 func (p *pairing) validQR(now time.Time) (string, bool) {
@@ -44,7 +59,8 @@ func (p *pairing) clear() {
 }
 
 type Manager struct {
-	factory ClientFactory
+	factory  ClientFactory
+	slotWait time.Duration
 
 	mu       sync.Mutex
 	sessions map[string]WAClient
@@ -54,12 +70,23 @@ type Manager struct {
 	handlers   []func(channelID string, evt any)
 }
 
-func NewManager(factory ClientFactory) *Manager {
-	return &Manager{
+type Option func(*Manager)
+
+func WithPairingSlotWait(wait time.Duration) Option {
+	return func(m *Manager) { m.slotWait = wait }
+}
+
+func NewManager(factory ClientFactory, options ...Option) *Manager {
+	m := &Manager{
 		factory:  factory,
+		slotWait: deviceprops.SlotWait,
 		sessions: make(map[string]WAClient),
 		pairings: make(map[string]*pairing),
 	}
+	for _, option := range options {
+		option(m)
+	}
+	return m
 }
 
 func (m *Manager) OnEvent(handler func(channelID string, evt any)) {
@@ -68,7 +95,7 @@ func (m *Manager) OnEvent(handler func(channelID string, evt any)) {
 	m.handlers = append(m.handlers[:len(m.handlers):len(m.handlers)], handler)
 }
 
-func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate, error) {
+func (m *Manager) Pair(ctx context.Context, channelID string, importHistory bool) (<-chan PairUpdate, error) {
 	client, err := m.client(channelID)
 	if err != nil {
 		return nil, err
@@ -84,7 +111,15 @@ func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate
 		return updates, nil
 	}
 
-	p, joined := m.beginPairing(channelID)
+	p, joined, superseded := m.beginPairing(channelID, importHistory)
+	if superseded != nil {
+		select {
+		case <-superseded.done:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("session: wait for the superseded pairing of %s to end: %w", channelID, ctx.Err())
+		}
+		return m.Pair(ctx, channelID, importHistory)
+	}
 	if joined != nil {
 		return joined, nil
 	}
@@ -92,16 +127,30 @@ func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate
 	qr, err := client.QRChannel(ctx)
 	if err != nil {
 		m.endPairing(channelID, p, client)
+		close(p.done)
 		return nil, fmt.Errorf("session: open qr channel for %s: %w", channelID, err)
+	}
+	if importHistory {
+		client.TakeOverHistory()
+	}
+	release, err := deviceprops.Acquire(ctx, importHistory, m.slotWait)
+	if err != nil {
+		m.endPairing(channelID, p, client)
+		close(p.done)
+		return nil, fmt.Errorf("session: wait for the pairing slot for %s: %w", channelID, err)
 	}
 	if err := client.Connect(); err != nil {
 		m.endPairing(channelID, p, client)
+		release()
+		close(p.done)
 		return nil, fmt.Errorf("session: connect for pairing %s: %w", channelID, err)
 	}
 
 	updates := make(chan PairUpdate)
 	go func() {
+		defer close(p.done)
 		defer close(updates)
+		defer release()
 		defer m.endPairing(channelID, p, client)
 
 		for {
@@ -132,8 +181,12 @@ func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate
 				case updates <- update:
 				case <-ctx.Done():
 					return
+				case <-p.stop:
+					return
 				}
 			case <-ctx.Done():
+				return
+			case <-p.stop:
 				return
 			}
 		}
@@ -142,22 +195,26 @@ func (m *Manager) Pair(ctx context.Context, channelID string) (<-chan PairUpdate
 	return updates, nil
 }
 
-func (m *Manager) beginPairing(channelID string) (*pairing, <-chan PairUpdate) {
+func (m *Manager) beginPairing(channelID string, importHistory bool) (*pairing, <-chan PairUpdate, *pairing) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if live, ok := m.pairings[channelID]; ok {
+		if importHistory != live.importHistory {
+			live.halt()
+			return nil, nil, live
+		}
 		updates := make(chan PairUpdate, 1)
 		if code, valid := live.validQR(time.Now()); valid {
 			updates <- PairUpdate{QR: code}
 		}
 		close(updates)
-		return nil, updates
+		return nil, updates, nil
 	}
 
-	p := &pairing{}
+	p := newPairing(importHistory)
 	m.pairings[channelID] = p
-	return p, nil
+	return p, nil, nil
 }
 
 func (m *Manager) endPairing(channelID string, p *pairing, client WAClient) {
@@ -285,7 +342,7 @@ func (m *Manager) client(channelID string) (WAClient, error) {
 	return c, nil
 }
 
-func (m *Manager) Resume(ctx context.Context, channelID string, jid types.JID) error {
+func (m *Manager) Resume(ctx context.Context, channelID string, jid types.JID, importingHistory bool) error {
 	m.mu.Lock()
 	if _, ok := m.sessions[channelID]; ok {
 		m.mu.Unlock()
@@ -301,6 +358,9 @@ func (m *Manager) Resume(ctx context.Context, channelID string, jid types.JID) e
 	m.register(channelID, c)
 	m.mu.Unlock()
 
+	if importingHistory {
+		c.TakeOverHistory()
+	}
 	if err := c.Connect(); err != nil {
 		m.drop(channelID, c)
 		return fmt.Errorf("session: connect resumed channel %s: %w", channelID, err)

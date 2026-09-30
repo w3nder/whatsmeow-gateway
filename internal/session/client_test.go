@@ -8,6 +8,8 @@ import (
 	"go.mau.fi/whatsmeow"
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 
@@ -140,6 +142,24 @@ func (f *recordingClient) Calls() call.Caller {
 }
 
 func (f *recordingClient) Disconnect() {}
+
+func (f *recordingClient) DownloadHistory(ctx context.Context, notif *waE2E.HistorySyncNotification) (*waHistorySync.HistorySync, error) {
+	return nil, nil
+}
+
+func (f *recordingClient) ReleaseHistory(ctx context.Context, notif *waE2E.HistorySyncNotification) error {
+	return nil
+}
+
+func (f *recordingClient) ParseWebMessage(chat types.JID, msg *waWeb.WebMessageInfo) (*events.Message, error) {
+	return nil, nil
+}
+
+func (f *recordingClient) TakeOverHistory() {}
+
+func (f *recordingClient) TakesOverHistory() bool {
+	return false
+}
 
 var _ WAClient = (*recordingClient)(nil)
 

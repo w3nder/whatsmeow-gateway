@@ -2511,3 +2511,41 @@ func TestBuildInboundTemplateMessageBecomesButtons(t *testing.T) {
 		t.Fatalf("unexpected url/call buttons: %+v", rc.Buttons[1:])
 	}
 }
+
+func TestBuildInboundToleratedMediaFailureKeepsTheMessageWithoutAKey(t *testing.T) {
+	store := &fakeMediaStore{}
+	deps := testDeps(fakeDownloader{err: errors.New("media gone from the cdn")}, nil, store)
+	deps.TolerateMediaFailure = true
+	evt := &events.Message{
+		Info:    baseInfo("wamid.image-gone", "5511999999999"),
+		Message: &waE2E.Message{ImageMessage: &waE2E.ImageMessage{Mimetype: proto.String("image/jpeg"), Caption: proto.String("foto antiga")}},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), deps, evt)
+	if err != nil {
+		t.Fatalf("a tolerated media failure must keep the message, got %v", err)
+	}
+	if out.Type != "image" || out.Media == nil || out.Media.Key != "" || out.Media.MimeType != "image/jpeg" || out.Media.Caption != "foto antiga" {
+		t.Fatalf("the message must keep type, mime and caption without a key, got %+v %+v", out, out.Media)
+	}
+	if len(store.puts) != 0 {
+		t.Fatalf("nothing is stored when the download fails, got %d puts", len(store.puts))
+	}
+}
+
+func TestBuildInboundToleratedStoreFailureKeepsTheDocumentName(t *testing.T) {
+	deps := testDeps(fakeDownloader{data: []byte("pdf")}, nil, &fakeMediaStore{err: errors.New("s3 down")})
+	deps.TolerateMediaFailure = true
+	evt := &events.Message{
+		Info:    baseInfo("wamid.doc-gone", "5511999999999"),
+		Message: &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{Mimetype: proto.String("application/pdf"), FileName: proto.String("contrato.pdf")}},
+	}
+
+	out, err := mapper.BuildInbound(context.Background(), deps, evt)
+	if err != nil {
+		t.Fatalf("a tolerated store failure must keep the message, got %v", err)
+	}
+	if out.Type != "document" || out.Media == nil || out.Media.Key != "" || out.Media.Filename != "contrato.pdf" {
+		t.Fatalf("the document must keep its name without a key, got %+v", out.Media)
+	}
+}

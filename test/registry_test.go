@@ -2,7 +2,9 @@ package test
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -347,5 +349,251 @@ func TestRegistryStoreSaveSettingsWithAStaleVersionDoesNotOverwriteAHigherOne(t 
 
 	if result, err := store.SaveSettings(ctx, "channel-unknown", "tenant-1", equal); err != nil || result != registry.SettingsNoSession {
 		t.Fatalf("SaveSettings(unknown) = %v, %v, want no session", result, err)
+	}
+}
+
+func openRegistry(t *testing.T) *registry.Store {
+	t.Helper()
+	store, err := registry.Open(context.Background(), startPostgresForGateway(t))
+	if err != nil {
+		t.Fatalf("registry.Open failed: %v", err)
+	}
+	t.Cleanup(store.Close)
+	return store
+}
+
+func TestRegistryHistoryImportKeepsCountingAfterItIsFinished(t *testing.T) {
+	store := openRegistry(t)
+	ctx := context.Background()
+
+	if _, found, err := store.ActiveHistoryImport(ctx, "channel-history"); err != nil || found {
+		t.Fatalf("a channel starts without an import, found %v err %v", found, err)
+	}
+	if err := store.BeginHistoryImport(ctx, "channel-history", "tenant-1", "import-1"); err != nil {
+		t.Fatalf("BeginHistoryImport failed: %v", err)
+	}
+	for want := 1; want <= 2; want++ {
+		total, err := store.CountHistoryBatch(ctx, "channel-history", "import-1")
+		if err != nil || total != want {
+			t.Fatalf("CountHistoryBatch = %d, %v; want %d", total, err, want)
+		}
+	}
+	active, found, err := store.ActiveHistoryImport(ctx, "channel-history")
+	if err != nil || !found || active != (registry.HistoryImport{TenantID: "tenant-1", ImportID: "import-1", Batches: 2}) {
+		t.Fatalf("ActiveHistoryImport = %+v, %v, %v", active, found, err)
+	}
+	if err := store.FinishHistoryImport(ctx, "channel-history", "import-1"); err != nil {
+		t.Fatalf("FinishHistoryImport failed: %v", err)
+	}
+	active, found, err = store.ActiveHistoryImport(ctx, "channel-history")
+	if err != nil || !found || active != (registry.HistoryImport{TenantID: "tenant-1", ImportID: "import-1", Batches: 2, Finished: true}) {
+		t.Fatalf("a finished import stays in the registry marked finished, got %+v, %v, %v", active, found, err)
+	}
+	if total, err := store.CountHistoryBatch(ctx, "channel-history", "import-1"); err != nil || total != 3 {
+		t.Fatalf("a batch published after the end still counts, got %d, %v", total, err)
+	}
+}
+
+func TestRegistrySkippedHistoryChatsCountEachChatOnce(t *testing.T) {
+	store := openRegistry(t)
+	ctx := context.Background()
+
+	if err := store.BeginHistoryImport(ctx, "channel-history", "tenant-1", "import-1"); err != nil {
+		t.Fatalf("BeginHistoryImport failed: %v", err)
+	}
+	if total, err := store.SkipHistoryChats(ctx, "channel-history", "import-1", []string{"111@lid", "222@lid"}); err != nil || total != 2 {
+		t.Fatalf("SkipHistoryChats = %d, %v; want 2", total, err)
+	}
+	if total, err := store.SkipHistoryChats(ctx, "channel-history", "import-1", []string{"222@lid", "333@lid"}); err != nil || total != 3 {
+		t.Fatalf("a chat skipped again in another chunk counts once, got %d, %v; want 3", total, err)
+	}
+	if active, _, err := store.ActiveHistoryImport(ctx, "channel-history"); err != nil || active.SkippedChats != 3 {
+		t.Fatalf("ActiveHistoryImport must carry the skipped chats, got %+v, %v", active, err)
+	}
+	if _, err := store.SkipHistoryChats(ctx, "channel-history", "import-old", []string{"444@lid"}); !errors.Is(err, registry.ErrNoHistoryImport) {
+		t.Fatalf("skipping chats of another import must report ErrNoHistoryImport, got %v", err)
+	}
+}
+
+func TestRegistryFinishedHistoryImportGoesQuietAfterThePeriodWithoutBatches(t *testing.T) {
+	dsn := startPostgresForGateway(t)
+	ctx := context.Background()
+	store, err := registry.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("registry.Open failed: %v", err)
+	}
+	t.Cleanup(store.Close)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New failed: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	for _, channelID := range []string{"channel-finished", "channel-running"} {
+		if err := store.Save(ctx, channelID, channelID+"@s.whatsapp.net", "tenant-1"); err != nil {
+			t.Fatalf("Save(%s) failed: %v", channelID, err)
+		}
+		if err := store.BeginHistoryImport(ctx, channelID, "tenant-1", "import-"+channelID); err != nil {
+			t.Fatalf("BeginHistoryImport(%s) failed: %v", channelID, err)
+		}
+	}
+	if err := store.FinishHistoryImport(ctx, "channel-finished", "import-channel-finished"); err != nil {
+		t.Fatalf("FinishHistoryImport failed: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE gateway_history_imports SET touched_at = now() - make_interval(secs => $1)`, (registry.HistoryQuietPeriod + time.Minute).Seconds()); err != nil {
+		t.Fatalf("age the imports: %v", err)
+	}
+
+	if _, found, err := store.ActiveHistoryImport(ctx, "channel-finished"); err != nil || found {
+		t.Fatalf("a finished import quiet for longer than the period is over, found %v err %v", found, err)
+	}
+	if _, err := store.CountHistoryBatch(ctx, "channel-finished", "import-channel-finished"); !errors.Is(err, registry.ErrNoHistoryImport) {
+		t.Fatalf("a quiet finished import takes no more batches, got %v", err)
+	}
+	if session, _, err := store.Get(ctx, "channel-finished"); err != nil || session.ImportingHistory {
+		t.Fatalf("a channel whose finished import went quiet is no longer importing, got %+v err %v", session, err)
+	}
+	if active, found, err := store.ActiveHistoryImport(ctx, "channel-running"); err != nil || !found || active.Finished {
+		t.Fatalf("an import that has not ended never goes quiet, got %+v found %v err %v", active, found, err)
+	}
+}
+
+func TestRegistryClearHistoryImportRemovesTheImportOfTheChannel(t *testing.T) {
+	store := openRegistry(t)
+	ctx := context.Background()
+
+	if err := store.BeginHistoryImport(ctx, "channel-history", "tenant-1", "import-1"); err != nil {
+		t.Fatalf("BeginHistoryImport failed: %v", err)
+	}
+	if err := store.FinishHistoryImport(ctx, "channel-history", "import-1"); err != nil {
+		t.Fatalf("FinishHistoryImport failed: %v", err)
+	}
+	if err := store.ClearHistoryImport(ctx, "channel-history"); err != nil {
+		t.Fatalf("ClearHistoryImport failed: %v", err)
+	}
+	if _, found, err := store.ActiveHistoryImport(ctx, "channel-history"); err != nil || found {
+		t.Fatalf("a cleared import is gone, found %v err %v", found, err)
+	}
+	if err := store.ClearHistoryImport(ctx, "channel-without-import"); err != nil {
+		t.Fatalf("clearing a channel without an import is a no-op, got %v", err)
+	}
+}
+
+func TestRegistryOpenAddsTheHistoryColumnsToAnExistingImportsTable(t *testing.T) {
+	dsn := startPostgresForGateway(t)
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New failed: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	if _, err := pool.Exec(ctx, `CREATE TABLE gateway_history_imports (
+		channel_id text PRIMARY KEY,
+		tenant_id text NOT NULL,
+		import_id text NOT NULL,
+		batches integer NOT NULL DEFAULT 0,
+		started_at timestamptz NOT NULL DEFAULT now()
+	)`); err != nil {
+		t.Fatalf("create the previous imports table failed: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO gateway_history_imports (channel_id, tenant_id, import_id, batches) VALUES ('channel-previous', 'tenant-1', 'import-1', 4)`); err != nil {
+		t.Fatalf("insert the previous row failed: %v", err)
+	}
+
+	store, err := registry.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("registry.Open on the previous imports table failed: %v", err)
+	}
+	t.Cleanup(store.Close)
+
+	active, found, err := store.ActiveHistoryImport(ctx, "channel-previous")
+	if err != nil || !found || active != (registry.HistoryImport{TenantID: "tenant-1", ImportID: "import-1", Batches: 4}) {
+		t.Fatalf("an import in flight before the upgrade keeps running, got %+v found %v err %v", active, found, err)
+	}
+}
+
+func TestRegistryBeginHistoryImportReplacesThePreviousOneAndResetsTheCount(t *testing.T) {
+	store := openRegistry(t)
+	ctx := context.Background()
+
+	if err := store.BeginHistoryImport(ctx, "channel-history", "tenant-1", "import-old"); err != nil {
+		t.Fatalf("BeginHistoryImport(old) failed: %v", err)
+	}
+	if _, err := store.CountHistoryBatch(ctx, "channel-history", "import-old"); err != nil {
+		t.Fatalf("CountHistoryBatch failed: %v", err)
+	}
+	if _, err := store.SkipHistoryChats(ctx, "channel-history", "import-old", []string{"111@lid"}); err != nil {
+		t.Fatalf("SkipHistoryChats failed: %v", err)
+	}
+	if err := store.FinishHistoryImport(ctx, "channel-history", "import-old"); err != nil {
+		t.Fatalf("FinishHistoryImport(old) failed: %v", err)
+	}
+	if err := store.BeginHistoryImport(ctx, "channel-history", "tenant-1", "import-new"); err != nil {
+		t.Fatalf("BeginHistoryImport(new) failed: %v", err)
+	}
+
+	active, _, err := store.ActiveHistoryImport(ctx, "channel-history")
+	if err != nil || active != (registry.HistoryImport{TenantID: "tenant-1", ImportID: "import-new"}) {
+		t.Fatalf("a new pairing replaces the import and resets the count, got %+v err %v", active, err)
+	}
+	if _, err := store.CountHistoryBatch(ctx, "channel-history", "import-old"); !errors.Is(err, registry.ErrNoHistoryImport) {
+		t.Fatalf("a batch of the replaced import must report ErrNoHistoryImport, got %v", err)
+	}
+	if err := store.FinishHistoryImport(ctx, "channel-history", "import-old"); err != nil {
+		t.Fatalf("FinishHistoryImport(old) failed: %v", err)
+	}
+	if active, found, _ := store.ActiveHistoryImport(ctx, "channel-history"); !found || active.ImportID != "import-new" || active.Finished {
+		t.Fatalf("finishing the replaced import must keep the new one, got %+v found %v", active, found)
+	}
+}
+
+func TestRegistrySessionsTellWhichChannelIsImportingHistory(t *testing.T) {
+	store := openRegistry(t)
+	ctx := context.Background()
+
+	for _, channelID := range []string{"channel-importing", "channel-idle"} {
+		if err := store.Save(ctx, channelID, channelID+"@s.whatsapp.net", "tenant-1"); err != nil {
+			t.Fatalf("Save(%s) failed: %v", channelID, err)
+		}
+	}
+	if err := store.BeginHistoryImport(ctx, "channel-importing", "tenant-1", "import-1"); err != nil {
+		t.Fatalf("BeginHistoryImport failed: %v", err)
+	}
+
+	importing, _, err := store.Get(ctx, "channel-importing")
+	if err != nil || !importing.ImportingHistory {
+		t.Fatalf("Get must report the active import, got %+v err %v", importing, err)
+	}
+	idle, _, err := store.Get(ctx, "channel-idle")
+	if err != nil || idle.ImportingHistory {
+		t.Fatalf("Get must report no import for an idle channel, got %+v err %v", idle, err)
+	}
+	sessions, err := store.ForShards(ctx, []int{0}, func(string) int { return 0 })
+	if err != nil || len(sessions) != 2 {
+		t.Fatalf("ForShards = %+v, %v", sessions, err)
+	}
+	for _, cs := range sessions {
+		if cs.ImportingHistory != (cs.ChannelID == "channel-importing") {
+			t.Fatalf("ForShards reports the import wrong for %+v", cs)
+		}
+	}
+}
+
+func TestRegistryDeleteAlsoEndsTheHistoryImport(t *testing.T) {
+	store := openRegistry(t)
+	ctx := context.Background()
+
+	if err := store.Save(ctx, "channel-history", "jid@s.whatsapp.net", "tenant-1"); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	if err := store.BeginHistoryImport(ctx, "channel-history", "tenant-1", "import-1"); err != nil {
+		t.Fatalf("BeginHistoryImport failed: %v", err)
+	}
+	if err := store.Delete(ctx, "channel-history"); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+	if _, found, err := store.ActiveHistoryImport(ctx, "channel-history"); err != nil || found {
+		t.Fatalf("logging out ends the import, found %v err %v", found, err)
 	}
 }

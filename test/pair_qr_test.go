@@ -52,7 +52,7 @@ func TestManagerPairReplaysStillValidQRToSecondRequest(t *testing.T) {
 		return fake, nil
 	})
 
-	first, err := mgr.Pair(context.Background(), "channel-replay-1")
+	first, err := mgr.Pair(context.Background(), "channel-replay-1", false)
 	if err != nil {
 		t.Fatalf("first Pair failed: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestManagerPairReplaysStillValidQRToSecondRequest(t *testing.T) {
 		t.Fatalf("expected the first pair session to report qr-live, got %+v", got)
 	}
 
-	second, err := mgr.Pair(context.Background(), "channel-replay-1")
+	second, err := mgr.Pair(context.Background(), "channel-replay-1", false)
 	if err != nil {
 		t.Fatalf("second Pair failed: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestManagerPairDoesNotReplayExpiredQR(t *testing.T) {
 		return fake, nil
 	})
 
-	first, err := mgr.Pair(context.Background(), "channel-expired-1")
+	first, err := mgr.Pair(context.Background(), "channel-expired-1", false)
 	if err != nil {
 		t.Fatalf("first Pair failed: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestManagerPairDoesNotReplayExpiredQR(t *testing.T) {
 
 	time.Sleep(2 * codeLifetime)
 
-	second, err := mgr.Pair(context.Background(), "channel-expired-1")
+	second, err := mgr.Pair(context.Background(), "channel-expired-1", false)
 	if err != nil {
 		t.Fatalf("second Pair failed: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestManagerPairSkipsQRThatExpiredInWhatsmeowsBuffer(t *testing.T) {
 		return fake, nil
 	})
 
-	updates, err := mgr.Pair(context.Background(), "channel-stale-buffer-1")
+	updates, err := mgr.Pair(context.Background(), "channel-stale-buffer-1", false)
 	if err != nil {
 		t.Fatalf("Pair failed: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestManagerPairReplayJudgesTheRetainedQRFromWhenItWasEmitted(t *testing.T) 
 
 	const channelID = "channel-late-read-1"
 
-	first, err := mgr.Pair(context.Background(), channelID)
+	first, err := mgr.Pair(context.Background(), channelID, false)
 	if err != nil {
 		t.Fatalf("first Pair failed: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestManagerPairAfterSuccessRetainsNoQR(t *testing.T) {
 	fake := paired
 	const channelID = "channel-paired-1"
 
-	first, err := mgr.Pair(context.Background(), channelID)
+	first, err := mgr.Pair(context.Background(), channelID, false)
 	if err != nil {
 		t.Fatalf("first Pair failed: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestManagerConcurrentPairRequestsRunOneQRLoop(t *testing.T) {
 	sessions := make(chan (<-chan session.PairUpdate), 2)
 	for range 2 {
 		go func() {
-			updates, err := mgr.Pair(context.Background(), channelID)
+			updates, err := mgr.Pair(context.Background(), channelID, false)
 			if err != nil {
 				t.Errorf("concurrent Pair failed: %v", err)
 				sessions <- nil
@@ -450,7 +450,7 @@ func TestManagerConcurrentPairRequestsRunOneQRLoop(t *testing.T) {
 func mustPair(t *testing.T, mgr *session.Manager, channelID string) <-chan session.PairUpdate {
 	t.Helper()
 
-	updates, err := mgr.Pair(context.Background(), channelID)
+	updates, err := mgr.Pair(context.Background(), channelID, false)
 	if err != nil {
 		t.Fatalf("Pair(%s) failed: %v", channelID, err)
 	}
