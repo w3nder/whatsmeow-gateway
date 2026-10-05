@@ -237,6 +237,12 @@ type InboundGroupParticipant struct {
 	ProfilePicture *avatar.Picture `json:"profilePicture,omitempty"`
 }
 
+type InboundMention struct {
+	JID string `json:"jid"`
+	Lid string `json:"lid,omitempty"`
+	Pn  string `json:"pn,omitempty"`
+}
+
 type InboundGroup struct {
 	JID            string                   `json:"jid"`
 	Name           string                   `json:"name,omitempty"`
@@ -269,6 +275,8 @@ type InboundEvent struct {
 	InteractiveReplyID string              `json:"interactiveReplyId,omitempty"`
 	AdReferral         *InboundAdReferral  `json:"adReferral,omitempty"`
 	Origin             string              `json:"origin,omitempty"`
+	Mentions           []InboundMention    `json:"mentions,omitempty"`
+	mentionedJIDs      []string
 }
 
 type StatusError struct {
@@ -329,10 +337,27 @@ func applyGroup(ctx context.Context, deps InboundDeps, evt *events.Message, out 
 	}
 
 	out.Group = &group
+	out.Mentions = resolveMentions(ctx, deps.Resolver, out.mentionedJIDs)
 	out.From = group.JID
 	out.SenderLid = ""
 	out.SenderPn = ""
 	out.ProfileName = ""
+}
+
+func resolveMentions(ctx context.Context, resolver PNResolver, jids []string) []InboundMention {
+	mentions := make([]InboundMention, 0, len(jids))
+	for _, raw := range jids {
+		jid, err := types.ParseJID(raw)
+		if err != nil || jid.User == "" {
+			continue
+		}
+		lid, pn := senderid.Resolve(ctx, resolver, jid.ToNonAD(), types.EmptyJID)
+		mentions = append(mentions, InboundMention{JID: jid.ToNonAD().String(), Lid: lid, Pn: pn})
+	}
+	if len(mentions) == 0 {
+		return nil
+	}
+	return mentions
 }
 
 func identityJIDs(evt *events.Message) (jid, alt types.JID) {

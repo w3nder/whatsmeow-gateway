@@ -2549,3 +2549,53 @@ func TestBuildInboundToleratedStoreFailureKeepsTheDocumentName(t *testing.T) {
 		t.Fatalf("the document must keep its name without a key, got %+v", out.Media)
 	}
 }
+
+func TestBuildInboundResolvesEachMentionedMemberToItsPhone(t *testing.T) {
+	evt := groupMessageEvent(false)
+	evt.Message = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+		Text:        proto.String("@196404576260215 e @5511777776666 vejam"),
+		ContextInfo: &waE2E.ContextInfo{MentionedJID: []string{"196404576260215@lid", "5511777776666@s.whatsapp.net", "not a jid"}},
+	}}
+	resolver := fakePNResolver{pn: types.NewJID("557588428289", types.DefaultUserServer), found: true}
+
+	out, err := mapper.BuildInbound(context.Background(), mapper.InboundDeps{Resolver: resolver}, evt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []mapper.InboundMention{
+		{JID: "196404576260215@lid", Lid: "196404576260215", Pn: "557588428289"},
+		{JID: "5511777776666@s.whatsapp.net", Pn: "5511777776666"},
+	}
+	if len(out.Mentions) != len(want) {
+		t.Fatalf("mentions = %+v, want %+v", out.Mentions, want)
+	}
+	for i := range want {
+		if out.Mentions[i] != want[i] {
+			t.Fatalf("mention %d = %+v, want %+v", i, out.Mentions[i], want[i])
+		}
+	}
+	wire, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(wire), `"mentions":[{"jid":"196404576260215@lid","lid":"196404576260215","pn":"557588428289"}`) {
+		t.Fatalf("wire = %s", wire)
+	}
+}
+
+func TestBuildInboundSendsNoMentionsOnAGroupMessageWithoutTags(t *testing.T) {
+	out, err := mapper.BuildInbound(context.Background(), mapper.InboundDeps{}, groupMessageEvent(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Mentions != nil {
+		t.Fatalf("mentions = %+v, want none", out.Mentions)
+	}
+	wire, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire), "mentions") {
+		t.Fatalf("wire = %s", wire)
+	}
+}

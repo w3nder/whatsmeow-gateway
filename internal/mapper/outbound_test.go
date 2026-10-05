@@ -738,3 +738,54 @@ func TestBuildOutboundRefusesAnInteractiveTypeWithNoPayload(t *testing.T) {
 		t.Fatal("expected an error when the interactive payload is missing")
 	}
 }
+
+func TestBuildOutboundTextMentionsTheTaggedMembers(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{
+		To:       "120363000000000000@g.us",
+		Type:     "text",
+		Text:     "@196404576260215 pode ver?",
+		Mentions: []string{"196404576260215@lid"},
+	}
+
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	ext := msg.GetExtendedTextMessage()
+	if ext == nil {
+		t.Fatalf("a mention needs an ExtendedTextMessage, got %+v", msg)
+	}
+	if ext.GetText() != "@196404576260215 pode ver?" {
+		t.Fatalf("text = %q", ext.GetText())
+	}
+	mentioned := ext.GetContextInfo().GetMentionedJID()
+	if len(mentioned) != 1 || mentioned[0] != "196404576260215@lid" {
+		t.Fatalf("mentioned = %v", mentioned)
+	}
+	if ext.GetContextInfo().GetStanzaID() != "" {
+		t.Fatalf("a mention without a reply must not quote, got %q", ext.GetContextInfo().GetStanzaID())
+	}
+}
+
+func TestBuildOutboundCaptionKeepsMentionsAlongsideTheReply(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{
+		To:       "120363000000000000@g.us",
+		Type:     "image",
+		Text:     "@5511888888888 olha",
+		Media:    &amqp.MediaPayload{URL: "https://cdn.example.com/a.jpg", Mime: "image/jpeg"},
+		ReplyTo:  &amqp.ReplyToPayload{ProviderMessageID: "wamid.quoted"},
+		Mentions: []string{"5511888888888@s.whatsapp.net"},
+	}
+
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{resp: stubUploadResponse}, cmd, stubFetch([]byte("img"), nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	ctxInfo := msg.GetImageMessage().GetContextInfo()
+	if ctxInfo.GetStanzaID() != "wamid.quoted" {
+		t.Fatalf("StanzaID = %q", ctxInfo.GetStanzaID())
+	}
+	if mentioned := ctxInfo.GetMentionedJID(); len(mentioned) != 1 || mentioned[0] != "5511888888888@s.whatsapp.net" {
+		t.Fatalf("mentioned = %v", mentioned)
+	}
+}

@@ -70,6 +70,7 @@ type GatewaySendCommand struct {
 	Location                *LocationPayload    `json:"location,omitempty"`
 	Contacts                []ContactPayload    `json:"contacts,omitempty"`
 	ReplyTo                 *ReplyToPayload     `json:"replyTo,omitempty"`
+	Mentions                []string            `json:"mentions,omitempty"`
 	Interactive             *InteractivePayload `json:"interactive,omitempty"`
 }
 
