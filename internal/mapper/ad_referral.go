@@ -112,4 +112,5 @@ func applyContextInfo(out *InboundEvent, ci *waE2E.ContextInfo) {
 	if referral := adReferralFrom(ci); referral != nil {
 		out.AdReferral = referral
 	}
+	out.mentionedJIDs = ci.GetMentionedJID()
 }

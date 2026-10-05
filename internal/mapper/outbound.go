@@ -130,12 +130,12 @@ func buildByType(ctx context.Context, up Uploader, cmd amqp.GatewaySendCommand, 
 		if cmd.Interactive == nil {
 			return nil, nil, fmt.Errorf("mapper: type %q requires an interactive payload", cmd.Type)
 		}
-		return BuildButtons(*cmd.Interactive, contextInfoFor(cmd.ReplyTo))
+		return BuildButtons(*cmd.Interactive, contextInfoFor(cmd))
 	case "list":
 		if cmd.Interactive == nil {
 			return nil, nil, fmt.Errorf("mapper: type %q requires an interactive payload", cmd.Type)
 		}
-		return BuildList(*cmd.Interactive, contextInfoFor(cmd.ReplyTo))
+		return BuildList(*cmd.Interactive, contextInfoFor(cmd))
 	default:
 		return nil, nil, fmt.Errorf("mapper: unsupported message type %q", cmd.Type)
 	}
@@ -169,24 +169,31 @@ func markForwarded(msg *waE2E.Message) *waE2E.Message {
 }
 
 func buildText(cmd amqp.GatewaySendCommand) *waE2E.Message {
-	if cmd.ReplyTo == nil {
+	ctxInfo := contextInfoFor(cmd)
+	if ctxInfo == nil {
 		return &waE2E.Message{Conversation: proto.String(cmd.Text)}
 	}
 	return &waE2E.Message{
 		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
 			Text:        proto.String(cmd.Text),
-			ContextInfo: contextInfoFor(cmd.ReplyTo),
+			ContextInfo: ctxInfo,
 		},
 	}
 }
 
-func contextInfoFor(replyTo *amqp.ReplyToPayload) *waE2E.ContextInfo {
-	if replyTo == nil {
+func contextInfoFor(cmd amqp.GatewaySendCommand) *waE2E.ContextInfo {
+	if cmd.ReplyTo == nil && len(cmd.Mentions) == 0 {
 		return nil
 	}
-	ctxInfo := &waE2E.ContextInfo{StanzaID: proto.String(replyTo.ProviderMessageID)}
-	if replyTo.ParticipantJID != "" {
-		ctxInfo.Participant = proto.String(replyTo.ParticipantJID)
+	ctxInfo := &waE2E.ContextInfo{}
+	if cmd.ReplyTo != nil {
+		ctxInfo.StanzaID = proto.String(cmd.ReplyTo.ProviderMessageID)
+		if cmd.ReplyTo.ParticipantJID != "" {
+			ctxInfo.Participant = proto.String(cmd.ReplyTo.ParticipantJID)
+		}
+	}
+	if len(cmd.Mentions) > 0 {
+		ctxInfo.MentionedJID = cmd.Mentions
 	}
 	return ctxInfo
 }
@@ -206,7 +213,7 @@ func buildMedia(ctx context.Context, up Uploader, fetch MediaFetcher, cmd amqp.G
 		return nil, fmt.Errorf("mapper: upload media: %w", err)
 	}
 
-	ctxInfo := contextInfoFor(cmd.ReplyTo)
+	ctxInfo := contextInfoFor(cmd)
 
 	switch cmd.Type {
 	case "image":
@@ -286,7 +293,7 @@ func buildLocation(cmd amqp.GatewaySendCommand) (*waE2E.Message, error) {
 			DegreesLongitude: proto.Float64(cmd.Location.Lng),
 			Name:             optionalString(cmd.Location.Name),
 			Address:          optionalString(cmd.Location.Address),
-			ContextInfo:      contextInfoFor(cmd.ReplyTo),
+			ContextInfo:      contextInfoFor(cmd),
 		},
 	}, nil
 }
@@ -298,7 +305,7 @@ func buildContacts(cmd amqp.GatewaySendCommand) (*waE2E.Message, error) {
 
 	if len(cmd.Contacts) == 1 {
 		msg := contactMessage(cmd.Contacts[0])
-		msg.ContextInfo = contextInfoFor(cmd.ReplyTo)
+		msg.ContextInfo = contextInfoFor(cmd)
 		return &waE2E.Message{ContactMessage: msg}, nil
 	}
 
@@ -309,7 +316,7 @@ func buildContacts(cmd amqp.GatewaySendCommand) (*waE2E.Message, error) {
 	return &waE2E.Message{
 		ContactsArrayMessage: &waE2E.ContactsArrayMessage{
 			Contacts:    contacts,
-			ContextInfo: contextInfoFor(cmd.ReplyTo),
+			ContextInfo: contextInfoFor(cmd),
 		},
 	}, nil
 }
