@@ -618,13 +618,30 @@ func (g *gateway) publishSendFailure(ctx context.Context, cmd amqp.GatewaySendCo
 		Status:            "failed",
 		Timestamp:         strconv.FormatInt(time.Now().Unix(), 10),
 		Error: &mapper.StatusError{
-			Code:   "gateway_send_error",
+			Code:   sendFailureCode(cause),
 			Reason: cause.Error(),
 		},
 	}); err != nil {
 		return fmt.Errorf("gateway: publish failed status %s: %w", cmd.MessageID, err)
 	}
 	return nil
+}
+
+const (
+	sendFailureCodeGeneric        = "gateway_send_error"
+	sendFailureCodeSessionMissing = "session_missing"
+	sendFailureCodeSessionDown    = "session_down"
+)
+
+func sendFailureCode(err error) string {
+	switch {
+	case errors.Is(err, session.ErrNoSession):
+		return sendFailureCodeSessionMissing
+	case errors.Is(err, session.ErrSocketDown):
+		return sendFailureCodeSessionDown
+	default:
+		return sendFailureCodeGeneric
+	}
 }
 
 func (g *gateway) waClientFor(channelID string) (session.WAClient, error) {

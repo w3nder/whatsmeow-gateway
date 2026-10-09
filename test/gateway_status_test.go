@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -275,6 +276,9 @@ func TestGatewaySendHandlerPublishesFailedStatusAndAcksOnSendError(t *testing.T)
 	if evt.Error == nil || evt.Error.Reason == "" {
 		t.Fatalf("expected a populated error reason on a failed send, got %+v", evt)
 	}
+	if evt.Error.Code != "gateway_send_error" {
+		t.Fatalf("expected the generic code gateway_send_error for a rejected send, got %+v", evt.Error)
+	}
 
 	select {
 	case d := <-dlqCh:
@@ -295,6 +299,61 @@ func TestGatewaySendHandlerPublishesFailedStatusAndAcksOnSendError(t *testing.T)
 	}
 	if existingProviderID != expectedProviderID {
 		t.Fatalf("expected the ledger's provider_message_id to be %q, got %q", expectedProviderID, existingProviderID)
+	}
+
+	shutdownStatusRoundtripGateway(t, cancel, runErrCh)
+}
+
+func TestGatewaySendHandlerPublishesSessionMissingForAnUnpairedChannel(t *testing.T) {
+	const messageID = "msg-status-roundtrip-unpaired-1"
+	expectedProviderID := dedupe.DeterministicProviderID(messageID)
+
+	fake := newFakeWAClient()
+
+	probeCh, deliveries, dedupeStore, cancel, runErrCh := setupStatusRoundtripGateway(t, fake, "channel-status-roundtrip-3")
+
+	sendBody, err := json.Marshal(gatewayamqp.GatewaySendCommand{
+		TenantID:  "tenant-status-roundtrip-3",
+		ChannelID: "channel-never-paired",
+		MessageID: messageID,
+		To:        "15557654321@s.whatsapp.net",
+		Type:      "text",
+		Text:      "this channel has no session",
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal send command: %v", err)
+	}
+
+	publishCtx, publishCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer publishCancel()
+	if err := probeCh.PublishWithContext(publishCtx, gatewayamqp.GatewaySendExchange, "0", false, false, rabbitmq.Publishing{
+		ContentType: "application/json",
+		Body:        sendBody,
+	}); err != nil {
+		t.Fatalf("failed to publish send command: %v", err)
+	}
+
+	delivery := waitForDelivery(t, deliveries, gatewayamqp.StatusRoutingKey, 10*time.Second)
+	var evt mapper.StatusEvent
+	if err := json.Unmarshal(delivery.Body, &evt); err != nil {
+		t.Fatalf("failed to unmarshal whatsapp.status.v1 event: %v", err)
+	}
+	if evt.Status != "failed" || evt.OpaqueMessageID != messageID || evt.ProviderMessageID != expectedProviderID {
+		t.Fatalf("expected a failed receipt for %s, got %+v", messageID, evt)
+	}
+	if evt.Error == nil || evt.Error.Code != "session_missing" {
+		t.Fatalf("expected error.code=session_missing, got %+v", evt.Error)
+	}
+	if !strings.Contains(evt.Error.Reason, "channel-never-paired is not paired") {
+		t.Fatalf("expected the free-text reason to stay unchanged for the old fallback, got %q", evt.Error.Reason)
+	}
+
+	alreadySent, _, err := dedupeStore.Begin(context.Background(), messageID, expectedProviderID)
+	if err != nil {
+		t.Fatalf("Begin (verification) failed: %v", err)
+	}
+	if alreadySent {
+		t.Fatal("expected the ledger row to stay pending so a later resend goes through")
 	}
 
 	shutdownStatusRoundtripGateway(t, cancel, runErrCh)
