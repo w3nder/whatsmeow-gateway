@@ -80,7 +80,14 @@ type gateway struct {
 
 	tenantMu        sync.RWMutex
 	tenantByChannel map[string]string
+
+	loggedOut sync.Map
 }
+
+const (
+	reasonDeviceLoggedOut = "device_logged_out"
+	reasonResumeFailed    = "resume_failed"
+)
 
 func Run(ctx context.Context, deps Deps) error {
 	g := &gateway{
@@ -329,6 +336,7 @@ func (g *gateway) resumeOwnedSessions(ctx context.Context) {
 		jid, err := types.ParseJID(cs.JID)
 		if err != nil {
 			g.logger.Error("gateway: parse stored jid for resume", "channel_id", cs.ChannelID, "error", err)
+			g.publishChannelFailure(ctx, cs.TenantID, "", cs.ChannelID, reasonResumeFailed)
 			continue
 		}
 
@@ -337,6 +345,7 @@ func (g *gateway) resumeOwnedSessions(ctx context.Context) {
 
 		if err := g.manager.Resume(ctx, cs.ChannelID, jid, cs.ImportingHistory); err != nil {
 			g.logger.Error("gateway: resume session", "channel_id", cs.ChannelID, "error", err)
+			g.publishChannelFailure(ctx, cs.TenantID, "", cs.ChannelID, reasonResumeFailed)
 			continue
 		}
 
@@ -382,6 +391,7 @@ func (g *gateway) drainWithin(name string, timeout time.Duration, closeFn func()
 
 func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand, accept func()) error {
 	g.setTenant(cmd.ChannelID, cmd.TenantID)
+	g.loggedOut.Delete(cmd.ChannelID)
 
 	if err := g.recordHistoryChoice(ctx, cmd); err != nil {
 		g.publishChannelError(ctx, cmd.TenantID, cmd.UserID, cmd.ChannelID, err)
@@ -698,6 +708,9 @@ func (g *gateway) handleSessionEvent(channelID string, evt any) {
 	case *events.GroupInfo:
 		g.handleGroupInfo(channelID, e)
 	case *events.LoggedOut:
+		if _, already := g.loggedOut.LoadOrStore(channelID, struct{}{}); !already {
+			g.publishChannelStatus(channelID, "disconnected", reasonDeviceLoggedOut)
+		}
 		g.clearTenant(channelID)
 		g.settings.Clear(channelID)
 		if err := g.registry.Delete(g.workCtx, channelID); err != nil {
@@ -751,6 +764,9 @@ func (g *gateway) handleConnectionEvent(channelID string, evt any) {
 		g.logger.Info("gateway: channel socket connected", "channel_id", channelID)
 		g.publishChannelStatus(channelID, "connected", "")
 	case *events.Disconnected:
+		if _, gone := g.loggedOut.Load(channelID); gone {
+			return
+		}
 		g.logger.Warn("gateway: channel socket disconnected, auto-reconnect running", "channel_id", channelID)
 		g.publishChannelStatus(channelID, "disconnected", "socket disconnected")
 	case *events.KeepAliveTimeout:

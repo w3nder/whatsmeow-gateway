@@ -23,11 +23,15 @@ A classificação é por erro tipado (`session.ErrNoSession`, `session.ErrSocket
 
 ## `channel.status`
 
-O gateway publica `connected` ao parear e a cada `events.Connected`; `disconnected` em `events.Disconnected`; `error` em `StreamReplaced`, `TemporaryBan`, `ClientOutdated`, `ConnectFailure`, `StreamError` e falha de pareamento. Situações em que um canal fica sem sessão sem publicar `disconnected`/`error`:
+O gateway publica `connected` ao parear e a cada `events.Connected`; `disconnected` em `events.Disconnected`; `error` em `StreamReplaced`, `TemporaryBan`, `ClientOutdated`, `ConnectFailure`, `StreamError` e falha de pareamento. O formato do evento não mudou; só há dois casos novos, com `reason` estável:
 
-- `events.LoggedOut`: a sessão é apagada do registry e do manager, mas nenhum `channel.status` é publicado.
-- Falha ao retomar sessões no boot (`resumeOwnedSessions`: JID inválido, factory ou `Connect` com erro): só log, sem `channel.status`.
-- Falha ao retomar sob demanda no envio (`ensureChannelConnected`): vira `failed` no recibo, sem `channel.status`.
-- Gateway que cai ou reinicia: nada é publicado enquanto estiver fora; o canal só reaparece com `connected` quando a sessão for retomada.
+| status | reason | Quando sai |
+|---|---|---|
+| `disconnected` | `device_logged_out` | `events.LoggedOut`: o aparelho desvinculou a sessão. Sai uma vez por logout, antes de a sessão ser apagada do registry; o `Disconnected` que o socket emite em seguida é suprimido e o canal só volta a publicar depois de um novo pareamento. O canal precisa parear de novo. |
+| `error` | `resume_failed` | Falha ao retomar a sessão guardada no boot (JID inválido, factory ou `Connect` com erro). Só aquele canal; o boot e as outras sessões seguem. |
+
+Situações que continuam sem `channel.status`:
+
+- Falha ao retomar sob demanda no envio: o recibo `failed` com `session_missing`, `session_down` ou `gateway_send_error` já cobre.
 - `KeepAliveTimeout`: apenas log; o `disconnected` só sai se o socket de fato cair.
-- Canal pareado que o registry perdeu: o envio devolve `session_missing` e nenhum status é publicado.
+- Gateway que cai ou reinicia: nada é publicado enquanto estiver fora; o canal volta com `connected` quando a sessão for retomada.
