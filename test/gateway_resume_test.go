@@ -294,6 +294,50 @@ func TestGatewayPersistsSessionOnPairSuccess(t *testing.T) {
 	}
 }
 
+func channelStatusProbe(t *testing.T, conn *rabbitmq.Connection) (*rabbitmq.Channel, <-chan rabbitmq.Delivery) {
+	t.Helper()
+	probeCh, err := conn.Channel()
+	if err != nil {
+		t.Fatalf("failed to open probe channel: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := probeCh.Close(); err != nil {
+			t.Errorf("failed to close probe channel: %v", err)
+		}
+	})
+	probeQ, err := probeCh.QueueDeclare("", false, true, true, false, nil)
+	if err != nil {
+		t.Fatalf("failed to declare probe queue: %v", err)
+	}
+	if err := probeCh.QueueBind(probeQ.Name, gatewayamqp.ChannelStatusRoutingKey, gatewayamqp.EventsExchange, false, nil); err != nil {
+		t.Fatalf("failed to bind probe queue: %v", err)
+	}
+	deliveries, err := probeCh.Consume(probeQ.Name, "", true, false, false, false, nil)
+	if err != nil {
+		t.Fatalf("failed to consume probe queue: %v", err)
+	}
+	return probeCh, deliveries
+}
+
+func waitForChannelStatusOf(t *testing.T, deliveries <-chan rabbitmq.Delivery, channelID, status string, timeout time.Duration) gatewayamqp.ChannelStatusEvent {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case d := <-deliveries:
+			var evt gatewayamqp.ChannelStatusEvent
+			if err := json.Unmarshal(d.Body, &evt); err != nil {
+				t.Fatalf("failed to unmarshal channel.status: %v", err)
+			}
+			if evt.ChannelID == channelID && evt.Status == status {
+				return evt
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for channel.status %q of %s", status, channelID)
+		}
+	}
+}
+
 func TestGatewayBootSkipsStaleDeviceRowAndResumesValidChannel(t *testing.T) {
 	conn := startRabbitMQ(t)
 	redisClient := startRedis(t)
@@ -357,6 +401,8 @@ func TestGatewayBootSkipsStaleDeviceRowAndResumesValidChannel(t *testing.T) {
 	logBuf := &syncBuffer{}
 	logger := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
+	_, statusDeliveries := channelStatusProbe(t, conn)
+
 	const instanceID = "gateway-stale-device-instance"
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -399,6 +445,11 @@ func TestGatewayBootSkipsStaleDeviceRowAndResumesValidChannel(t *testing.T) {
 	}
 	if !strings.Contains(logs, "resume session") {
 		t.Fatalf("expected a %q log message for the stale channel, got logs: %s", "resume session", logs)
+	}
+
+	failed := waitForChannelStatusOf(t, statusDeliveries, staleChannelID, "error", 10*time.Second)
+	if failed.Reason != "resume_failed" || failed.TenantID != staleTenantID {
+		t.Fatalf("expected error/resume_failed for the stale channel with its tenant, got %+v", failed)
 	}
 
 	cancel()
@@ -529,6 +580,19 @@ func TestGatewayDeletesSessionFromRegistryOnLoggedOut(t *testing.T) {
 	}
 
 	fake.emit(&events.LoggedOut{})
+
+	loggedOut := waitForChannelStatusOf(t, deliveries, channelID, "disconnected", 10*time.Second)
+	if loggedOut.Reason != "device_logged_out" || loggedOut.TenantID != tenantID {
+		t.Fatalf("expected disconnected/device_logged_out with the tenant, got %+v", loggedOut)
+	}
+
+	fake.emit(&events.Disconnected{})
+	fake.emit(&events.LoggedOut{})
+	select {
+	case d := <-deliveries:
+		t.Fatalf("expected no further channel.status after the logout, got %s", d.Body)
+	case <-time.After(1 * time.Second):
+	}
 
 	deadline := time.After(5 * time.Second)
 	for {

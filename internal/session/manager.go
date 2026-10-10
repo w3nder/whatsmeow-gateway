@@ -18,6 +18,8 @@ import (
 
 var ErrNoSession = errors.New("session: channel has no live session")
 
+var ErrSocketDown = errors.New("session: socket still down")
+
 const connectWait = 10 * time.Second
 
 type PairUpdate struct {
@@ -280,7 +282,7 @@ func ensureUp(client WAClient) error {
 	if client.WaitForConnection(connectWait) {
 		return nil
 	}
-	return fmt.Errorf("session: socket still down after %s, auto-reconnect still running", connectWait)
+	return fmt.Errorf("%w after %s, auto-reconnect still running", ErrSocketDown, connectWait)
 }
 
 func (m *Manager) Send(ctx context.Context, channelID string, to types.JID, msg *waE2E.Message, id string, nodes []waBinary.Node) (string, time.Time, error) {
