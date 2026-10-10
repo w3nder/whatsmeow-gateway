@@ -20,10 +20,15 @@ var ErrNoSession = errors.New("session: channel has no live session")
 
 var ErrSocketDown = errors.New("session: socket still down")
 
+var ErrInvalidPhoneNumber = errors.New("session: invalid phone number for a pairing code")
+
+var ErrPairingCodeExpired = errors.New("session: pairing code expired before it was used")
+
 const connectWait = 10 * time.Second
 
 type PairUpdate struct {
 	QR        string
+	Code      string
 	Connected bool
 	Err       error
 }
@@ -35,14 +40,21 @@ type pairing struct {
 	emitted  time.Time
 	lifetime time.Duration
 
+	phone string
+	code  string
+
 	importHistory bool
 	stop          chan struct{}
 	stopOnce      sync.Once
 	done          chan struct{}
 }
 
-func newPairing(importHistory bool) *pairing {
-	return &pairing{importHistory: importHistory, stop: make(chan struct{}), done: make(chan struct{})}
+func newPairing(importHistory bool, phone string) *pairing {
+	return &pairing{importHistory: importHistory, phone: phone, stop: make(chan struct{}), done: make(chan struct{})}
+}
+
+func (p *pairing) byCode() bool {
+	return p.phone != ""
 }
 
 func (p *pairing) halt() {
@@ -57,7 +69,15 @@ func (p *pairing) validQR(now time.Time) (string, bool) {
 }
 
 func (p *pairing) clear() {
-	p.qr, p.emitted, p.lifetime = "", time.Time{}, 0
+	p.qr, p.emitted, p.lifetime, p.code = "", time.Time{}, 0, ""
+}
+
+func (p *pairing) retained(now time.Time) (PairUpdate, bool) {
+	if p.byCode() {
+		return PairUpdate{Code: p.code}, p.code != ""
+	}
+	code, valid := p.validQR(now)
+	return PairUpdate{QR: code}, valid
 }
 
 type Manager struct {
@@ -98,6 +118,14 @@ func (m *Manager) OnEvent(handler func(channelID string, evt any)) {
 }
 
 func (m *Manager) Pair(ctx context.Context, channelID string, importHistory bool) (<-chan PairUpdate, error) {
+	return m.pair(ctx, channelID, importHistory, "")
+}
+
+func (m *Manager) PairByCode(ctx context.Context, channelID, phone string, importHistory bool) (<-chan PairUpdate, error) {
+	return m.pair(ctx, channelID, importHistory, phone)
+}
+
+func (m *Manager) pair(ctx context.Context, channelID string, importHistory bool, phone string) (<-chan PairUpdate, error) {
 	client, err := m.client(channelID)
 	if err != nil {
 		return nil, err
@@ -113,14 +141,14 @@ func (m *Manager) Pair(ctx context.Context, channelID string, importHistory bool
 		return updates, nil
 	}
 
-	p, joined, superseded := m.beginPairing(channelID, importHistory)
+	p, joined, superseded := m.beginPairing(channelID, importHistory, phone)
 	if superseded != nil {
 		select {
 		case <-superseded.done:
 		case <-ctx.Done():
 			return nil, fmt.Errorf("session: wait for the superseded pairing of %s to end: %w", channelID, ctx.Err())
 		}
-		return m.Pair(ctx, channelID, importHistory)
+		return m.pair(ctx, channelID, importHistory, phone)
 	}
 	if joined != nil {
 		return joined, nil
@@ -162,28 +190,41 @@ func (m *Manager) Pair(ctx context.Context, channelID string, importHistory bool
 					return
 				}
 				var update PairUpdate
-				switch evt.Event {
-				case "code":
+				ends := false
+				switch {
+				case evt.Event == whatsmeow.QRChannelEventCode && p.byCode():
+					if m.hasCode(channelID, p) {
+						continue
+					}
+					code, err := client.PairPhone(ctx, p.phone)
+					if err != nil {
+						update, ends = PairUpdate{Err: pairPhoneError(channelID, err)}, true
+						break
+					}
+					if !m.retainCode(channelID, p, code) {
+						continue
+					}
+					update = PairUpdate{Code: code}
+				case evt.Event == whatsmeow.QRChannelEventCode:
 					if !m.retainQR(channelID, p, evt.Code, evt.Timeout) {
 						continue
 					}
 					update = PairUpdate{QR: evt.Code}
-				case "success":
+				case evt.Event == whatsmeow.QRChannelSuccess.Event:
 					m.clearQR(channelID, p)
 					update = PairUpdate{Connected: true}
 				default:
 					m.clearQR(channelID, p)
-					pairErr := evt.Error
-					if pairErr == nil {
-						pairErr = fmt.Errorf("whatsmeow-gateway: pairing ended with event %q", evt.Event)
-					}
-					update = PairUpdate{Err: pairErr}
+					update = PairUpdate{Err: pairingEndError(p, evt)}
 				}
 				select {
 				case updates <- update:
 				case <-ctx.Done():
 					return
 				case <-p.stop:
+					return
+				}
+				if ends {
 					return
 				}
 			case <-ctx.Done():
@@ -197,24 +238,24 @@ func (m *Manager) Pair(ctx context.Context, channelID string, importHistory bool
 	return updates, nil
 }
 
-func (m *Manager) beginPairing(channelID string, importHistory bool) (*pairing, <-chan PairUpdate, *pairing) {
+func (m *Manager) beginPairing(channelID string, importHistory bool, phone string) (*pairing, <-chan PairUpdate, *pairing) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if live, ok := m.pairings[channelID]; ok {
-		if importHistory != live.importHistory {
+		if importHistory != live.importHistory || phone != live.phone {
 			live.halt()
 			return nil, nil, live
 		}
 		updates := make(chan PairUpdate, 1)
-		if code, valid := live.validQR(time.Now()); valid {
-			updates <- PairUpdate{QR: code}
+		if update, valid := live.retained(time.Now()); valid {
+			updates <- update
 		}
 		close(updates)
 		return nil, updates, nil
 	}
 
-	p := newPairing(importHistory)
+	p := newPairing(importHistory, phone)
 	m.pairings[channelID] = p
 	return p, nil, nil
 }
@@ -252,6 +293,41 @@ func (m *Manager) retainQR(channelID string, p *pairing, code string, timeout ti
 
 	p.qr, p.emitted, p.lifetime = code, emitted, timeout
 	return now.Before(emitted.Add(timeout))
+}
+
+func (m *Manager) hasCode(channelID string, p *pairing) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.pairings[channelID] == p && p.code != ""
+}
+
+func (m *Manager) retainCode(channelID string, p *pairing, code string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.pairings[channelID] != p || code == "" {
+		return false
+	}
+	p.code = code
+	return true
+}
+
+func pairPhoneError(channelID string, err error) error {
+	if errors.Is(err, whatsmeow.ErrPhoneNumberTooShort) || errors.Is(err, whatsmeow.ErrPhoneNumberIsNotInternational) {
+		return fmt.Errorf("%w: %w", ErrInvalidPhoneNumber, err)
+	}
+	return fmt.Errorf("session: ask a pairing code for %s: %w", channelID, err)
+}
+
+func pairingEndError(p *pairing, evt whatsmeow.QRChannelItem) error {
+	if evt.Error != nil {
+		return evt.Error
+	}
+	if p.byCode() && evt.Event == whatsmeow.QRChannelTimeout.Event {
+		return ErrPairingCodeExpired
+	}
+	return fmt.Errorf("whatsmeow-gateway: pairing ended with event %q", evt.Event)
 }
 
 func (m *Manager) clearQR(channelID string, p *pairing) {

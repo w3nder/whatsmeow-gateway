@@ -12,10 +12,11 @@ import (
 )
 
 type ChannelQREvent struct {
-	TenantID  string `json:"tenantId"`
-	UserID    string `json:"userId"`
-	ChannelID string `json:"channelId"`
-	QR        string `json:"qr"`
+	TenantID    string `json:"tenantId"`
+	UserID      string `json:"userId"`
+	ChannelID   string `json:"channelId"`
+	QR          string `json:"qr,omitempty"`
+	PairingCode string `json:"pairingCode,omitempty"`
 }
 
 type ChannelStatusEvent struct {

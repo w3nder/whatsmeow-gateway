@@ -398,7 +398,7 @@ func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand, accept 
 		return err
 	}
 
-	updates, err := g.manager.Pair(ctx, cmd.ChannelID, cmd.ImportsHistory())
+	updates, err := g.pair(ctx, cmd)
 	if errors.Is(err, deviceprops.ErrSlotBusy) {
 		g.logger.Warn("gateway: pairing slot busy past the wait", "channel_id", cmd.ChannelID, "import_history", cmd.ImportsHistory(), "error", err)
 		g.publishChannelFailure(ctx, cmd.TenantID, cmd.UserID, cmd.ChannelID, pairingBusyReason(cmd.ImportsHistory()))
@@ -416,12 +416,19 @@ func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand, accept 
 	return nil
 }
 
+func (g *gateway) pair(ctx context.Context, cmd amqp.PairCommand) (<-chan session.PairUpdate, error) {
+	if cmd.PairsByCode() {
+		return g.manager.PairByCode(ctx, cmd.ChannelID, cmd.PhoneNumber, cmd.ImportsHistory())
+	}
+	return g.manager.Pair(ctx, cmd.ChannelID, cmd.ImportsHistory())
+}
+
 func (g *gateway) followPairing(ctx context.Context, cmd amqp.PairCommand, updates <-chan session.PairUpdate) error {
 	freshPairing := false
 	for update := range updates {
 		switch {
 		case update.Err != nil:
-			g.publishChannelError(ctx, cmd.TenantID, cmd.UserID, cmd.ChannelID, update.Err)
+			g.publishChannelFailure(ctx, cmd.TenantID, cmd.UserID, cmd.ChannelID, pairingFailureReason(update.Err))
 			return fmt.Errorf("gateway: pair channel %s: %w", cmd.ChannelID, update.Err)
 		case update.Connected:
 			if err := g.persistSession(ctx, cmd.ChannelID, cmd.TenantID); err != nil {
@@ -455,6 +462,16 @@ func (g *gateway) followPairing(ctx context.Context, cmd amqp.PairCommand, updat
 			}); err != nil {
 				return fmt.Errorf("gateway: publish channel.qr: %w", err)
 			}
+		case update.Code != "":
+			freshPairing = true
+			if err := g.publisher.PublishChannelQR(ctx, amqp.ChannelQREvent{
+				TenantID:    cmd.TenantID,
+				UserID:      cmd.UserID,
+				ChannelID:   cmd.ChannelID,
+				PairingCode: update.Code,
+			}); err != nil {
+				return fmt.Errorf("gateway: publish channel.qr pairing code: %w", err)
+			}
 		}
 	}
 
@@ -478,6 +495,22 @@ func (g *gateway) persistSession(ctx context.Context, channelID, tenantID string
 		return err
 	}
 	return nil
+}
+
+const (
+	pairingCodeExpiredReason = "O código de pareamento venceu antes de ser usado. Peça um novo código."
+	invalidPhoneNumberReason = "Número inválido. Informe o número com DDI e DDD, só com dígitos, por exemplo 5511987654321."
+)
+
+func pairingFailureReason(err error) string {
+	switch {
+	case errors.Is(err, session.ErrPairingCodeExpired):
+		return pairingCodeExpiredReason
+	case errors.Is(err, session.ErrInvalidPhoneNumber):
+		return invalidPhoneNumberReason
+	default:
+		return err.Error()
+	}
 }
 
 func (g *gateway) publishChannelError(ctx context.Context, tenantID, userID, channelID string, cause error) {

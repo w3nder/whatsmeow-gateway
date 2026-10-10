@@ -100,10 +100,15 @@ type PairCommand struct {
 	UserID        string `json:"userId"`
 	ImportHistory bool   `json:"importHistory"`
 	ImportID      string `json:"importId,omitempty"`
+	PhoneNumber   string `json:"phoneNumber,omitempty"`
 }
 
 func (c PairCommand) ImportsHistory() bool {
 	return c.ImportHistory && c.ImportID != ""
+}
+
+func (c PairCommand) PairsByCode() bool {
+	return c.PhoneNumber != ""
 }
 
 type SettingsCommand struct {

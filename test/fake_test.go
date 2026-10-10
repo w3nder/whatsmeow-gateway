@@ -38,6 +38,10 @@ type fakeWAClient struct {
 	qrFeed     chan whatsmeow.QRChannelItem
 	connectErr error
 
+	pairingCode  string
+	pairPhoneErr error
+	pairedPhones []string
+
 	connectCalls      int
 	qrChannelCalls    int
 	waitCalls         int
@@ -127,6 +131,22 @@ func (f *fakeWAClient) QRChannel(ctx context.Context) (<-chan whatsmeow.QRChanne
 	}
 	close(ch)
 	return ch, nil
+}
+
+func (f *fakeWAClient) PairPhone(ctx context.Context, phone string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pairedPhones = append(f.pairedPhones, phone)
+	if f.pairPhoneErr != nil {
+		return "", f.pairPhoneErr
+	}
+	return f.pairingCode, nil
+}
+
+func (f *fakeWAClient) phonesAskedForACode() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.pairedPhones...)
 }
 
 func (f *fakeWAClient) Connect() error {

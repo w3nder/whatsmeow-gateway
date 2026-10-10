@@ -73,3 +73,66 @@ func TestPairCommandAskingForHistoryWithoutAnImportIDImportsNothing(t *testing.T
 		t.Fatal("without an importId there is no import to publish to")
 	}
 }
+
+const pairByCodeCommandLiteral = `{"tenantId":"1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c","channelId":"2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d","userId":"4d6e8f0a-1b2c-4d3e-9f5a-6b7c8d9e0f1a","importHistory":false,"phoneNumber":"5511987654321"}`
+
+func TestPairCommandByCodeLiteral(t *testing.T) {
+	want := amqp.PairCommand{
+		TenantID:    "1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c",
+		ChannelID:   "2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d",
+		UserID:      "4d6e8f0a-1b2c-4d3e-9f5a-6b7c8d9e0f1a",
+		PhoneNumber: "5511987654321",
+	}
+	got := decodePair(t, pairByCodeCommandLiteral)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("decoded %+v, want %+v", got, want)
+	}
+	if !got.PairsByCode() {
+		t.Fatal("a command with a phone number must pair by code")
+	}
+	if encoded := encodePair(t, want); encoded != pairByCodeCommandLiteral {
+		t.Fatalf("encoded %s\nwant    %s", encoded, pairByCodeCommandLiteral)
+	}
+}
+
+func TestPairCommandWithoutPhoneNumberPairsByQR(t *testing.T) {
+	if decodePair(t, pairCommandWithoutHistoryLiteral).PairsByCode() {
+		t.Fatal("a command without a phone number must keep pairing by QR")
+	}
+}
+
+const channelPairingCodeLiteral = `{"tenantId":"1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c","userId":"4d6e8f0a-1b2c-4d3e-9f5a-6b7c8d9e0f1a","channelId":"2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d","pairingCode":"ABCD-EFGH"}`
+
+const channelQRLiteral = `{"tenantId":"1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c","userId":"4d6e8f0a-1b2c-4d3e-9f5a-6b7c8d9e0f1a","channelId":"2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d","qr":"2@qr-ref"}`
+
+func TestChannelQREventCarriesThePairingCodeWithoutAQR(t *testing.T) {
+	evt := amqp.ChannelQREvent{
+		TenantID:    "1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c",
+		UserID:      "4d6e8f0a-1b2c-4d3e-9f5a-6b7c8d9e0f1a",
+		ChannelID:   "2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d",
+		PairingCode: "ABCD-EFGH",
+	}
+	encoded, err := json.Marshal(evt)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(encoded) != channelPairingCodeLiteral {
+		t.Fatalf("encoded %s\nwant    %s", encoded, channelPairingCodeLiteral)
+	}
+}
+
+func TestChannelQREventForAQRIsUnchanged(t *testing.T) {
+	evt := amqp.ChannelQREvent{
+		TenantID:  "1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c",
+		UserID:    "4d6e8f0a-1b2c-4d3e-9f5a-6b7c8d9e0f1a",
+		ChannelID: "2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d",
+		QR:        "2@qr-ref",
+	}
+	encoded, err := json.Marshal(evt)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(encoded) != channelQRLiteral {
+		t.Fatalf("encoded %s\nwant    %s", encoded, channelQRLiteral)
+	}
+}
