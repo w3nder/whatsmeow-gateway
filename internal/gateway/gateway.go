@@ -428,7 +428,7 @@ func (g *gateway) followPairing(ctx context.Context, cmd amqp.PairCommand, updat
 	for update := range updates {
 		switch {
 		case update.Err != nil:
-			g.publishChannelFailure(ctx, cmd.TenantID, cmd.UserID, cmd.ChannelID, pairingFailureReason(update.Err))
+			g.publishChannelFailure(ctx, cmd.TenantID, cmd.UserID, cmd.ChannelID, pairingFailureReason(update.Err, cmd.PairsByCode()))
 			return fmt.Errorf("gateway: pair channel %s: %w", cmd.ChannelID, update.Err)
 		case update.Connected:
 			if err := g.persistSession(ctx, cmd.ChannelID, cmd.TenantID); err != nil {
@@ -500,16 +500,20 @@ func (g *gateway) persistSession(ctx context.Context, channelID, tenantID string
 const (
 	pairingCodeExpiredReason = "O código de pareamento venceu antes de ser usado. Peça um novo código."
 	invalidPhoneNumberReason = "Número inválido. Informe o número com DDI e DDD, só com dígitos, por exemplo 5511987654321."
+	pairingCodeRefusedReason = "O WhatsApp não gerou o código para este número. Confira se o número tem WhatsApp e peça um novo código."
+	pairingFailedReason      = "Não foi possível concluir o pareamento. Tente de novo."
 )
 
-func pairingFailureReason(err error) string {
+func pairingFailureReason(err error, byCode bool) string {
 	switch {
 	case errors.Is(err, session.ErrPairingCodeExpired):
 		return pairingCodeExpiredReason
 	case errors.Is(err, session.ErrInvalidPhoneNumber):
 		return invalidPhoneNumberReason
+	case byCode:
+		return pairingCodeRefusedReason
 	default:
-		return err.Error()
+		return pairingFailedReason
 	}
 }
 

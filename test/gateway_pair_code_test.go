@@ -1,6 +1,7 @@
 package test
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -95,6 +96,39 @@ func TestGatewayPairByCodeWithAnInvalidNumberIsRefusedInPortugueseAndAcked(t *te
 	select {
 	case d := <-dlq:
 		t.Fatalf("a refused number must be acked, got it dead-lettered: %s", d.Body)
+	case <-time.After(3 * time.Second):
+	}
+
+	close(fake.qrFeed)
+	shutdownStatusRoundtripGateway(t, cancel, runErrCh)
+}
+
+func TestGatewayPairByCodeRefusedByWhatsAppIsToldInPortugueseWithoutTheTechnicalDetail(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.qrFeed = make(chan whatsmeow.QRChannelItem, 1)
+	fake.pairPhoneErr = errors.New("server returned error 400: bad-request")
+
+	probeCh, deliveries, cancel, runErrCh := setupPairGateway(t, func(channelID string, jid *types.JID) (session.WAClient, error) {
+		return fake, nil
+	})
+
+	dlq, err := probeCh.Consume(gatewayamqp.GatewayPairDLQ, "", true, false, false, false, nil)
+	if err != nil {
+		t.Fatalf("failed to consume %s: %v", gatewayamqp.GatewayPairDLQ, err)
+	}
+
+	const channelID = "channel-pair-code-refused-1"
+
+	publishPairCommand(t, probeCh, gatewayamqp.PairCommand{TenantID: "tenant-pair-code-refused", ChannelID: channelID, UserID: "user-refused", PhoneNumber: "5511987654321"})
+	feedQR(t, fake, whatsmeow.QRChannelItem{Event: "code", Code: "qr-ignored", Timeout: time.Minute})
+
+	evt := waitForChannelStatus(t, deliveries, channelID, "error", pairWait)
+	if evt.Reason != "O WhatsApp não gerou o código para este número. Confira se o número tem WhatsApp e peça um novo código." {
+		t.Fatalf("the owner must read a reason in Portuguese, without the technical detail, got %+v", evt)
+	}
+	select {
+	case d := <-dlq:
+		t.Fatalf("a refused pairing must be acked, got it dead-lettered: %s", d.Body)
 	case <-time.After(3 * time.Second):
 	}
 
