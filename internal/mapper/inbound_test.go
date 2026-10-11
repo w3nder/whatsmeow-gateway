@@ -618,6 +618,15 @@ func TestBuildInboundReaction(t *testing.T) {
 	}
 }
 
+func TestBuildInboundNilMessageIsSkippedWithoutPanic(t *testing.T) {
+	evt := &events.Message{Info: baseInfo("wamid.nil-1", "5511999999999")}
+
+	_, err := mapper.BuildInbound(context.Background(), testDeps(fakeDownloader{}, nil, &fakeMediaStore{}), evt)
+	if !errors.Is(err, mapper.ErrSkip) {
+		t.Fatalf("expected ErrSkip for a nil message, got %v", err)
+	}
+}
+
 func TestBuildInboundUnsupportedMessage(t *testing.T) {
 	evt := &events.Message{
 		Info: baseInfo("wamid.unsupported-1", "5511999999999"),
