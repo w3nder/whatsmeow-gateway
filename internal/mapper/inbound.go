@@ -734,7 +734,7 @@ func isSilentNotice(msg *waE2E.Message) bool {
 		msg.GetGroupStatusMentionMessage() != nil,
 		msg.GetStatusMentionMessage() != nil:
 		return true
-	case msg.Conversation != nil && msg.GetConversation() == "":
+	case msg != nil && msg.Conversation != nil && msg.GetConversation() == "":
 		return true
 	}
 	return false
