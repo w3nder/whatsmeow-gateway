@@ -26,6 +26,7 @@ const maxAutoReconnectErrors = int(MaxAutoReconnectDelay / (2 * time.Second))
 
 type WAClient interface {
 	QRChannel(ctx context.Context) (<-chan whatsmeow.QRChannelItem, error)
+	PairPhone(ctx context.Context, phone string) (string, error)
 	Connect() error
 	IsLoggedIn() bool
 	IsConnected() bool
@@ -94,6 +95,10 @@ func TakeOverHistory(client *whatsmeow.Client) {
 
 func (w *waClient) QRChannel(ctx context.Context) (<-chan whatsmeow.QRChannelItem, error) {
 	return w.client.GetQRChannel(ctx)
+}
+
+func (w *waClient) PairPhone(ctx context.Context, phone string) (string, error) {
+	return w.client.PairPhone(ctx, phone, true, whatsmeow.PairClientChrome, "Chrome (Linux)")
 }
 
 func (w *waClient) Connect() error {

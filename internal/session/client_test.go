@@ -24,6 +24,10 @@ func (f *recordingClient) QRChannel(ctx context.Context) (<-chan whatsmeow.QRCha
 	return nil, nil
 }
 
+func (f *recordingClient) PairPhone(ctx context.Context, phone string) (string, error) {
+	return "", nil
+}
+
 func (f *recordingClient) Connect() error {
 	return nil
 }

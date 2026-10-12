@@ -107,6 +107,9 @@ func (c *identityClient) ReleaseHistory(context.Context, *waE2E.HistorySyncNotif
 func (c *identityClient) ParseWebMessage(types.JID, *waWeb.WebMessageInfo) (*events.Message, error) {
 	return nil, nil
 }
+func (c *identityClient) PairPhone(context.Context, string) (string, error) {
+	return "", nil
+}
 func (c *identityClient) TakeOverHistory()       {}
 func (c *identityClient) TakesOverHistory() bool { return false }
 
