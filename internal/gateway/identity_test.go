@@ -98,6 +98,7 @@ func (c *identityClient) GetJoinedGroups(context.Context) ([]*types.GroupInfo, e
 func (c *identityClient) AddEventHandler(func(any)) uint32 { return 0 }
 func (c *identityClient) Calls() call.Caller               { return nil }
 func (c *identityClient) Disconnect()                      {}
+func (c *identityClient) Logout(context.Context) error      { return nil }
 func (c *identityClient) DownloadHistory(context.Context, *waE2E.HistorySyncNotification) (*waHistorySync.HistorySync, error) {
 	return nil, nil
 }

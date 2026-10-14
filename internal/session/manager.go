@@ -87,6 +87,7 @@ type Manager struct {
 	mu       sync.Mutex
 	sessions map[string]WAClient
 	pairings map[string]*pairing
+	unlinked map[WAClient]struct{}
 
 	handlersMu sync.RWMutex
 	handlers   []func(channelID string, evt any)
@@ -104,6 +105,7 @@ func NewManager(factory ClientFactory, options ...Option) *Manager {
 		slotWait: deviceprops.SlotWait,
 		sessions: make(map[string]WAClient),
 		pairings: make(map[string]*pairing),
+		unlinked: make(map[WAClient]struct{}),
 	}
 	for _, option := range options {
 		option(m)
@@ -134,6 +136,12 @@ func (m *Manager) pair(ctx context.Context, channelID string, importHistory bool
 	if client.DeviceJID() != nil {
 		if err := ensureUp(client); err != nil {
 			return nil, err
+		}
+		if importHistory {
+			if err := m.unlink(ctx, channelID, client); err != nil {
+				return nil, err
+			}
+			return m.pair(ctx, channelID, importHistory, phone)
 		}
 		updates := make(chan PairUpdate, 1)
 		updates <- PairUpdate{Connected: true}
@@ -449,6 +457,9 @@ func (m *Manager) Resume(ctx context.Context, channelID string, jid types.JID, i
 
 func (m *Manager) register(channelID string, c WAClient) {
 	c.AddEventHandler(func(evt any) {
+		if m.isUnlinked(c) {
+			return
+		}
 		if _, ok := evt.(*events.LoggedOut); ok {
 			go m.drop(channelID, c)
 		}
@@ -456,6 +467,35 @@ func (m *Manager) register(channelID string, c WAClient) {
 	})
 
 	m.sessions[channelID] = c
+}
+
+func (m *Manager) unlink(ctx context.Context, channelID string, c WAClient) error {
+	m.setUnlinked(c, true)
+	if err := c.Logout(ctx); err != nil {
+		m.setUnlinked(c, false)
+		return fmt.Errorf("session: unlink the paired device of %s to pair it again with the history: %w", channelID, err)
+	}
+	m.drop(channelID, c)
+	return nil
+}
+
+func (m *Manager) setUnlinked(c WAClient, unlinked bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if unlinked {
+		m.unlinked[c] = struct{}{}
+		return
+	}
+	delete(m.unlinked, c)
+}
+
+func (m *Manager) isUnlinked(c WAClient) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	_, unlinked := m.unlinked[c]
+	return unlinked
 }
 
 func (m *Manager) drop(channelID string, c WAClient) {

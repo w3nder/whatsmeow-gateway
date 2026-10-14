@@ -747,3 +747,131 @@ func TestManagerPairFailsAsBusyWhenAHistoryPairingKeepsTheSlotPastTheWait(t *tes
 		t.Fatalf("the retried pairing must connect, got %+v", got)
 	}
 }
+
+func countEventsOf(mgr *session.Manager, channelID string) func() int {
+	var mu sync.Mutex
+	seen := 0
+	mgr.OnEvent(func(id string, _ any) {
+		if id != channelID {
+			return
+		}
+		mu.Lock()
+		seen++
+		mu.Unlock()
+	})
+	return func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return seen
+	}
+}
+
+func TestManagerPairWithHistoryOfAPairedChannelUnlinksTheDeviceAndPairsAFreshOne(t *testing.T) {
+	const channelID = "channel-relink-qr"
+	paired := newFakeWAClient()
+	paired.markPaired()
+	fresh := newFakeWAClient()
+	fresh.qrItems = []whatsmeow.QRChannelItem{{Event: "code", Code: "qr-relink"}, whatsmeow.QRChannelSuccess}
+	mgr := managerOver(paired, fresh)
+	reached := countEventsOf(mgr, channelID)
+
+	updates, err := mgr.Pair(context.Background(), channelID, true)
+	if err != nil {
+		t.Fatalf("Pair failed: %v", err)
+	}
+	got := waitClosed(t, updates, "the fresh pairing to end")
+
+	if len(got) != 2 || got[0].QR != "qr-relink" || !got[1].Connected {
+		t.Fatalf("an import for a paired channel must show a new QR and then connect, got %+v", got)
+	}
+	if paired.logoutCount() != 1 {
+		t.Fatalf("the paired device must be unlinked once, got %d logouts", paired.logoutCount())
+	}
+	if !fresh.tookOverHistoryBeforeConnecting() {
+		t.Fatal("the fresh device must take over the history before connecting")
+	}
+	if client, err := mgr.Client(channelID); err != nil || client != session.WAClient(fresh) {
+		t.Fatalf("the channel must now run on the fresh device, got %v err %v", client, err)
+	}
+
+	paired.emit(&events.LoggedOut{})
+	paired.emit(&events.Disconnected{})
+	if seen := reached(); seen != 0 {
+		t.Fatalf("the unlinked device must never reach the gateway, so the channel is not reported as down, got %d events", seen)
+	}
+}
+
+func TestManagerPairByCodeWithHistoryOfAPairedChannelUnlinksTheDeviceAndAsksACode(t *testing.T) {
+	const channelID = "channel-relink-code"
+	paired := newFakeWAClient()
+	paired.markPaired()
+	fresh := newFakeWAClient()
+	fresh.pairingCode = "RLNK-CODE"
+	fresh.qrItems = []whatsmeow.QRChannelItem{{Event: "code", Code: "qr-ignored"}, whatsmeow.QRChannelSuccess}
+	mgr := managerOver(paired, fresh)
+
+	updates, err := mgr.PairByCode(context.Background(), channelID, "5511987654321", true)
+	if err != nil {
+		t.Fatalf("PairByCode failed: %v", err)
+	}
+	got := waitClosed(t, updates, "the fresh code pairing to end")
+
+	if len(got) != 2 || got[0].Code != "RLNK-CODE" || !got[1].Connected {
+		t.Fatalf("an import by code for a paired channel must answer with a new code and then connect, got %+v", got)
+	}
+	if paired.logoutCount() != 1 {
+		t.Fatalf("the paired device must be unlinked once, got %d logouts", paired.logoutCount())
+	}
+	if phones := fresh.phonesAskedForACode(); len(phones) != 1 || phones[0] != "5511987654321" {
+		t.Fatalf("the fresh device must ask the code for the number in the command, got %v", phones)
+	}
+	if !fresh.tookOverHistoryBeforeConnecting() {
+		t.Fatal("the fresh device must take over the history before connecting")
+	}
+}
+
+func TestManagerPairWithoutHistoryOfAPairedChannelKeepsTheDevice(t *testing.T) {
+	const channelID = "channel-relink-none"
+	paired := newFakeWAClient()
+	paired.markPaired()
+	untouched := newFakeWAClient()
+	mgr := managerOver(paired, untouched)
+
+	updates, err := mgr.Pair(context.Background(), channelID, false)
+	if err != nil {
+		t.Fatalf("Pair failed: %v", err)
+	}
+	got := waitClosed(t, updates, "the paired channel to answer")
+
+	if len(got) != 1 || !got[0].Connected {
+		t.Fatalf("a paired channel without an import connects at once without a QR, got %+v", got)
+	}
+	if paired.logoutCount() != 0 || untouched.connectCallCount() != 0 {
+		t.Fatalf("a pairing without an import must never unlink the device, got %d logouts", paired.logoutCount())
+	}
+}
+
+func TestManagerPairWithHistoryKeepsThePairedDeviceWhenTheUnlinkFails(t *testing.T) {
+	const channelID = "channel-relink-refused"
+	paired := newFakeWAClient()
+	paired.markPaired()
+	paired.logoutErr = errors.New("logout refused")
+	untouched := newFakeWAClient()
+	mgr := managerOver(paired, untouched)
+	reached := countEventsOf(mgr, channelID)
+
+	if _, err := mgr.Pair(context.Background(), channelID, true); err == nil {
+		t.Fatal("a refused unlink must fail the pairing")
+	}
+
+	if client, err := mgr.Client(channelID); err != nil || client != session.WAClient(paired) {
+		t.Fatalf("the channel must keep its paired device, got %v err %v", client, err)
+	}
+	if untouched.connectCallCount() != 0 || untouched.qrChannelCallCount() != 0 {
+		t.Fatal("no fresh pairing may start while the old device is still linked")
+	}
+	paired.emit(&events.Disconnected{})
+	if seen := reached(); seen != 1 {
+		t.Fatalf("the device that stayed linked must keep reaching the gateway, got %d events", seen)
+	}
+}

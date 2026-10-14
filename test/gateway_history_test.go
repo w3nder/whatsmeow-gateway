@@ -35,6 +35,11 @@ type historyGateway struct {
 
 func startHistoryGateway(t *testing.T, fake *fakeWAClient, seeds ...func(*registry.Store) error) historyGateway {
 	t.Helper()
+	return startHistoryGatewayWith(t, session.NewManager(func(string, *types.JID) (session.WAClient, error) { return fake, nil }), seeds...)
+}
+
+func startHistoryGatewayWith(t *testing.T, manager *session.Manager, seeds ...func(*registry.Store) error) historyGateway {
+	t.Helper()
 	conn := startRabbitMQ(t)
 	redisClient := startRedis(t)
 	dsn := startPostgresForGateway(t)
@@ -96,7 +101,7 @@ func startHistoryGateway(t *testing.T, fake *fakeWAClient, seeds ...func(*regist
 			Rpc:                  gatewayamqp.NewRpcServer(conn, 4, logger),
 			Consumer:             consumer,
 			Publisher:            publisher,
-			Manager:              session.NewManager(func(string, *types.JID) (session.WAClient, error) { return fake, nil }),
+			Manager:              manager,
 			Ownership:            ownership.NewStore(redisClient, 4),
 			Registry:             registryStore,
 			MediaStore:           mediaStore,
@@ -329,28 +334,106 @@ func TestGatewayPublishesNothingForAnImportReplacedByASecondPairRequest(t *testi
 	}
 }
 
-func TestGatewayEndsTheImportOfAnAlreadyPairedChannelWithNoBatches(t *testing.T) {
+func waitForConnectedWithoutAFall(t *testing.T, deliveries <-chan rabbitmq.Delivery, channelID string) {
+	t.Helper()
+	deadline := time.After(pairWait)
+	for {
+		select {
+		case d := <-deliveries:
+			if d.RoutingKey != gatewayamqp.ChannelStatusRoutingKey {
+				continue
+			}
+			var evt gatewayamqp.ChannelStatusEvent
+			if err := json.Unmarshal(d.Body, &evt); err != nil {
+				t.Fatalf("unmarshal channel.status: %v", err)
+			}
+			if evt.ChannelID != channelID {
+				continue
+			}
+			if evt.Status == "connected" {
+				return
+			}
+			t.Fatalf("the swap of the device must never report the channel as down, got %+v", evt)
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s to connect", channelID)
+		}
+	}
+}
+
+func assertNoChannelStatus(t *testing.T, deliveries <-chan rabbitmq.Delivery, channelID string, within time.Duration) {
+	t.Helper()
+	deadline := time.After(within)
+	for {
+		select {
+		case d := <-deliveries:
+			if d.RoutingKey != gatewayamqp.ChannelStatusRoutingKey {
+				continue
+			}
+			var evt gatewayamqp.ChannelStatusEvent
+			if err := json.Unmarshal(d.Body, &evt); err == nil && evt.ChannelID == channelID {
+				t.Fatalf("the unlinked device must publish no channel.status, got %+v", evt)
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
+
+func TestGatewayUnlinksAnAlreadyPairedChannelAndImportsTheHistoryOfTheFreshPairing(t *testing.T) {
 	const (
 		channelID = "channel-history-3"
+		tenantID  = "tenant-history-3"
 		importID  = "import-history-3"
 	)
-	fake := newFakeWAClient()
-	fake.markPaired()
-	h := startHistoryGateway(t, fake)
+	paired := newFakeWAClient()
+	paired.markPaired()
+	fresh := newFakeWAClient()
+	fresh.qrItems = []whatsmeow.QRChannelItem{{Event: "code", Code: "qr-history-3"}, whatsmeow.QRChannelSuccess}
+	fresh.historyChunk = historyFinalChunk(time.Now())
+	h := startHistoryGatewayWith(t, managerOver(paired, fresh))
+	ctx := context.Background()
 
-	publishPairCommand(t, h.probeCh, gatewayamqp.PairCommand{TenantID: "tenant-history-3", ChannelID: channelID, UserID: "user-history-3", ImportHistory: true, ImportID: importID})
+	publishPairCommand(t, h.probeCh, gatewayamqp.PairCommand{TenantID: tenantID, ChannelID: channelID, UserID: "user-history-3", ImportHistory: true, ImportID: importID})
+	waitForConnectedWithoutAFall(t, h.deliveries, channelID)
 
-	var done gatewayamqp.HistoryDone
-	if err := json.Unmarshal(waitForHistoryMessage(t, h.deliveries, gatewayamqp.HistoryDoneKind, pairWait), &done); err != nil {
-		t.Fatalf("unmarshal done: %v", err)
+	if paired.logoutCount() != 1 {
+		t.Fatalf("the paired device must be unlinked once so the phone sends the history again, got %d", paired.logoutCount())
 	}
-	if done.ImportID != importID || done.TotalBatches != 0 || done.SkippedChats != 0 {
-		t.Fatalf("an already paired channel gets no history, so its import ends empty, got %+v", done)
+	if !fresh.tookOverHistoryBeforeConnecting() {
+		t.Fatal("the fresh device must take over the history before connecting")
 	}
-	waitFor(t, 10*time.Second, "the empty import to be marked finished in the registry", func() bool {
-		active, found, err := h.registry.ActiveHistoryImport(context.Background(), channelID)
-		return err == nil && found && active.Finished
-	})
+
+	paired.emit(&events.LoggedOut{})
+	assertNoChannelStatus(t, h.deliveries, channelID, 2*time.Second)
+	if active, found, err := h.registry.ActiveHistoryImport(ctx, channelID); err != nil || !found || active.ImportID != importID || active.Finished {
+		t.Fatalf("the logout of the unlinked device must keep the import open, got %+v found %v err %v", active, found, err)
+	}
+
+	fresh.emit(historyNotificationEvent())
+
+	var batch gatewayamqp.HistoryBatch
+	if err := json.Unmarshal(waitForHistoryMessage(t, h.deliveries, gatewayamqp.HistoryBatchKind, 20*time.Second), &batch); err != nil {
+		t.Fatalf("unmarshal batch: %v", err)
+	}
+	if batch.ImportID != importID || batch.TenantID != tenantID || len(batch.Chats) != 1 {
+		t.Fatalf("the fresh pairing must deliver the requested import, got %+v", batch)
+	}
+}
+
+func TestGatewayKeepsAnAlreadyPairedChannelWhenThePairRequestHasNoImport(t *testing.T) {
+	const channelID = "channel-history-9"
+	paired := newFakeWAClient()
+	paired.markPaired()
+	untouched := newFakeWAClient()
+	h := startHistoryGatewayWith(t, managerOver(paired, untouched))
+
+	publishPairCommand(t, h.probeCh, gatewayamqp.PairCommand{TenantID: "tenant-history-9", ChannelID: channelID, UserID: "user-history-9"})
+	waitForConnectedWithoutAFall(t, h.deliveries, channelID)
+
+	if paired.logoutCount() != 0 || untouched.connectCallCount() != 0 {
+		t.Fatalf("a pairing without an import must keep the paired device, got %d logouts", paired.logoutCount())
+	}
+	assertNoHistoryMessage(t, h.deliveries, 2*time.Second)
 }
 
 func TestGatewayRestartsAPairingWithoutHistoryWhenAnImportIsRequested(t *testing.T) {

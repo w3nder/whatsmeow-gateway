@@ -136,3 +136,26 @@ func TestChannelQREventForAQRIsUnchanged(t *testing.T) {
 		t.Fatalf("encoded %s\nwant    %s", encoded, channelQRLiteral)
 	}
 }
+
+const pairByCodeWithHistoryCommandLiteral = `{"tenantId":"1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c","channelId":"2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d","userId":"4d6e8f0a-1b2c-4d3e-9f5a-6b7c8d9e0f1a","importHistory":true,"importId":"3c5d7e9f-1a2b-4c3d-8e4f-5a6b7c8d9e0f","phoneNumber":"5511987654321"}`
+
+func TestPairCommandByCodeWithHistoryLiteral(t *testing.T) {
+	want := amqp.PairCommand{
+		TenantID:      "1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c",
+		ChannelID:     "2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d",
+		UserID:        "4d6e8f0a-1b2c-4d3e-9f5a-6b7c8d9e0f1a",
+		ImportHistory: true,
+		ImportID:      "3c5d7e9f-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
+		PhoneNumber:   "5511987654321",
+	}
+	got := decodePair(t, pairByCodeWithHistoryCommandLiteral)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("decoded %+v, want %+v", got, want)
+	}
+	if !got.PairsByCode() || !got.ImportsHistory() {
+		t.Fatal("a command with a phone number, importHistory and an importId must pair by code and import the history")
+	}
+	if encoded := encodePair(t, want); encoded != pairByCodeWithHistoryCommandLiteral {
+		t.Fatalf("encoded %s\nwant    %s", encoded, pairByCodeWithHistoryCommandLiteral)
+	}
+}
