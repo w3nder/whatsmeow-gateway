@@ -192,6 +192,7 @@ func TestGatewayPairByCodeWithHistoryForAnAlreadyPairedChannelUnlinksItAndAnswer
 		UserID:        "user-relink",
 		ImportHistory: true,
 		ImportID:      "import-pair-code-relink-1",
+		RelinkDevice:  true,
 		PhoneNumber:   "5511987654321",
 	})
 	feedQR(t, fresh, whatsmeow.QRChannelItem{Event: "code", Code: "qr-ignored", Timeout: time.Minute})

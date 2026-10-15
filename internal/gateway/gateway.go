@@ -248,6 +248,7 @@ func (g *gateway) run(ctx context.Context) error {
 	}
 
 	g.manager.OnEvent(g.handleSessionEvent)
+	g.manager.OnUnlink(g.forgetUnlinkedDevice)
 
 	g.resumeOwnedSessions(ctx)
 
@@ -418,12 +419,13 @@ func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand, accept 
 
 func (g *gateway) pair(ctx context.Context, cmd amqp.PairCommand) (<-chan session.PairUpdate, error) {
 	if cmd.PairsByCode() {
-		return g.manager.PairByCode(ctx, cmd.ChannelID, cmd.PhoneNumber, cmd.ImportsHistory())
+		return g.manager.PairByCode(ctx, cmd.ChannelID, cmd.PhoneNumber, cmd.ImportsHistory(), cmd.RelinkDevice)
 	}
-	return g.manager.Pair(ctx, cmd.ChannelID, cmd.ImportsHistory())
+	return g.manager.Pair(ctx, cmd.ChannelID, cmd.ImportsHistory(), cmd.RelinkDevice)
 }
 
 func (g *gateway) followPairing(ctx context.Context, cmd amqp.PairCommand, updates <-chan session.PairUpdate) error {
+	freshPairing := false
 	for update := range updates {
 		switch {
 		case update.Err != nil:
@@ -432,6 +434,11 @@ func (g *gateway) followPairing(ctx context.Context, cmd amqp.PairCommand, updat
 		case update.Connected:
 			if err := g.persistSession(ctx, cmd.ChannelID, cmd.TenantID); err != nil {
 				return fmt.Errorf("gateway: persist session %s: %w", cmd.ChannelID, err)
+			}
+			if cmd.ImportsHistory() && !freshPairing {
+				if err := g.endEmptyImport(ctx, cmd); err != nil {
+					g.logger.Error("gateway: end the history import of a device that stays linked", "channel_id", cmd.ChannelID, "import_id", cmd.ImportID, "error", err)
+				}
 			}
 			g.attachCalls(cmd.ChannelID)
 			phone, displayName, picture := g.connectedIdentity(ctx, cmd.ChannelID)
@@ -447,6 +454,7 @@ func (g *gateway) followPairing(ctx context.Context, cmd amqp.PairCommand, updat
 				return fmt.Errorf("gateway: publish channel.status connected: %w", err)
 			}
 		case update.QR != "":
+			freshPairing = true
 			if err := g.publisher.PublishChannelQR(ctx, amqp.ChannelQREvent{
 				TenantID:  cmd.TenantID,
 				UserID:    cmd.UserID,
@@ -456,6 +464,7 @@ func (g *gateway) followPairing(ctx context.Context, cmd amqp.PairCommand, updat
 				return fmt.Errorf("gateway: publish channel.qr: %w", err)
 			}
 		case update.Code != "":
+			freshPairing = true
 			if err := g.publisher.PublishChannelQR(ctx, amqp.ChannelQREvent{
 				TenantID:    cmd.TenantID,
 				UserID:      cmd.UserID,

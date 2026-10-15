@@ -50,3 +50,16 @@ func (g *gateway) recordHistoryChoice(ctx context.Context, cmd amqp.PairCommand)
 	}
 	return nil
 }
+
+func (g *gateway) endEmptyImport(ctx context.Context, cmd amqp.PairCommand) error {
+	if err := g.publisher.PublishHistoryDone(ctx, amqp.HistoryDone{TenantID: cmd.TenantID, ChannelID: cmd.ChannelID, ImportID: cmd.ImportID}); err != nil {
+		return fmt.Errorf("gateway: publish the empty history import end of %s: %w", cmd.ChannelID, err)
+	}
+	return g.registry.FinishHistoryImport(ctx, cmd.ChannelID, cmd.ImportID)
+}
+
+func (g *gateway) forgetUnlinkedDevice(channelID string) {
+	if err := g.registry.ForgetDevice(g.workCtx, channelID); err != nil {
+		g.logger.Error("gateway: forget the unlinked device", "channel_id", channelID, "error", err)
+	}
+}

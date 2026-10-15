@@ -58,8 +58,10 @@ type fakeWAClient struct {
 
 	disconnectCalls int
 
-	logoutCalls int
-	logoutErr   error
+	logoutCalls   int
+	logoutErr     error
+	logoutGate    chan struct{}
+	logoutEntered int
 
 	handlers          []func(any)
 	historyChunk      *waHistorySync.HistorySync
@@ -440,15 +442,32 @@ func (f *fakeWAClient) Disconnect() {
 
 func (f *fakeWAClient) Logout(context.Context) error {
 	f.mu.Lock()
+	f.logoutEntered++
+	gate := f.logoutGate
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+
+	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.logoutCalls++
 	if f.logoutErr != nil {
 		return f.logoutErr
 	}
+	if f.deviceJID == nil {
+		return whatsmeow.ErrNotLoggedIn
+	}
 	f.deviceJID = nil
 	f.connected = false
 	f.loggedIn = false
 	return nil
+}
+
+func (f *fakeWAClient) logoutEnteredCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.logoutEntered
 }
 
 func (f *fakeWAClient) logoutCount() int {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -80,6 +81,11 @@ func (p *pairing) retained(now time.Time) (PairUpdate, bool) {
 	return PairUpdate{QR: code}, valid
 }
 
+type channelLock struct {
+	mu      sync.Mutex
+	holders int
+}
+
 type Manager struct {
 	factory  ClientFactory
 	slotWait time.Duration
@@ -87,10 +93,12 @@ type Manager struct {
 	mu       sync.Mutex
 	sessions map[string]WAClient
 	pairings map[string]*pairing
-	unlinked map[WAClient]struct{}
+	muted    map[string]*atomic.Bool
+	locks    map[string]*channelLock
 
-	handlersMu sync.RWMutex
-	handlers   []func(channelID string, evt any)
+	handlersMu     sync.RWMutex
+	handlers       []func(channelID string, evt any)
+	unlinkHandlers []func(channelID string)
 }
 
 type Option func(*Manager)
@@ -105,7 +113,8 @@ func NewManager(factory ClientFactory, options ...Option) *Manager {
 		slotWait: deviceprops.SlotWait,
 		sessions: make(map[string]WAClient),
 		pairings: make(map[string]*pairing),
-		unlinked: make(map[WAClient]struct{}),
+		muted:    make(map[string]*atomic.Bool),
+		locks:    make(map[string]*channelLock),
 	}
 	for _, option := range options {
 		option(m)
@@ -119,30 +128,26 @@ func (m *Manager) OnEvent(handler func(channelID string, evt any)) {
 	m.handlers = append(m.handlers[:len(m.handlers):len(m.handlers)], handler)
 }
 
-func (m *Manager) Pair(ctx context.Context, channelID string, importHistory bool) (<-chan PairUpdate, error) {
-	return m.pair(ctx, channelID, importHistory, "")
+func (m *Manager) OnUnlink(handler func(channelID string)) {
+	m.handlersMu.Lock()
+	defer m.handlersMu.Unlock()
+	m.unlinkHandlers = append(m.unlinkHandlers[:len(m.unlinkHandlers):len(m.unlinkHandlers)], handler)
 }
 
-func (m *Manager) PairByCode(ctx context.Context, channelID, phone string, importHistory bool) (<-chan PairUpdate, error) {
-	return m.pair(ctx, channelID, importHistory, phone)
+func (m *Manager) Pair(ctx context.Context, channelID string, importHistory, relinkDevice bool) (<-chan PairUpdate, error) {
+	return m.pair(ctx, channelID, importHistory, relinkDevice, "")
 }
 
-func (m *Manager) pair(ctx context.Context, channelID string, importHistory bool, phone string) (<-chan PairUpdate, error) {
-	client, err := m.client(channelID)
+func (m *Manager) PairByCode(ctx context.Context, channelID, phone string, importHistory, relinkDevice bool) (<-chan PairUpdate, error) {
+	return m.pair(ctx, channelID, importHistory, relinkDevice, phone)
+}
+
+func (m *Manager) pair(ctx context.Context, channelID string, importHistory, relinkDevice bool, phone string) (<-chan PairUpdate, error) {
+	client, paired, err := m.pairingClient(ctx, channelID, importHistory && relinkDevice)
 	if err != nil {
 		return nil, err
 	}
-
-	if client.DeviceJID() != nil {
-		if err := ensureUp(client); err != nil {
-			return nil, err
-		}
-		if importHistory {
-			if err := m.unlink(ctx, channelID, client); err != nil {
-				return nil, err
-			}
-			return m.pair(ctx, channelID, importHistory, phone)
-		}
+	if paired {
 		updates := make(chan PairUpdate, 1)
 		updates <- PairUpdate{Connected: true}
 		close(updates)
@@ -156,7 +161,7 @@ func (m *Manager) pair(ctx context.Context, channelID string, importHistory bool
 		case <-ctx.Done():
 			return nil, fmt.Errorf("session: wait for the superseded pairing of %s to end: %w", channelID, ctx.Err())
 		}
-		return m.pair(ctx, channelID, importHistory, phone)
+		return m.pair(ctx, channelID, importHistory, relinkDevice, phone)
 	}
 	if joined != nil {
 		return joined, nil
@@ -244,6 +249,55 @@ func (m *Manager) pair(ctx context.Context, channelID string, importHistory bool
 	}()
 
 	return updates, nil
+}
+
+func (m *Manager) pairingClient(ctx context.Context, channelID string, relink bool) (WAClient, bool, error) {
+	unlock := m.lockChannel(channelID)
+	defer unlock()
+
+	client, err := m.client(channelID)
+	if err != nil {
+		return nil, false, err
+	}
+	if client.DeviceJID() == nil {
+		return client, false, nil
+	}
+	if err := ensureUp(client); err != nil {
+		return nil, false, err
+	}
+	if !relink {
+		return client, true, nil
+	}
+	if err := m.unlink(ctx, channelID, client); err != nil {
+		return nil, false, err
+	}
+	fresh, err := m.client(channelID)
+	if err != nil {
+		return nil, false, err
+	}
+	return fresh, false, nil
+}
+
+func (m *Manager) lockChannel(channelID string) func() {
+	m.mu.Lock()
+	lock, ok := m.locks[channelID]
+	if !ok {
+		lock = &channelLock{}
+		m.locks[channelID] = lock
+	}
+	lock.holders++
+	m.mu.Unlock()
+
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		m.mu.Lock()
+		lock.holders--
+		if lock.holders == 0 {
+			delete(m.locks, channelID)
+		}
+		m.mu.Unlock()
+	}
 }
 
 func (m *Manager) beginPairing(channelID string, importHistory bool, phone string) (*pairing, <-chan PairUpdate, *pairing) {
@@ -392,6 +446,7 @@ func (m *Manager) DisconnectAll() {
 		sessions = append(sessions, c)
 	}
 	m.sessions = make(map[string]WAClient)
+	m.muted = make(map[string]*atomic.Bool)
 	m.pairings = make(map[string]*pairing)
 	m.mu.Unlock()
 
@@ -456,8 +511,9 @@ func (m *Manager) Resume(ctx context.Context, channelID string, jid types.JID, i
 }
 
 func (m *Manager) register(channelID string, c WAClient) {
+	muted := &atomic.Bool{}
 	c.AddEventHandler(func(evt any) {
-		if m.isUnlinked(c) {
+		if muted.Load() {
 			return
 		}
 		if _, ok := evt.(*events.LoggedOut); ok {
@@ -467,41 +523,42 @@ func (m *Manager) register(channelID string, c WAClient) {
 	})
 
 	m.sessions[channelID] = c
+	m.muted[channelID] = muted
 }
 
 func (m *Manager) unlink(ctx context.Context, channelID string, c WAClient) error {
-	m.setUnlinked(c, true)
+	muted := m.mutedFlag(channelID, c)
+	muted.Store(true)
 	if err := c.Logout(ctx); err != nil {
-		m.setUnlinked(c, false)
+		muted.Store(false)
 		return fmt.Errorf("session: unlink the paired device of %s to pair it again with the history: %w", channelID, err)
 	}
 	m.drop(channelID, c)
+
+	m.handlersMu.RLock()
+	handlers := m.unlinkHandlers
+	m.handlersMu.RUnlock()
+	for _, h := range handlers {
+		h(channelID)
+	}
 	return nil
 }
 
-func (m *Manager) setUnlinked(c WAClient, unlinked bool) {
+func (m *Manager) mutedFlag(channelID string, c WAClient) *atomic.Bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if unlinked {
-		m.unlinked[c] = struct{}{}
-		return
+	if m.sessions[channelID] == c {
+		return m.muted[channelID]
 	}
-	delete(m.unlinked, c)
-}
-
-func (m *Manager) isUnlinked(c WAClient) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	_, unlinked := m.unlinked[c]
-	return unlinked
+	return &atomic.Bool{}
 }
 
 func (m *Manager) drop(channelID string, c WAClient) {
 	m.mu.Lock()
 	if m.sessions[channelID] == c {
 		delete(m.sessions, channelID)
+		delete(m.muted, channelID)
 	}
 	m.mu.Unlock()
 
