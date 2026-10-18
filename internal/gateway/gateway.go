@@ -283,6 +283,11 @@ func (g *gateway) run(ctx context.Context) error {
 		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
 		return fmt.Errorf("gateway: start group rpc: %w", err)
 	}
+	if err := g.registerContactRpc(g.workCtx); err != nil {
+		g.closeConsumerForFailedBoot()
+		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
+		return fmt.Errorf("gateway: start contact rpc: %w", err)
+	}
 
 	g.logger.Info("gateway started", "instance_id", g.instanceID)
 

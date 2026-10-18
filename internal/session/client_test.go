@@ -93,6 +93,10 @@ func (f *recordingClient) KnownLIDForPN(ctx context.Context, pn types.JID) (type
 	return types.JID{}, false, nil
 }
 
+func (f *recordingClient) IsOnWhatsApp(ctx context.Context, phones []string) ([]types.IsOnWhatsAppResponse, error) {
+	return nil, nil
+}
+
 func (f *recordingClient) DecryptSecretEncryptedMessage(ctx context.Context, evt *events.Message) (*waE2E.Message, error) {
 	return nil, nil
 }

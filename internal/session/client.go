@@ -48,6 +48,7 @@ type WAClient interface {
 	PNForLID(ctx context.Context, lid types.JID) (types.JID, bool, error)
 	LIDForPN(ctx context.Context, pn types.JID) (types.JID, bool, error)
 	KnownLIDForPN(ctx context.Context, pn types.JID) (types.JID, bool, error)
+	IsOnWhatsApp(ctx context.Context, phones []string) ([]types.IsOnWhatsAppResponse, error)
 	DecryptSecretEncryptedMessage(ctx context.Context, evt *events.Message) (*waE2E.Message, error)
 	DecryptPollVote(ctx context.Context, evt *events.Message) (*waE2E.PollVoteMessage, error)
 	GetProfilePictureInfo(ctx context.Context, jid types.JID, params *whatsmeow.GetProfilePictureParams) (*types.ProfilePictureInfo, error)
@@ -196,6 +197,10 @@ func (w *waClient) KnownLIDForPN(ctx context.Context, pn types.JID) (types.JID, 
 		return types.JID{}, false, err
 	}
 	return lid, !lid.IsEmpty(), nil
+}
+
+func (w *waClient) IsOnWhatsApp(ctx context.Context, phones []string) ([]types.IsOnWhatsAppResponse, error) {
+	return w.client.IsOnWhatsApp(ctx, phones)
 }
 
 func (w *waClient) LIDForPN(ctx context.Context, pn types.JID) (types.JID, bool, error) {
