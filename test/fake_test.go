@@ -87,6 +87,8 @@ type fakeWAClient struct {
 	topicSeq         int
 	createDelay      time.Duration
 	createEntered    int
+
+	knownLIDs map[types.JID]types.JID
 }
 
 type participantCall struct {
@@ -240,6 +242,11 @@ func (f *fakeWAClient) PNForLID(ctx context.Context, lid types.JID) (types.JID, 
 
 func (f *fakeWAClient) LIDForPN(ctx context.Context, pn types.JID) (types.JID, bool, error) {
 	return types.JID{}, false, nil
+}
+
+func (f *fakeWAClient) KnownLIDForPN(ctx context.Context, pn types.JID) (types.JID, bool, error) {
+	lid, ok := f.knownLIDs[pn]
+	return lid, ok, nil
 }
 
 func (f *fakeWAClient) DecryptSecretEncryptedMessage(ctx context.Context, evt *events.Message) (*waE2E.Message, error) {

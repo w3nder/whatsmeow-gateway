@@ -65,6 +65,9 @@ func (c *identityClient) PNForLID(context.Context, types.JID) (types.JID, bool, 
 func (c *identityClient) LIDForPN(context.Context, types.JID) (types.JID, bool, error) {
 	return types.JID{}, false, nil
 }
+func (c *identityClient) KnownLIDForPN(context.Context, types.JID) (types.JID, bool, error) {
+	return types.JID{}, false, nil
+}
 func (c *identityClient) DecryptSecretEncryptedMessage(context.Context, *events.Message) (*waE2E.Message, error) {
 	return nil, nil
 }
