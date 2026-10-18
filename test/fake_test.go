@@ -91,6 +91,7 @@ type fakeWAClient struct {
 	knownLIDs map[types.JID]types.JID
 
 	whatsappAccounts  map[string]types.IsOnWhatsAppResponse
+	whatsappOmits     map[string]bool
 	isOnWhatsAppCalls [][]string
 }
 
@@ -258,6 +259,9 @@ func (f *fakeWAClient) IsOnWhatsApp(ctx context.Context, phones []string) ([]typ
 	f.isOnWhatsAppCalls = append(f.isOnWhatsAppCalls, append([]string(nil), phones...))
 	out := make([]types.IsOnWhatsAppResponse, 0, len(phones))
 	for _, phone := range phones {
+		if f.whatsappOmits[phone] {
+			continue
+		}
 		account, ok := f.whatsappAccounts[phone]
 		if !ok {
 			account = types.IsOnWhatsAppResponse{JID: types.NewJID(phone[1:], types.DefaultUserServer)}

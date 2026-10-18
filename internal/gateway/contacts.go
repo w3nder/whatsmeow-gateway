@@ -68,7 +68,11 @@ func (g *gateway) rpcContactCheck(ctx context.Context, payload json.RawMessage) 
 	}
 	out := contactCheckResponse{Results: make([]contactCheckResult, 0, len(req.Phones))}
 	for i, phone := range req.Phones {
-		out.Results = append(out.Results, g.contactCheckResultFor(ctx, client, phone, byQuery[queries[i]]))
+		account, answered := byQuery[queries[i]]
+		if !answered {
+			return nil, amqp.RpcUnavailable(fmt.Sprintf("whatsapp did not answer for phone %s", phone))
+		}
+		out.Results = append(out.Results, g.contactCheckResultFor(ctx, client, phone, account))
 	}
 	return out, nil
 }

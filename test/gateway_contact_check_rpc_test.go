@@ -131,3 +131,23 @@ func TestContactCheckRpcOnlyUsesTheRequestedChannel(t *testing.T) {
 		t.Fatalf("a channel that is not connected must not be asked, got %v", fake.isOnWhatsAppCalls)
 	}
 }
+
+func TestContactCheckRpcPhoneWithoutAnswerIsUnavailableNotNoAccount(t *testing.T) {
+	fake := newFakeWAClient()
+	fake.markPaired()
+	fake.whatsappAccounts = map[string]types.IsOnWhatsAppResponse{
+		"+5511988880002": {IsIn: true, JID: types.NewJID("5511988880002", types.DefaultUserServer)},
+	}
+	fake.whatsappOmits = map[string]bool{"+5511999990001": true}
+	infra := startGatewayInfra(t, "channel-contacts")
+	cancel, runErrCh := startGroupGateway(t, infra, fake, "gateway-contacts")
+	defer shutdownStatusRoundtripGateway(t, cancel, runErrCh)
+	waitForContactCheckRpcReady(t, infra)
+
+	probe := newRpcProbe(t, infra.conn)
+	reply := probe.call(t, "contact.check", "m1", `{"tenantId":"t","channelId":"channel-contacts","phones":["5511988880002","5511999990001"]}`, 10*time.Second)
+	errBody, _ := reply["error"].(map[string]any)
+	if reply["ok"] != false || errBody["code"] != "unavailable" || errBody["message"] != "whatsapp did not answer for phone 5511999990001" {
+		t.Fatalf("phone without answer must not read as no account: %v", reply)
+	}
+}
