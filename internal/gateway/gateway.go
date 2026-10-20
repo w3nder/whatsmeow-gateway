@@ -283,6 +283,11 @@ func (g *gateway) run(ctx context.Context) error {
 		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
 		return fmt.Errorf("gateway: start group rpc: %w", err)
 	}
+	if err := g.registerContactRpc(g.workCtx); err != nil {
+		g.closeConsumerForFailedBoot()
+		_ = g.ownership.ReleaseAll(g.workCtx, g.instanceID)
+		return fmt.Errorf("gateway: start contact rpc: %w", err)
+	}
 
 	g.logger.Info("gateway started", "instance_id", g.instanceID)
 
@@ -632,11 +637,26 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 		return fmt.Errorf("gateway: mark sent %s: %w", dedupeKey, err)
 	}
 
-	if err := g.publisher.PublishStatus(ctx, mapper.SentStatus(cmd, to, id, ts)); err != nil {
+	if err := g.publisher.PublishStatus(ctx, mapper.SentStatus(cmd, g.reportedChat(ctx, client, to), id, ts)); err != nil {
 		return fmt.Errorf("gateway: publish sent status %s: %w", cmd.MessageID, err)
 	}
 
 	return nil
+}
+
+func (g *gateway) reportedChat(ctx context.Context, client session.WAClient, to types.JID) types.JID {
+	if to.Server != types.DefaultUserServer {
+		return to
+	}
+	lid, found, err := client.KnownLIDForPN(ctx, to)
+	if err != nil {
+		g.logger.Warn("gateway: known lid lookup failed", "chat", to.String(), "err", err)
+		return to
+	}
+	if !found {
+		return to
+	}
+	return lid
 }
 
 func dedupeKeyFor(cmd amqp.GatewaySendCommand) string {
