@@ -38,6 +38,7 @@ func NewServer(calls *call.Manager, cfg ServerConfig, log *slog.Logger) *http.Se
 	s := &server{calls: calls, secret: cfg.Secret, allowedOrigins: cfg.AllowedOrigins, log: log}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", handleHealth)
 	mux.HandleFunc("GET /calls/{callID}/media", s.handleMedia)
 
 	return &http.Server{
@@ -46,6 +47,10 @@ func NewServer(calls *call.Manager, cfg ServerConfig, log *slog.Logger) *http.Se
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+}
+
+func handleHealth(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *server) handleMedia(w http.ResponseWriter, r *http.Request) {
