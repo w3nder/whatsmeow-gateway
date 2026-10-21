@@ -507,6 +507,7 @@ const (
 	invalidPhoneNumberReason = "Número inválido. Informe o número com DDI e DDD, só com dígitos, por exemplo 5511987654321."
 	pairingCodeRefusedReason = "O WhatsApp não gerou o código para este número. Confira se o número tem WhatsApp e peça um novo código."
 	pairingFailedReason      = "Não foi possível concluir o pareamento. Tente de novo."
+	pairingQRTimeoutReason   = "qr_timeout"
 )
 
 func pairingFailureReason(err error, byCode bool) string {
@@ -515,6 +516,8 @@ func pairingFailureReason(err error, byCode bool) string {
 		return pairingCodeExpiredReason
 	case errors.Is(err, session.ErrInvalidPhoneNumber):
 		return invalidPhoneNumberReason
+	case errors.Is(err, session.ErrPairingTimeout):
+		return pairingQRTimeoutReason
 	case byCode:
 		return pairingCodeRefusedReason
 	default:
