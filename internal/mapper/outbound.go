@@ -188,14 +188,30 @@ func contextInfoFor(cmd amqp.GatewaySendCommand) *waE2E.ContextInfo {
 	ctxInfo := &waE2E.ContextInfo{}
 	if cmd.ReplyTo != nil {
 		ctxInfo.StanzaID = proto.String(cmd.ReplyTo.ProviderMessageID)
-		if cmd.ReplyTo.ParticipantJID != "" {
-			ctxInfo.Participant = proto.String(cmd.ReplyTo.ParticipantJID)
+		if participant := quotedParticipant(cmd); participant != "" {
+			ctxInfo.Participant = proto.String(participant)
+		}
+		if cmd.ReplyTo.Text != "" {
+			ctxInfo.QuotedMessage = &waE2E.Message{Conversation: proto.String(cmd.ReplyTo.Text)}
 		}
 	}
 	if len(cmd.Mentions) > 0 {
 		ctxInfo.MentionedJID = cmd.Mentions
 	}
 	return ctxInfo
+}
+
+func quotedParticipant(cmd amqp.GatewaySendCommand) string {
+	if cmd.ReplyTo.ParticipantJID != "" {
+		return cmd.ReplyTo.ParticipantJID
+	}
+	if cmd.ReplyTo.FromMe {
+		return ""
+	}
+	if jid, err := types.ParseJID(cmd.To); err == nil && jid.Server != types.GroupServer {
+		return cmd.To
+	}
+	return ""
 }
 
 func buildMedia(ctx context.Context, up Uploader, fetch MediaFetcher, cmd amqp.GatewaySendCommand, mt whatsmeow.MediaType) (*waE2E.Message, error) {

@@ -789,3 +789,69 @@ func TestBuildOutboundCaptionKeepsMentionsAlongsideTheReply(t *testing.T) {
 		t.Fatalf("mentioned = %v", mentioned)
 	}
 }
+
+func TestBuildOutboundReplyCarriesQuotedTextAndContactAsParticipant(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{
+		To:   "5511999999999@s.whatsapp.net",
+		Type: "text",
+		Text: "mostrar como resposta",
+		ReplyTo: &amqp.ReplyToPayload{
+			ProviderMessageID: "wamid.quoted",
+			Text:              "vezao legal",
+		},
+	}
+
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	ctxInfo := msg.GetExtendedTextMessage().GetContextInfo()
+	if ctxInfo.GetParticipant() != "5511999999999@s.whatsapp.net" {
+		t.Fatalf("expected contact as participant, got %q", ctxInfo.GetParticipant())
+	}
+	if ctxInfo.GetQuotedMessage().GetConversation() != "vezao legal" {
+		t.Fatalf("expected quoted text, got %+v", ctxInfo.GetQuotedMessage())
+	}
+}
+
+func TestBuildOutboundReplyToOwnMessageLeavesParticipantEmpty(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{
+		To:   "5511999999999@s.whatsapp.net",
+		Type: "text",
+		Text: "segue",
+		ReplyTo: &amqp.ReplyToPayload{
+			ProviderMessageID: "wamid.mine",
+			Text:              "minha mensagem",
+			FromMe:            true,
+		},
+	}
+
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	ctxInfo := msg.GetExtendedTextMessage().GetContextInfo()
+	if ctxInfo.Participant != nil {
+		t.Fatalf("expected no participant, got %q", ctxInfo.GetParticipant())
+	}
+	if ctxInfo.GetQuotedMessage().GetConversation() != "minha mensagem" {
+		t.Fatalf("expected quoted text, got %+v", ctxInfo.GetQuotedMessage())
+	}
+}
+
+func TestBuildOutboundGroupReplyDoesNotUseGroupAsParticipant(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{
+		To:      "120363000000000000@g.us",
+		Type:    "text",
+		Text:    "ok",
+		ReplyTo: &amqp.ReplyToPayload{ProviderMessageID: "wamid.grp", Text: "oi"},
+	}
+
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	if msg.GetExtendedTextMessage().GetContextInfo().Participant != nil {
+		t.Fatal("group jid must not be used as participant")
+	}
+}
