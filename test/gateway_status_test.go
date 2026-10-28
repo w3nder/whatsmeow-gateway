@@ -223,6 +223,56 @@ func TestGatewaySendHandlerPublishesOpaqueMessageIdOnSent(t *testing.T) {
 	shutdownStatusRoundtripGateway(t, cancel, runErrCh)
 }
 
+func TestGatewaySendHandlerReportsTheKnownLIDOfAPhoneRecipientOnSent(t *testing.T) {
+	const messageID = "msg-status-roundtrip-known-lid"
+	expectedProviderID := dedupe.DeterministicProviderID(messageID)
+
+	fake := newFakeWAClient()
+	fake.sendResp = whatsmeow.SendResponse{ID: expectedProviderID, Timestamp: time.Now().Truncate(time.Second)}
+	fake.knownLIDs = map[types.JID]types.JID{
+		types.NewJID("558487479044", types.DefaultUserServer): types.NewJID("94408313667704", types.HiddenUserServer),
+	}
+
+	probeCh, deliveries, _, cancel, runErrCh := setupStatusRoundtripGateway(t, fake, "channel-status-known-lid")
+
+	sendBody, err := json.Marshal(gatewayamqp.GatewaySendCommand{
+		TenantID:  "tenant-status-known-lid",
+		ChannelID: "channel-status-known-lid",
+		MessageID: messageID,
+		To:        "558487479044@s.whatsapp.net",
+		Type:      "text",
+		Text:      "oi",
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal send command: %v", err)
+	}
+	publishCtx, publishCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer publishCancel()
+	if err := probeCh.PublishWithContext(publishCtx, gatewayamqp.GatewaySendExchange, "0", false, false, rabbitmq.Publishing{
+		ContentType: "application/json",
+		Body:        sendBody,
+	}); err != nil {
+		t.Fatalf("failed to publish send command: %v", err)
+	}
+
+	delivery := waitForDelivery(t, deliveries, gatewayamqp.StatusRoutingKey, 10*time.Second)
+	var evt mapper.StatusEvent
+	if err := json.Unmarshal(delivery.Body, &evt); err != nil {
+		t.Fatalf("failed to unmarshal whatsapp.status.v1 event: %v", err)
+	}
+	if fake.lastTo.String() != "558487479044@s.whatsapp.net" {
+		t.Fatalf("expected the message to go to the phone the backend asked for, got %s", fake.lastTo)
+	}
+	if evt.ResolvedRecipient == nil || evt.ResolvedRecipient.Phone != "558487479044" || evt.ResolvedRecipient.Lid != "94408313667704" {
+		t.Fatalf("expected resolvedRecipient {558487479044, 94408313667704}, got %+v", evt.ResolvedRecipient)
+	}
+	if evt.TenantID != "tenant-status-known-lid" {
+		t.Fatalf("expected tenantId on a resolved status, got %+v", evt)
+	}
+
+	shutdownStatusRoundtripGateway(t, cancel, runErrCh)
+}
+
 func TestGatewaySendHandlerPublishesFailedStatusAndAcksOnSendError(t *testing.T) {
 	const messageID = "msg-status-roundtrip-failed-1"
 	expectedProviderID := dedupe.DeterministicProviderID(messageID)

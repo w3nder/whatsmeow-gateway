@@ -25,6 +25,8 @@ var ErrInvalidPhoneNumber = errors.New("session: invalid phone number for a pair
 
 var ErrPairingCodeExpired = errors.New("session: pairing code expired before it was used")
 
+var ErrPairingTimeout = errors.New("session: the QR code was not scanned in time")
+
 const connectWait = 10 * time.Second
 
 type PairUpdate struct {
@@ -386,8 +388,11 @@ func pairingEndError(p *pairing, evt whatsmeow.QRChannelItem) error {
 	if evt.Error != nil {
 		return evt.Error
 	}
-	if p.byCode() && evt.Event == whatsmeow.QRChannelTimeout.Event {
-		return ErrPairingCodeExpired
+	if evt.Event == whatsmeow.QRChannelTimeout.Event {
+		if p.byCode() {
+			return ErrPairingCodeExpired
+		}
+		return ErrPairingTimeout
 	}
 	return fmt.Errorf("whatsmeow-gateway: pairing ended with event %q", evt.Event)
 }

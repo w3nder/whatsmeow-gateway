@@ -92,6 +92,12 @@ type fakeWAClient struct {
 	topicSeq         int
 	createDelay      time.Duration
 	createEntered    int
+
+	knownLIDs map[types.JID]types.JID
+
+	whatsappAccounts  map[string]types.IsOnWhatsAppResponse
+	whatsappOmits     map[string]bool
+	isOnWhatsAppCalls [][]string
 }
 
 type participantCall struct {
@@ -245,6 +251,30 @@ func (f *fakeWAClient) PNForLID(ctx context.Context, lid types.JID) (types.JID, 
 
 func (f *fakeWAClient) LIDForPN(ctx context.Context, pn types.JID) (types.JID, bool, error) {
 	return types.JID{}, false, nil
+}
+
+func (f *fakeWAClient) KnownLIDForPN(ctx context.Context, pn types.JID) (types.JID, bool, error) {
+	lid, ok := f.knownLIDs[pn]
+	return lid, ok, nil
+}
+
+func (f *fakeWAClient) IsOnWhatsApp(ctx context.Context, phones []string) ([]types.IsOnWhatsAppResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.isOnWhatsAppCalls = append(f.isOnWhatsAppCalls, append([]string(nil), phones...))
+	out := make([]types.IsOnWhatsAppResponse, 0, len(phones))
+	for _, phone := range phones {
+		if f.whatsappOmits[phone] {
+			continue
+		}
+		account, ok := f.whatsappAccounts[phone]
+		if !ok {
+			account = types.IsOnWhatsAppResponse{JID: types.NewJID(phone[1:], types.DefaultUserServer)}
+		}
+		account.Query = phone
+		out = append(out, account)
+	}
+	return out, nil
 }
 
 func (f *fakeWAClient) DecryptSecretEncryptedMessage(ctx context.Context, evt *events.Message) (*waE2E.Message, error) {
