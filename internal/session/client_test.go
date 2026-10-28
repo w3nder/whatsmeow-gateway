@@ -155,6 +155,8 @@ func (f *recordingClient) Calls() call.Caller {
 
 func (f *recordingClient) Disconnect() {}
 
+func (f *recordingClient) Logout(context.Context) error { return nil }
+
 func (f *recordingClient) DownloadHistory(ctx context.Context, notif *waE2E.HistorySyncNotification) (*waHistorySync.HistorySync, error) {
 	return nil, nil
 }

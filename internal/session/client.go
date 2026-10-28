@@ -64,6 +64,7 @@ type WAClient interface {
 	AddEventHandler(handler func(any)) uint32
 	Calls() call.Caller
 	Disconnect()
+	Logout(ctx context.Context) error
 }
 
 type waClient struct {
@@ -273,6 +274,10 @@ func (w *waClient) AddEventHandler(handler func(any)) uint32 {
 
 func (w *waClient) Calls() call.Caller {
 	return w.caller
+}
+
+func (w *waClient) Logout(ctx context.Context) error {
+	return w.client.Logout(ctx)
 }
 
 func (w *waClient) Disconnect() {

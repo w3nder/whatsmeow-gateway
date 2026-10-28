@@ -102,6 +102,7 @@ type PairCommand struct {
 	UserID        string `json:"userId"`
 	ImportHistory bool   `json:"importHistory"`
 	ImportID      string `json:"importId,omitempty"`
+	RelinkDevice  bool   `json:"relinkDevice,omitempty"`
 	PhoneNumber   string `json:"phoneNumber,omitempty"`
 }
 

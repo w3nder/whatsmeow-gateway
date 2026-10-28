@@ -57,3 +57,9 @@ func (g *gateway) endEmptyImport(ctx context.Context, cmd amqp.PairCommand) erro
 	}
 	return g.registry.FinishHistoryImport(ctx, cmd.ChannelID, cmd.ImportID)
 }
+
+func (g *gateway) forgetUnlinkedDevice(channelID string) {
+	if err := g.registry.ForgetDevice(g.workCtx, channelID); err != nil {
+		g.logger.Error("gateway: forget the unlinked device", "channel_id", channelID, "error", err)
+	}
+}

@@ -27,7 +27,7 @@ func TestManagerPairEmitsQRThenSuccess(t *testing.T) {
 		return fake, nil
 	})
 
-	updates, err := mgr.Pair(context.Background(), "channel-1", false)
+	updates, err := mgr.Pair(context.Background(), "channel-1", false, false)
 	if err != nil {
 		t.Fatalf("Pair failed: %v", err)
 	}
@@ -302,7 +302,7 @@ func TestManagerPairGoroutineStopsOnContextCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	updates, err := mgr.Pair(ctx, "channel-5", false)
+	updates, err := mgr.Pair(ctx, "channel-5", false, false)
 	if err != nil {
 		t.Fatalf("Pair failed: %v", err)
 	}
@@ -335,7 +335,7 @@ func managerFor(clients map[string]*fakeWAClient) *session.Manager {
 
 func drainPairing(t *testing.T, mgr *session.Manager, channelID string, importHistory bool) {
 	t.Helper()
-	updates, err := mgr.Pair(context.Background(), channelID, importHistory)
+	updates, err := mgr.Pair(context.Background(), channelID, importHistory, false)
 	if err != nil {
 		t.Fatalf("Pair failed: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestManagerPairWithHistoryRestoresThePropsWhenTheConnectFails(t *testing.T)
 	fake.connectErr = errors.New("dial refused")
 	defaults := wastore.DeviceProps
 
-	if _, err := managerFor(map[string]*fakeWAClient{"channel-history-dial": fake}).Pair(context.Background(), "channel-history-dial", true); err == nil {
+	if _, err := managerFor(map[string]*fakeWAClient{"channel-history-dial": fake}).Pair(context.Background(), "channel-history-dial", true, false); err == nil {
 		t.Fatal("a failed connect must fail the pairing")
 	}
 	if wastore.DeviceProps != defaults {
@@ -416,7 +416,7 @@ func TestManagerPairOfAnotherChannelWaitsForAHistoryPairingToFinish(t *testing.T
 	defaults := wastore.DeviceProps
 	mgr := managerFor(map[string]*fakeWAClient{"channel-importing": importing, "channel-waiting": waiting})
 
-	first, err := mgr.Pair(context.Background(), "channel-importing", true)
+	first, err := mgr.Pair(context.Background(), "channel-importing", true, false)
 	if err != nil {
 		t.Fatalf("Pair(importing) failed: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestManagerPairOfAnotherChannelWaitsForAHistoryPairingToFinish(t *testing.T
 	}()
 	secondDone := make(chan error, 1)
 	go func() {
-		updates, err := mgr.Pair(context.Background(), "channel-waiting", false)
+		updates, err := mgr.Pair(context.Background(), "channel-waiting", false, false)
 		if err == nil {
 			for range updates {
 			}
@@ -518,7 +518,7 @@ func pairInBackground(mgr *session.Manager, channelID string, importHistory bool
 	firstUpdates := make(chan (<-chan session.PairUpdate), 1)
 	failed := make(chan error, 1)
 	go func() {
-		updates, err := mgr.Pair(context.Background(), channelID, importHistory)
+		updates, err := mgr.Pair(context.Background(), channelID, importHistory, false)
 		if err != nil {
 			failed <- err
 			return
@@ -558,7 +558,7 @@ func TestManagerPairWithHistoryRestartsAPairingInFlightWithoutHistory(t *testing
 	defaults := wastore.DeviceProps
 	mgr := managerOver(plain, importing)
 
-	first, err := mgr.Pair(context.Background(), "channel-restart", false)
+	first, err := mgr.Pair(context.Background(), "channel-restart", false, false)
 	if err != nil {
 		t.Fatalf("Pair(without history) failed: %v", err)
 	}
@@ -601,7 +601,7 @@ func TestManagerPairWithHistoryJoinsAPairingInFlightThatAlreadyImports(t *testin
 	unused := newFakeWAClient()
 	mgr := managerOver(importing, unused)
 
-	first, err := mgr.Pair(context.Background(), "channel-join-history", true)
+	first, err := mgr.Pair(context.Background(), "channel-join-history", true, false)
 	if err != nil {
 		t.Fatalf("Pair(with history) failed: %v", err)
 	}
@@ -612,7 +612,7 @@ func TestManagerPairWithHistoryJoinsAPairingInFlightThatAlreadyImports(t *testin
 	}
 	<-first
 
-	second, err := mgr.Pair(context.Background(), "channel-join-history", true)
+	second, err := mgr.Pair(context.Background(), "channel-join-history", true, false)
 	if err != nil {
 		t.Fatalf("the second pairing with history must join, got %v", err)
 	}
@@ -633,7 +633,7 @@ func TestManagerPairWithoutHistoryJoinsAPairingInFlightWithoutHistory(t *testing
 	unused := newFakeWAClient()
 	mgr := managerOver(plain, unused)
 
-	first, err := mgr.Pair(context.Background(), "channel-join-plain", false)
+	first, err := mgr.Pair(context.Background(), "channel-join-plain", false, false)
 	if err != nil {
 		t.Fatalf("Pair(without history) failed: %v", err)
 	}
@@ -644,7 +644,7 @@ func TestManagerPairWithoutHistoryJoinsAPairingInFlightWithoutHistory(t *testing
 	}
 	<-first
 
-	second, err := mgr.Pair(context.Background(), "channel-join-plain", false)
+	second, err := mgr.Pair(context.Background(), "channel-join-plain", false, false)
 	if err != nil {
 		t.Fatalf("the second pairing without history must join, got %v", err)
 	}
@@ -667,7 +667,7 @@ func TestManagerPairWithoutHistoryRestartsAPairingInFlightWithHistory(t *testing
 	defaults := wastore.DeviceProps
 	mgr := managerOver(importing, plain)
 
-	first, err := mgr.Pair(context.Background(), "channel-restart-plain", true)
+	first, err := mgr.Pair(context.Background(), "channel-restart-plain", true, false)
 	if err != nil {
 		t.Fatalf("Pair(with history) failed: %v", err)
 	}
@@ -720,13 +720,13 @@ func TestManagerPairFailsAsBusyWhenAHistoryPairingKeepsTheSlotPastTheWait(t *tes
 		return next, nil
 	}, session.WithPairingSlotWait(200*time.Millisecond))
 
-	first, err := mgr.Pair(context.Background(), "channel-slot-importing", true)
+	first, err := mgr.Pair(context.Background(), "channel-slot-importing", true, false)
 	if err != nil {
 		t.Fatalf("Pair(importing) failed: %v", err)
 	}
 
 	started := time.Now()
-	_, err = mgr.Pair(context.Background(), "channel-slot-waiting", false)
+	_, err = mgr.Pair(context.Background(), "channel-slot-waiting", false, false)
 	if !errors.Is(err, deviceprops.ErrSlotBusy) {
 		t.Fatalf("a pairing held behind a history pairing past the wait must fail as busy, got %v", err)
 	}
@@ -739,11 +739,188 @@ func TestManagerPairFailsAsBusyWhenAHistoryPairingKeepsTheSlotPastTheWait(t *tes
 
 	close(importing.qrFeed)
 	waitClosed(t, first, "the history pairing to end")
-	updates, err := mgr.Pair(context.Background(), "channel-slot-waiting", false)
+	updates, err := mgr.Pair(context.Background(), "channel-slot-waiting", false, false)
 	if err != nil {
 		t.Fatalf("a busy pairing must leave nothing behind, so the retry pairs, got %v", err)
 	}
 	if got := waitClosed(t, updates, "the retried pairing"); len(got) != 2 || !got[1].Connected {
 		t.Fatalf("the retried pairing must connect, got %+v", got)
 	}
+}
+
+func countEventsOf(mgr *session.Manager, channelID string) func() int {
+	var mu sync.Mutex
+	seen := 0
+	mgr.OnEvent(func(id string, _ any) {
+		if id != channelID {
+			return
+		}
+		mu.Lock()
+		seen++
+		mu.Unlock()
+	})
+	return func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return seen
+	}
+}
+
+func TestManagerPairWithHistoryOfAPairedChannelUnlinksTheDeviceAndPairsAFreshOne(t *testing.T) {
+	const channelID = "channel-relink-qr"
+	paired := newFakeWAClient()
+	paired.markPaired()
+	fresh := newFakeWAClient()
+	fresh.qrItems = []whatsmeow.QRChannelItem{{Event: "code", Code: "qr-relink"}, whatsmeow.QRChannelSuccess}
+	mgr := managerOver(paired, fresh)
+	reached := countEventsOf(mgr, channelID)
+
+	updates, err := mgr.Pair(context.Background(), channelID, true, true)
+	if err != nil {
+		t.Fatalf("Pair failed: %v", err)
+	}
+	got := waitClosed(t, updates, "the fresh pairing to end")
+
+	if len(got) != 2 || got[0].QR != "qr-relink" || !got[1].Connected {
+		t.Fatalf("an import for a paired channel must show a new QR and then connect, got %+v", got)
+	}
+	if paired.logoutCount() != 1 {
+		t.Fatalf("the paired device must be unlinked once, got %d logouts", paired.logoutCount())
+	}
+	if !fresh.tookOverHistoryBeforeConnecting() {
+		t.Fatal("the fresh device must take over the history before connecting")
+	}
+	if client, err := mgr.Client(channelID); err != nil || client != session.WAClient(fresh) {
+		t.Fatalf("the channel must now run on the fresh device, got %v err %v", client, err)
+	}
+
+	paired.emit(&events.LoggedOut{})
+	paired.emit(&events.Disconnected{})
+	if seen := reached(); seen != 0 {
+		t.Fatalf("the unlinked device must never reach the gateway, so the channel is not reported as down, got %d events", seen)
+	}
+}
+
+func TestManagerPairByCodeWithHistoryOfAPairedChannelUnlinksTheDeviceAndAsksACode(t *testing.T) {
+	const channelID = "channel-relink-code"
+	paired := newFakeWAClient()
+	paired.markPaired()
+	fresh := newFakeWAClient()
+	fresh.pairingCode = "RLNK-CODE"
+	fresh.qrItems = []whatsmeow.QRChannelItem{{Event: "code", Code: "qr-ignored"}, whatsmeow.QRChannelSuccess}
+	mgr := managerOver(paired, fresh)
+
+	updates, err := mgr.PairByCode(context.Background(), channelID, "5511987654321", true, true)
+	if err != nil {
+		t.Fatalf("PairByCode failed: %v", err)
+	}
+	got := waitClosed(t, updates, "the fresh code pairing to end")
+
+	if len(got) != 2 || got[0].Code != "RLNK-CODE" || !got[1].Connected {
+		t.Fatalf("an import by code for a paired channel must answer with a new code and then connect, got %+v", got)
+	}
+	if paired.logoutCount() != 1 {
+		t.Fatalf("the paired device must be unlinked once, got %d logouts", paired.logoutCount())
+	}
+	if phones := fresh.phonesAskedForACode(); len(phones) != 1 || phones[0] != "5511987654321" {
+		t.Fatalf("the fresh device must ask the code for the number in the command, got %v", phones)
+	}
+	if !fresh.tookOverHistoryBeforeConnecting() {
+		t.Fatal("the fresh device must take over the history before connecting")
+	}
+}
+
+func TestManagerPairWithoutHistoryOfAPairedChannelKeepsTheDevice(t *testing.T) {
+	const channelID = "channel-relink-none"
+	paired := newFakeWAClient()
+	paired.markPaired()
+	untouched := newFakeWAClient()
+	mgr := managerOver(paired, untouched)
+
+	updates, err := mgr.Pair(context.Background(), channelID, false, false)
+	if err != nil {
+		t.Fatalf("Pair failed: %v", err)
+	}
+	got := waitClosed(t, updates, "the paired channel to answer")
+
+	if len(got) != 1 || !got[0].Connected {
+		t.Fatalf("a paired channel without an import connects at once without a QR, got %+v", got)
+	}
+	if paired.logoutCount() != 0 || untouched.connectCallCount() != 0 {
+		t.Fatalf("a pairing without an import must never unlink the device, got %d logouts", paired.logoutCount())
+	}
+}
+
+func TestManagerPairWithHistoryKeepsThePairedDeviceWhenTheUnlinkFails(t *testing.T) {
+	const channelID = "channel-relink-refused"
+	paired := newFakeWAClient()
+	paired.markPaired()
+	paired.logoutErr = errors.New("logout refused")
+	untouched := newFakeWAClient()
+	mgr := managerOver(paired, untouched)
+	reached := countEventsOf(mgr, channelID)
+
+	if _, err := mgr.Pair(context.Background(), channelID, true, true); err == nil {
+		t.Fatal("a refused unlink must fail the pairing")
+	}
+
+	if client, err := mgr.Client(channelID); err != nil || client != session.WAClient(paired) {
+		t.Fatalf("the channel must keep its paired device, got %v err %v", client, err)
+	}
+	if untouched.connectCallCount() != 0 || untouched.qrChannelCallCount() != 0 {
+		t.Fatal("no fresh pairing may start while the old device is still linked")
+	}
+	paired.emit(&events.Disconnected{})
+	if seen := reached(); seen != 1 {
+		t.Fatalf("the device that stayed linked must keep reaching the gateway, got %d events", seen)
+	}
+}
+
+func TestManagerUnlinksAPairedChannelOnceWhenTwoImportsArriveTogether(t *testing.T) {
+	const channelID = "channel-relink-twice"
+	paired := newFakeWAClient()
+	paired.markPaired()
+	paired.logoutGate = make(chan struct{})
+	fresh := newFakeWAClient()
+	fresh.qrFeed = make(chan whatsmeow.QRChannelItem)
+	mgr := managerOver(paired, fresh)
+	reached := countEventsOf(mgr, channelID)
+
+	type result struct {
+		updates <-chan session.PairUpdate
+		err     error
+	}
+	pairs := make(chan result, 2)
+	pair := func() {
+		updates, err := mgr.Pair(context.Background(), channelID, true, true)
+		pairs <- result{updates, err}
+	}
+
+	go pair()
+	waitFor(t, 10*time.Second, "the first import to start unlinking the device", func() bool {
+		return paired.logoutEnteredCount() == 1
+	})
+	go pair()
+	time.Sleep(300 * time.Millisecond)
+	close(paired.logoutGate)
+
+	for range 2 {
+		select {
+		case got := <-pairs:
+			if got.err != nil {
+				t.Fatalf("an import that arrives while the device is being unlinked must join the fresh pairing, got %v", got.err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for both imports to answer")
+		}
+	}
+	if paired.logoutCount() != 1 {
+		t.Fatalf("the paired device must be unlinked once, got %d logouts", paired.logoutCount())
+	}
+
+	paired.emit(&events.LoggedOut{})
+	if seen := reached(); seen != 0 {
+		t.Fatalf("the unlinked device must stay silent after both imports, got %d events", seen)
+	}
+	close(fresh.qrFeed)
 }

@@ -174,3 +174,44 @@ func TestGatewayPairByCodeThatIsTypedArrivesAsAConnectedChannelLikeTheQR(t *test
 	close(fake.qrFeed)
 	shutdownStatusRoundtripGateway(t, cancel, runErrCh)
 }
+
+func TestGatewayPairByCodeWithHistoryForAnAlreadyPairedChannelUnlinksItAndAnswersWithANewCode(t *testing.T) {
+	paired := newFakeWAClient()
+	paired.markPaired()
+	fresh := newFakeWAClient()
+	fresh.qrFeed = make(chan whatsmeow.QRChannelItem)
+	fresh.pairingCode = "RLNK-2345"
+
+	probeCh, deliveries, cancel, runErrCh := setupPairGatewayWith(t, managerOver(paired, fresh))
+
+	const channelID = "channel-pair-code-relink-1"
+
+	publishPairCommand(t, probeCh, gatewayamqp.PairCommand{
+		TenantID:      "tenant-pair-code-relink",
+		ChannelID:     channelID,
+		UserID:        "user-relink",
+		ImportHistory: true,
+		ImportID:      "import-pair-code-relink-1",
+		RelinkDevice:  true,
+		PhoneNumber:   "5511987654321",
+	})
+	feedQR(t, fresh, whatsmeow.QRChannelItem{Event: "code", Code: "qr-ignored", Timeout: time.Minute})
+	if got := waitForChannelQR(t, deliveries, channelID, pairWait); got.PairingCode != "RLNK-2345" || got.UserID != "user-relink" {
+		t.Fatalf("an import by code for a paired channel must answer with a new code, got %+v", got)
+	}
+	if paired.logoutCount() != 1 {
+		t.Fatalf("the paired device must be unlinked before the new code, got %d logouts", paired.logoutCount())
+	}
+
+	fresh.markPaired()
+	feedQR(t, fresh, whatsmeow.QRChannelSuccess)
+	if evt := waitForChannelStatus(t, deliveries, channelID, "connected", pairWait); evt.UserID != "user-relink" {
+		t.Fatalf("expected the channel connected for the operator who asked, got %+v", evt)
+	}
+	if !fresh.tookOverHistoryBeforeConnecting() {
+		t.Fatal("the fresh device paired by code must take over the history before connecting")
+	}
+
+	close(fresh.qrFeed)
+	shutdownStatusRoundtripGateway(t, cancel, runErrCh)
+}

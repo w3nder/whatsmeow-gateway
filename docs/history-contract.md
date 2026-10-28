@@ -22,14 +22,58 @@ de hoje ganha dois campos:
 |---|---|---|
 | `importHistory` | bool | `true`: pareia com os `DeviceProps` de histórico e importa. Ausente ou `false`: pareia como hoje e não publica nada |
 | `importId` | string | obrigatório com `importHistory: true`; sem ele não há importação |
+| `relinkDevice` | bool | só com importação: `true` autoriza desvincular o aparelho de um canal que já está pareado para parear de novo com histórico. Ausente ou `false`: o aparelho pareado nunca é desvinculado |
 
-Os literais do comando (com importação, sem importação e o de antes do histórico) vivem em
-`internal/amqp/pair_contract_test.go` e não mudam: o backend os copia de lá byte a byte.
+O pareamento por código (`phoneNumber`) aceita os mesmos dois campos e importa do mesmo jeito:
+
+```json
+{"tenantId":"1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c","channelId":"2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d","userId":"4d6e8f0a-1b2c-4d3e-9f5a-6b7c8d9e0f1a","importHistory":true,"importId":"3c5d7e9f-1a2b-4c3d-8e4f-5a6b7c8d9e0f","phoneNumber":"5511987654321"}
+```
+
+Com `relinkDevice`, o campo vem depois de `importId` e antes de `phoneNumber`:
+
+```json
+{"tenantId":"1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c","channelId":"2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d","userId":"4d6e8f0a-1b2c-4d3e-9f5a-6b7c8d9e0f1a","importHistory":true,"importId":"3c5d7e9f-1a2b-4c3d-8e4f-5a6b7c8d9e0f","relinkDevice":true}
+```
+
+Os literais do comando (com importação, sem importação, o de antes do histórico, por código, por
+código com importação e os dois com `relinkDevice`) vivem em `internal/amqp/pair_contract_test.go` e não mudam: o backend os
+copia de lá byte a byte.
 
 A importação é gravada no registro **antes** do QR. Um segundo pedido com importação para o
 mesmo canal substitui o `importId`: daí em diante nada (lote ou fim) é publicado para o
-anterior. Canal que já estava pareado (conecta sem QR) não recebe histórico: o gateway publica
-o fim com `totalBatches: 0` e `skippedChats: 0` na hora.
+anterior.
+
+### Canal que já está pareado
+
+O WhatsApp só manda histórico a um aparelho recém-vinculado. Por isso, um pedido **com**
+importação (`importHistory: true` e `importId`) **e** `relinkDevice: true` para um canal que já
+está pareado desvincula o aparelho atual (logout: ele some de "Aparelhos conectados" no celular) e faz um pareamento novo,
+com os `DeviceProps` de histórico, por QR ou por código conforme o pedido. O operador recebe um
+`channel.qr` novo (QR ou `pairingCode`) e precisa ler ou digitar de novo; ao concluir, sai o
+`channel.status` `connected` de sempre e a importação segue como a de um canal novo.
+
+- A troca não publica `channel.status` `disconnected` nem `error` pelo aparelho antigo: os eventos
+  dele (inclusive o `LoggedOut` e o `Disconnected` do próprio logout) são descartados até o
+  pareamento novo terminar, a importação no registro continua, e o canal fica no estado de
+  pareamento até o `connected`.
+- O aparelho desvinculado sai do registro de sessões na hora do logout. O pareamento novo grava a
+  sessão nova ao concluir; as opções do canal voltam pelo reenvio do backend no `connected`.
+- O logout só acontece com esse pedido explícito. Reconexão automática e retomada no boot nunca
+  desvinculam o aparelho.
+- Dois pedidos para o mesmo canal ao mesmo tempo desvinculam uma vez só: o segundo espera o
+  primeiro e entra no pareamento novo.
+- Se o logout falhar (por exemplo, socket caído), o aparelho antigo continua vinculado e em uso, e
+  o pareamento falha como toda falha de pareamento, com `channel.status` `error`.
+- Se o pareamento novo não for concluído (QR ou código vencido), o canal fica sem aparelho e
+  precisa parear de novo: nenhuma retomada no boot nem envio tenta usar o aparelho desvinculado.
+
+Um pedido com importação **sem** `relinkDevice` para um canal que já está pareado mantém o
+aparelho: conecta sem QR, publica `connected` e fecha a importação vazia na hora, com o fim
+`totalBatches: 0` e `skippedChats: 0`.
+
+Um pedido **sem** importação para um canal que já está pareado continua como antes: conecta sem
+QR e publica `connected`, sem desvincular nada.
 
 Um pedido **sem** importação apaga a importação do canal no registro (inclusive uma encerrada
 ou esquecida de um pareamento anterior), para que nenhuma retomada volte a baixar histórico que
@@ -125,7 +169,7 @@ que não baixou (saiu da CDN, prazo, S3 fora) vem com `media` **sem `key`**, man
 | Campo | Significado |
 |---|---|
 | `totalBatches` | o contador persistido no registro no momento do fim (cada lote publicado conta uma vez, inclusive os de um pedaço reenviado pelo telefone) |
-| `skippedChats` | quantos chats privados o gateway deixou de fora por não conseguir resolver um telefone (chats só com LID). Cada chat conta uma vez na importação, mesmo que apareça em vários pedaços. Grupos ficam de fora por definição e **não** contam. `0` no fim vazio de um canal já pareado |
+| `skippedChats` | quantos chats privados o gateway deixou de fora por não conseguir resolver um telefone (chats só com LID). Cada chat conta uma vez na importação, mesmo que apareça em vários pedaços. Grupos ficam de fora por definição e **não** contam. `0` no fim vazio de um canal que continua pareado |
 
 Publicado uma única vez, depois do último lote do pedaço com `sourceProgress` 100, quando todos
 os lotes da importação até ali tiveram confirmação. O backend fecha a importação quando os lotes
