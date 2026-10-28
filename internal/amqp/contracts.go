@@ -26,6 +26,8 @@ type ContactPayload struct {
 type ReplyToPayload struct {
 	ProviderMessageID string `json:"providerMessageId"`
 	ParticipantJID    string `json:"participantJid,omitempty"`
+	Text              string `json:"text,omitempty"`
+	FromMe            bool   `json:"fromMe,omitempty"`
 }
 
 type InteractiveButton struct {
