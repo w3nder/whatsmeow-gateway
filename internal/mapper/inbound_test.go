@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waAICommonDeprecated"
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
@@ -2606,5 +2607,99 @@ func TestBuildInboundSendsNoMentionsOnAGroupMessageWithoutTags(t *testing.T) {
 	}
 	if strings.Contains(string(wire), "mentions") {
 		t.Fatalf("wire = %s", wire)
+	}
+}
+
+func buildInboundFor(t *testing.T, id string, msg *waE2E.Message) (mapper.InboundEvent, error) {
+	t.Helper()
+	return mapper.BuildInbound(context.Background(), testDeps(fakeDownloader{}, nil, &fakeMediaStore{}), &events.Message{Info: baseInfo(id, "5511999999999"), Message: msg})
+}
+
+func TestBuildInboundCommentMessageBecomesTextRepliedToTheTarget(t *testing.T) {
+	out, err := buildInboundFor(t, "wamid.comment-1", &waE2E.Message{
+		CommentMessage: &waE2E.CommentMessage{
+			Message:          &waE2E.Message{Conversation: proto.String("concordo com isso")},
+			TargetMessageKey: &waCommon.MessageKey{ID: proto.String("wamid.target-1")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "text" || out.Text == nil || out.Text.Body != "concordo com isso" {
+		t.Fatalf("expected the comment text, got type=%q text=%+v", out.Type, out.Text)
+	}
+	if out.ContextMessageID != "wamid.target-1" {
+		t.Fatalf("expected the comment to point at its target, got %q", out.ContextMessageID)
+	}
+}
+
+func TestBuildInboundGroupInviteBecomesTextWithTheInviteLink(t *testing.T) {
+	out, err := buildInboundFor(t, "wamid.invite-1", &waE2E.Message{
+		GroupInviteMessage: &waE2E.GroupInviteMessage{
+			GroupName:  proto.String("Lancamento Janeiro"),
+			Caption:    proto.String("Entra la"),
+			InviteCode: proto.String("AbCdEf123"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	want := "Convite para o grupo Lancamento Janeiro\nEntra la\nhttps://chat.whatsapp.com/AbCdEf123"
+	if out.Type != "text" || out.Text == nil || out.Text.Body != want {
+		t.Fatalf("expected %q, got type=%q text=%+v", want, out.Type, out.Text)
+	}
+}
+
+func TestBuildInboundRichResponseJoinsTheTextParts(t *testing.T) {
+	out, err := buildInboundFor(t, "wamid.airesp-1", &waE2E.Message{
+		RichResponseMessage: &waE2E.AIRichResponseMessage{
+			Submessages: []*waAICommonDeprecated.AIRichResponseSubMessage{
+				{MessageText: proto.String("Primeira parte.")},
+				{MessageText: proto.String("  ")},
+				{MessageText: proto.String("Segunda parte.")},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "text" || out.Text == nil || out.Text.Body != "Primeira parte.\n\nSegunda parte." {
+		t.Fatalf("unexpected rich response: type=%q text=%+v", out.Type, out.Text)
+	}
+}
+
+func TestBuildInboundRichResponseWithoutTextIsSkipped(t *testing.T) {
+	_, err := buildInboundFor(t, "wamid.airesp-2", &waE2E.Message{RichResponseMessage: &waE2E.AIRichResponseMessage{}})
+	if !errors.Is(err, mapper.ErrSkip) {
+		t.Fatalf("expected ErrSkip for a response with no text, got %v", err)
+	}
+}
+
+func TestBuildInboundRequestPaymentBecomesAChargeWithTheAmountAndTheNote(t *testing.T) {
+	out, err := buildInboundFor(t, "wamid.reqpay-1", &waE2E.Message{
+		RequestPaymentMessage: &waE2E.RequestPaymentMessage{
+			CurrencyCodeIso4217: proto.String("BRL"),
+			Amount1000:          proto.Uint64(150000),
+			NoteMessage:         &waE2E.Message{Conversation: proto.String("Pedido 42")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "interactive" || out.RichContent == nil || out.RichContent.Flow != "payment" {
+		t.Fatalf("expected an interactive payment, got type=%q rich=%+v", out.Type, out.RichContent)
+	}
+	if out.RichContent.Body != "Pedido 42" || out.RichContent.Payment == nil || out.RichContent.Payment.Kind != "charge" || out.RichContent.Payment.Amount != "R$ 150,00" {
+		t.Fatalf("unexpected payment: %+v / %+v", out.RichContent, out.RichContent.Payment)
+	}
+}
+
+func TestBuildInboundRequestPaymentWithNothingInsideFallsBackToUnsupported(t *testing.T) {
+	out, err := buildInboundFor(t, "wamid.reqpay-2", &waE2E.Message{RequestPaymentMessage: &waE2E.RequestPaymentMessage{}})
+	if err != nil {
+		t.Fatalf("BuildInbound: %v", err)
+	}
+	if out.Type != "unsupported" || out.Unsupported == nil || out.Unsupported.Type != "requestPaymentMessage" {
+		t.Fatalf("expected unsupported requestPaymentMessage, got type=%q %+v", out.Type, out.Unsupported)
 	}
 }

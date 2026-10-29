@@ -398,6 +398,10 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 	}
 
 	msg := unwrapMessage(evt.Message)
+	if comment := msg.GetCommentMessage(); comment.GetMessage() != nil {
+		out.ContextMessageID = comment.GetTargetMessageKey().GetID()
+		msg = unwrapMessage(comment.GetMessage())
+	}
 
 	if rawDebugEnabled() {
 		logRawMessage(evt.Info.ID, msg)
@@ -678,6 +682,27 @@ func buildInbound(ctx context.Context, deps InboundDeps, evt *events.Message) (I
 		}
 		applyContextInfo(&out, event.GetContextInfo())
 
+	case msg.GetGroupInviteMessage() != nil:
+		invite := msg.GetGroupInviteMessage()
+		out.Type = "text"
+		out.Text = &InboundText{Body: groupInviteBody(invite)}
+		applyContextInfo(&out, invite.GetContextInfo())
+
+	case msg.GetRichResponseMessage() != nil:
+		response := msg.GetRichResponseMessage()
+		body := richResponseText(response)
+		if body == "" {
+			return InboundEvent{}, ErrSkip
+		}
+		out.Type = "text"
+		out.Text = &InboundText{Body: body}
+		applyContextInfo(&out, response.GetContextInfo())
+
+	case msg.GetRequestPaymentMessage() != nil:
+		if err := applyRichOrFallback(&out, msg, buildRequestPaymentRich(msg.GetRequestPaymentMessage())); err != nil {
+			return InboundEvent{}, err
+		}
+
 	default:
 		content, found := detectContentField(msg)
 		if !found {
@@ -753,6 +778,51 @@ func pollCreationOf(msg *waE2E.Message) *waE2E.PollCreationMessage {
 		}
 	}
 	return nil
+}
+
+const groupInviteLinkPrefix = "https://chat.whatsapp.com/"
+
+func groupInviteBody(invite *waE2E.GroupInviteMessage) string {
+	lines := make([]string, 0, 3)
+	if name := invite.GetGroupName(); name != "" {
+		lines = append(lines, "Convite para o grupo "+name)
+	} else {
+		lines = append(lines, "Convite para um grupo")
+	}
+	if caption := invite.GetCaption(); caption != "" {
+		lines = append(lines, caption)
+	}
+	if code := invite.GetInviteCode(); code != "" {
+		lines = append(lines, groupInviteLinkPrefix+code)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func richResponseText(response *waE2E.AIRichResponseMessage) string {
+	parts := make([]string, 0, len(response.GetSubmessages()))
+	for _, sub := range response.GetSubmessages() {
+		if text := strings.TrimSpace(sub.GetMessageText()); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func buildRequestPaymentRich(request *waE2E.RequestPaymentMessage) *InboundRichContent {
+	amount := ""
+	if cents := request.GetAmount1000(); cents > 0 {
+		amount = formatProductPriceText(int64(cents), request.GetCurrencyCodeIso4217())
+	}
+	body := extractText(unwrapMessage(request.GetNoteMessage()))
+	if amount == "" && body == "" {
+		return nil
+	}
+	return &InboundRichContent{
+		Kind:    "interactive",
+		Flow:    "payment",
+		Body:    body,
+		Payment: &InboundRichPayment{Kind: "charge", Amount: amount},
+	}
 }
 
 func buildTemplateRich(tm *waE2E.TemplateMessage) *InboundRichContent {
