@@ -549,6 +549,26 @@ func (m *Manager) unlink(ctx context.Context, channelID string, c WAClient) erro
 	return nil
 }
 
+func (m *Manager) Remove(ctx context.Context, channelID string) error {
+	unlock := m.lockChannel(channelID)
+	defer unlock()
+
+	m.mu.Lock()
+	c, ok := m.sessions[channelID]
+	m.mu.Unlock()
+	if !ok {
+		return nil
+	}
+
+	m.mutedFlag(channelID, c).Store(true)
+	err := c.Logout(ctx)
+	m.drop(channelID, c)
+	if err != nil && !errors.Is(err, whatsmeow.ErrNotLoggedIn) {
+		return fmt.Errorf("session: logout of the removed channel %s: %w", channelID, err)
+	}
+	return nil
+}
+
 func (m *Manager) mutedFlag(channelID string, c WAClient) *atomic.Bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()

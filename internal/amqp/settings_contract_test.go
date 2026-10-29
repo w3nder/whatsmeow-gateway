@@ -14,6 +14,8 @@ const settingsCommandNullMessageLiteral = `{"tenantId":"1f3a5c7e-9b2d-4e6f-8a1c-
 
 const settingsCommandAbsentFieldsLiteral = `{"tenantId":"1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c","channelId":"2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d"}`
 
+const settingsCommandRemovedLiteral = `{"tenantId":"1f3a5c7e-9b2d-4e6f-8a1c-3d5e7f9b1a2c","channelId":"2a4b6c8d-0e1f-4a3b-9c5d-7e8f0a1b2c3d","removed":true}`
+
 func settingsBool(v bool) *bool { return &v }
 
 func settingsString(v string) *string { return &v }
@@ -59,5 +61,15 @@ func TestSettingsCommandLeavesAbsentFieldsNil(t *testing.T) {
 	got := decodeSettings(t, settingsCommandAbsentFieldsLiteral)
 	if got.ListenGroups != nil || got.ReceiveCalls != nil || got.CallRejectMessage != nil {
 		t.Fatalf("absent fields must stay nil so the gateway applies the defaults, got %+v", got)
+	}
+}
+
+func TestSettingsCommandRemovedContractLiteral(t *testing.T) {
+	got := decodeSettings(t, settingsCommandRemovedLiteral)
+	if !got.Removed || got.ListenGroups != nil || got.ReceiveCalls != nil {
+		t.Fatalf("a removal must decode as removed with no option set, got %+v", got)
+	}
+	if decodeSettings(t, settingsCommandLiteral).Removed {
+		t.Fatal("a settings command without the removed field must not mean a removal")
 	}
 }
