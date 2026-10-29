@@ -49,6 +49,15 @@ func TestSettingsHandlerRejectsACommandWithoutIdentity(t *testing.T) {
 	}
 }
 
+func TestSettingsHandlerRefusesARemovalFromAnotherTenant(t *testing.T) {
+	g := &gateway{settings: channelsettings.NewMap(), logger: slog.New(slog.DiscardHandler), tenantByChannel: map[string]string{"channel-1": "tenant-1"}}
+
+	err := g.SettingsHandler(context.Background(), amqp.SettingsCommand{TenantID: "tenant-other", ChannelID: "channel-1", Removed: true})
+	if err == nil {
+		t.Fatal("a removal from another tenant must be refused so one tenant cannot close another's session")
+	}
+}
+
 func TestSettingsHandlerRefusesAnotherTenantsCommandForAKnownChannel(t *testing.T) {
 	g := &gateway{settings: channelsettings.NewMap(), logger: slog.New(slog.DiscardHandler), tenantByChannel: map[string]string{"channel-1": "tenant-1"}}
 

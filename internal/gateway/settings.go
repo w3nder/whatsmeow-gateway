@@ -33,6 +33,10 @@ func (g *gateway) SettingsHandler(ctx context.Context, cmd amqp.SettingsCommand)
 		return fmt.Errorf("gateway: settings command for channel %s comes from tenant %s, the channel belongs to another", cmd.ChannelID, cmd.TenantID)
 	}
 
+	if cmd.Removed {
+		return g.removeChannel(ctx, cmd.ChannelID)
+	}
+
 	if current := g.settings.For(cmd.ChannelID).Version; cmd.SettingsVersion < current {
 		g.logger.Info("gateway: stale channel settings ignored",
 			"channel_id", cmd.ChannelID,
@@ -59,5 +63,14 @@ func (g *gateway) SettingsHandler(ctx context.Context, cmd amqp.SettingsCommand)
 		"listen_groups", next.ListenGroups,
 		"receive_calls", next.ReceiveCalls,
 		"has_call_reject_message", next.CallRejectMessage != "")
+	return nil
+}
+
+func (g *gateway) removeChannel(ctx context.Context, channelID string) error {
+	if err := g.manager.Remove(ctx, channelID); err != nil {
+		g.logger.Warn("gateway: the removed channel did not log out cleanly", "channel_id", channelID, "error", err)
+	}
+	g.forgetChannel(ctx, channelID)
+	g.logger.Info("gateway: session of the removed channel closed", "channel_id", channelID)
 	return nil
 }

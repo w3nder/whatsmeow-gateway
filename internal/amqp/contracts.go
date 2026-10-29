@@ -121,6 +121,7 @@ type SettingsCommand struct {
 	ReceiveCalls      *bool   `json:"receiveCalls"`
 	CallRejectMessage *string `json:"callRejectMessage"`
 	SettingsVersion   int64   `json:"settingsVersion"`
+	Removed           bool    `json:"removed,omitempty"`
 }
 
 const (

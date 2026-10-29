@@ -772,11 +772,7 @@ func (g *gateway) handleSessionEvent(channelID string, evt any) {
 		if _, already := g.loggedOut.LoadOrStore(channelID, struct{}{}); !already {
 			g.publishChannelStatus(channelID, "disconnected", reasonDeviceLoggedOut)
 		}
-		g.clearTenant(channelID)
-		g.settings.Clear(channelID)
-		if err := g.registry.Delete(g.workCtx, channelID); err != nil {
-			g.logger.Error("gateway: delete session on logout", "channel_id", channelID, "error", err)
-		}
+		g.forgetChannel(g.workCtx, channelID)
 	case *events.CallOffer, *events.CallAccept, *events.CallPreAccept, *events.CallTerminate,
 		*events.CallReject, *events.CallOfferNotice, *events.UnknownCallEvent:
 		g.handleCallSignal(channelID, e)
@@ -971,6 +967,14 @@ func (g *gateway) tenantFor(channelID string) string {
 	g.tenantMu.RLock()
 	defer g.tenantMu.RUnlock()
 	return g.tenantByChannel[channelID]
+}
+
+func (g *gateway) forgetChannel(ctx context.Context, channelID string) {
+	g.clearTenant(channelID)
+	g.settings.Clear(channelID)
+	if err := g.registry.Delete(ctx, channelID); err != nil {
+		g.logger.Error("gateway: delete the channel session", "channel_id", channelID, "error", err)
+	}
 }
 
 func (g *gateway) clearTenant(channelID string) {
