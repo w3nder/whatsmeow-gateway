@@ -230,7 +230,7 @@ func (m *Manager) pair(ctx context.Context, channelID string, importHistory, rel
 					update = PairUpdate{Connected: true}
 				default:
 					m.clearQR(channelID, p)
-					update = PairUpdate{Err: pairingEndError(p, evt)}
+					update, ends = PairUpdate{Err: pairingEndError(p, evt)}, true
 				}
 				select {
 				case updates <- update:
