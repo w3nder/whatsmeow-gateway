@@ -438,6 +438,7 @@ func (g *gateway) followPairing(ctx context.Context, cmd amqp.PairCommand, updat
 			return fmt.Errorf("gateway: pair channel %s: %w", cmd.ChannelID, update.Err)
 		case update.Connected:
 			if err := g.persistSession(ctx, cmd.ChannelID, cmd.TenantID); err != nil {
+				g.publishChannelFailure(ctx, cmd.TenantID, cmd.UserID, cmd.ChannelID, pairingFailedReason)
 				return fmt.Errorf("gateway: persist session %s: %w", cmd.ChannelID, err)
 			}
 			if cmd.ImportsHistory() && !freshPairing {
