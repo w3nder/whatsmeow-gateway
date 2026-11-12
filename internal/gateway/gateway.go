@@ -431,6 +431,14 @@ func (g *gateway) pair(ctx context.Context, cmd amqp.PairCommand) (<-chan sessio
 
 func (g *gateway) followPairing(ctx context.Context, cmd amqp.PairCommand, updates <-chan session.PairUpdate) error {
 	freshPairing := false
+	// Leaving early (publish or persist failed) must not strand the pairing goroutine on a send
+	// nobody reads: it would keep the global pairing slot.
+	defer func() {
+		go func() {
+			for range updates {
+			}
+		}()
+	}()
 	for update := range updates {
 		switch {
 		case update.Err != nil:
