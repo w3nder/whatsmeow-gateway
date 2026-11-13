@@ -29,6 +29,17 @@ var ErrPairingTimeout = errors.New("session: the QR code was not scanned in time
 
 const connectWait = 10 * time.Second
 
+// PairingMaxDuration caps how long one pairing may hold the global pairing slot: longer than the
+// ~160 s a WhatsApp QR stays alive, short enough that a stuck pairing cannot block the others.
+const PairingMaxDuration = 4 * time.Minute
+
+// SupersededWait caps how long a request that changes the pairing parameters waits for the
+// pairing it replaces to end.
+const SupersededWait = 30 * time.Second
+
+// pairingNoticeWait bounds the delivery of the final notice of a pairing to a reader that may be gone.
+const pairingNoticeWait = 2 * time.Second
+
 type PairUpdate struct {
 	QR        string
 	Code      string
@@ -89,8 +100,10 @@ type channelLock struct {
 }
 
 type Manager struct {
-	factory  ClientFactory
-	slotWait time.Duration
+	factory   ClientFactory
+	slotWait  time.Duration
+	maxPair   time.Duration
+	superWait time.Duration
 
 	mu       sync.Mutex
 	sessions map[string]WAClient
@@ -109,14 +122,24 @@ func WithPairingSlotWait(wait time.Duration) Option {
 	return func(m *Manager) { m.slotWait = wait }
 }
 
+func WithPairingMaxDuration(max time.Duration) Option {
+	return func(m *Manager) { m.maxPair = max }
+}
+
+func WithSupersededWait(wait time.Duration) Option {
+	return func(m *Manager) { m.superWait = wait }
+}
+
 func NewManager(factory ClientFactory, options ...Option) *Manager {
 	m := &Manager{
-		factory:  factory,
-		slotWait: deviceprops.SlotWait,
-		sessions: make(map[string]WAClient),
-		pairings: make(map[string]*pairing),
-		muted:    make(map[string]*atomic.Bool),
-		locks:    make(map[string]*channelLock),
+		factory:   factory,
+		slotWait:  deviceprops.SlotWait,
+		maxPair:   PairingMaxDuration,
+		superWait: SupersededWait,
+		sessions:  make(map[string]WAClient),
+		pairings:  make(map[string]*pairing),
+		muted:     make(map[string]*atomic.Bool),
+		locks:     make(map[string]*channelLock),
 	}
 	for _, option := range options {
 		option(m)
@@ -158,10 +181,14 @@ func (m *Manager) pair(ctx context.Context, channelID string, importHistory, rel
 
 	p, joined, superseded := m.beginPairing(channelID, importHistory, phone)
 	if superseded != nil {
+		wait := time.NewTimer(m.superWait)
+		defer wait.Stop()
 		select {
 		case <-superseded.done:
 		case <-ctx.Done():
 			return nil, fmt.Errorf("session: wait for the superseded pairing of %s to end: %w", channelID, ctx.Err())
+		case <-wait.C:
+			return nil, fmt.Errorf("session: the superseded pairing of %s did not end in %s", channelID, m.superWait)
 		}
 		return m.pair(ctx, channelID, importHistory, relinkDevice, phone)
 	}
@@ -198,8 +225,21 @@ func (m *Manager) pair(ctx context.Context, channelID string, importHistory, rel
 		defer release()
 		defer m.endPairing(channelID, p, client)
 
+		limit := time.NewTimer(m.maxPair)
+		defer limit.Stop()
+		expired := limit.C
 		for {
 			select {
+			case <-expired:
+				m.clearQR(channelID, p)
+				release() // the slot goes first: the notice below waits for a reader that may be gone
+				select {
+				case updates <- PairUpdate{Err: ErrPairingTimeout}:
+				case <-time.After(pairingNoticeWait):
+				case <-ctx.Done():
+				case <-p.stop:
+				}
+				return
 			case evt, ok := <-qr:
 				if !ok {
 					return
@@ -228,12 +268,15 @@ func (m *Manager) pair(ctx context.Context, channelID string, importHistory, rel
 				case evt.Event == whatsmeow.QRChannelSuccess.Event:
 					m.clearQR(channelID, p)
 					update = PairUpdate{Connected: true}
+					expired = nil
 				default:
 					m.clearQR(channelID, p)
 					update, ends = PairUpdate{Err: pairingEndError(p, evt)}, true
 				}
 				select {
 				case updates <- update:
+				case <-expired:
+					return
 				case <-ctx.Done():
 					return
 				case <-p.stop:
