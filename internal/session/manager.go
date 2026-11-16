@@ -584,6 +584,9 @@ func (m *Manager) drop(channelID string, c WAClient) {
 	if m.sessions[channelID] == c {
 		delete(m.sessions, channelID)
 		delete(m.muted, channelID)
+		if live, ok := m.pairings[channelID]; ok {
+			live.halt()
+		}
 	}
 	m.mu.Unlock()
 
