@@ -17,6 +17,7 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/w3nder/whatsmeow-gateway/internal/call"
+	"github.com/w3nder/whatsmeow-gateway/internal/deviceprops"
 	"github.com/w3nder/whatsmeow-gateway/internal/logging"
 )
 
@@ -94,6 +95,7 @@ func ConfigureAutoReconnect(client *whatsmeow.Client) {
 
 func TakeOverHistory(client *whatsmeow.Client) {
 	client.ManualHistorySyncDownload = true
+	client.GetClientPayload = deviceprops.HistoryPayload(client.Store)
 }
 
 func (w *waClient) QRChannel(ctx context.Context) (<-chan whatsmeow.QRChannelItem, error) {

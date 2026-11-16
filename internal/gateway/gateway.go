@@ -23,7 +23,6 @@ import (
 	"github.com/w3nder/whatsmeow-gateway/internal/call"
 	"github.com/w3nder/whatsmeow-gateway/internal/channelsettings"
 	"github.com/w3nder/whatsmeow-gateway/internal/dedupe"
-	"github.com/w3nder/whatsmeow-gateway/internal/deviceprops"
 	"github.com/w3nder/whatsmeow-gateway/internal/groupinfo"
 	"github.com/w3nder/whatsmeow-gateway/internal/history"
 	"github.com/w3nder/whatsmeow-gateway/internal/mapper"
@@ -405,11 +404,6 @@ func (g *gateway) PairHandler(ctx context.Context, cmd amqp.PairCommand, accept 
 	}
 
 	updates, err := g.pair(ctx, cmd)
-	if errors.Is(err, deviceprops.ErrSlotBusy) {
-		g.logger.Warn("gateway: pairing slot busy past the wait", "channel_id", cmd.ChannelID, "import_history", cmd.ImportsHistory(), "error", err)
-		g.publishChannelFailure(ctx, cmd.TenantID, cmd.UserID, cmd.ChannelID, pairingBusyReason(cmd.ImportsHistory()))
-		return nil
-	}
 	if err != nil {
 		g.publishChannelError(ctx, cmd.TenantID, cmd.UserID, cmd.ChannelID, err)
 		return fmt.Errorf("gateway: pair channel %s: %w", cmd.ChannelID, err)

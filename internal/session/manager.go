@@ -13,8 +13,6 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
-
-	"github.com/w3nder/whatsmeow-gateway/internal/deviceprops"
 )
 
 var ErrNoSession = errors.New("session: channel has no live session")
@@ -89,8 +87,7 @@ type channelLock struct {
 }
 
 type Manager struct {
-	factory  ClientFactory
-	slotWait time.Duration
+	factory ClientFactory
 
 	mu       sync.Mutex
 	sessions map[string]WAClient
@@ -103,25 +100,14 @@ type Manager struct {
 	unlinkHandlers []func(channelID string)
 }
 
-type Option func(*Manager)
-
-func WithPairingSlotWait(wait time.Duration) Option {
-	return func(m *Manager) { m.slotWait = wait }
-}
-
-func NewManager(factory ClientFactory, options ...Option) *Manager {
-	m := &Manager{
+func NewManager(factory ClientFactory) *Manager {
+	return &Manager{
 		factory:  factory,
-		slotWait: deviceprops.SlotWait,
 		sessions: make(map[string]WAClient),
 		pairings: make(map[string]*pairing),
 		muted:    make(map[string]*atomic.Bool),
 		locks:    make(map[string]*channelLock),
 	}
-	for _, option := range options {
-		option(m)
-	}
-	return m
 }
 
 func (m *Manager) OnEvent(handler func(channelID string, evt any)) {
@@ -178,15 +164,8 @@ func (m *Manager) pair(ctx context.Context, channelID string, importHistory, rel
 	if importHistory {
 		client.TakeOverHistory()
 	}
-	release, err := deviceprops.Acquire(ctx, importHistory, m.slotWait)
-	if err != nil {
-		m.endPairing(channelID, p, client)
-		close(p.done)
-		return nil, fmt.Errorf("session: wait for the pairing slot for %s: %w", channelID, err)
-	}
 	if err := client.Connect(); err != nil {
 		m.endPairing(channelID, p, client)
-		release()
 		close(p.done)
 		return nil, fmt.Errorf("session: connect for pairing %s: %w", channelID, err)
 	}
@@ -195,7 +174,6 @@ func (m *Manager) pair(ctx context.Context, channelID string, importHistory, rel
 	go func() {
 		defer close(p.done)
 		defer close(updates)
-		defer release()
 		defer m.endPairing(channelID, p, client)
 
 		for {
@@ -584,6 +562,9 @@ func (m *Manager) drop(channelID string, c WAClient) {
 	if m.sessions[channelID] == c {
 		delete(m.sessions, channelID)
 		delete(m.muted, channelID)
+		if live, ok := m.pairings[channelID]; ok {
+			live.halt()
+		}
 	}
 	m.mu.Unlock()
 

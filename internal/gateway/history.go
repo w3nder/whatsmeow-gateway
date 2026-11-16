@@ -26,18 +26,6 @@ func (g *gateway) acceptHistory(channelID string, notif *waE2E.HistorySyncNotifi
 	return true
 }
 
-const (
-	pairingBusyBehindHistory       = "Outro pareamento com histórico está em andamento neste servidor. Tente novamente em instantes."
-	historyPairingBusyBehindOthers = "Há outros pareamentos em andamento neste servidor e o pareamento com histórico precisa acontecer sozinho. Tente novamente em instantes."
-)
-
-func pairingBusyReason(importHistory bool) string {
-	if importHistory {
-		return historyPairingBusyBehindOthers
-	}
-	return pairingBusyBehindHistory
-}
-
 func (g *gateway) recordHistoryChoice(ctx context.Context, cmd amqp.PairCommand) error {
 	if !cmd.ImportsHistory() {
 		if err := g.registry.ClearHistoryImport(ctx, cmd.ChannelID); err != nil {
