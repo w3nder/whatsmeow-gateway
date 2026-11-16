@@ -19,10 +19,10 @@ func (c *silentlyStoppedQRClient) QRChannel(context.Context) (<-chan whatsmeow.Q
 	return items, nil
 }
 
-func TestRemovingAChannelWhileItsQRIsOpenEndsThePairingAndFreesTheHistorySlot(t *testing.T) {
+func TestRemovingAChannelWhileItsQRIsOpenEndsThePairingSoTheNextOneShowsAFreshQR(t *testing.T) {
 	m := NewManager(func(string, *types.JID) (WAClient, error) {
 		return &silentlyStoppedQRClient{}, nil
-	}, WithPairingSlotWait(2*time.Second))
+	})
 
 	updates, err := m.Pair(context.Background(), "channel-removed-mid-qr", false, false)
 	if err != nil {
@@ -52,16 +52,16 @@ func TestRemovingAChannelWhileItsQRIsOpenEndsThePairingAndFreesTheHistorySlot(t 
 		t.Fatal("the pairing of the removed channel must not stay registered")
 	}
 
-	history, err := m.Pair(context.Background(), "channel-importing-history", true, false)
+	again, err := m.Pair(context.Background(), "channel-removed-mid-qr", true, false)
 	if err != nil {
-		t.Fatalf("a history pairing after the removal must get the slot, got %v", err)
+		t.Fatalf("Pair after the removal failed: %v", err)
 	}
-	if update := <-history; update.QR != "qr-open" {
-		t.Fatalf("history pairing update = %+v, want its QR", update)
+	if update := <-again; update.QR != "qr-open" {
+		t.Fatalf("the pairing after the removal must show its own QR, got %+v", update)
 	}
-	if err := m.Remove(context.Background(), "channel-importing-history"); err != nil {
+	if err := m.Remove(context.Background(), "channel-removed-mid-qr"); err != nil {
 		t.Fatalf("Remove failed: %v", err)
 	}
-	for range history {
+	for range again {
 	}
 }

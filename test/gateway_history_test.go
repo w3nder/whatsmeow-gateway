@@ -19,7 +19,6 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	gatewayamqp "github.com/w3nder/whatsmeow-gateway/internal/amqp"
-	"github.com/w3nder/whatsmeow-gateway/internal/deviceprops"
 	"github.com/w3nder/whatsmeow-gateway/internal/gateway"
 	"github.com/w3nder/whatsmeow-gateway/internal/logging"
 	"github.com/w3nder/whatsmeow-gateway/internal/ownership"
@@ -513,9 +512,6 @@ func TestGatewayRestartsAPairingWithHistoryWhenAPairingWithoutHistoryIsRequested
 	close(fake.qrFeed)
 	waitForChannelStatus(t, h.deliveries, channelID, "connected", pairWait)
 
-	if props := fake.connectProps(); props.GetPlatformType() == deviceprops.HistoryPlatform {
-		t.Fatalf("the restarted pairing must connect with today's props, got %v", props)
-	}
 	fake.emit(historyNotificationEvent())
 	assertNoHistoryMessage(t, h.deliveries, 2*time.Second)
 }

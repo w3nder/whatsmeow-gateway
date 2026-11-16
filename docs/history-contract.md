@@ -82,29 +82,12 @@ ele é encerrado e recomeça sem histórico, com os props de sempre (o espelho d
 contrário: um pedido com importação encerra o pareamento sem histórico em curso e recomeça com
 os props de histórico). Pedidos iguais ao que está em curso entram nele e recebem o QR vigente.
 
-### Exclusividade por instância
+### Props por canal
 
-O pareamento que importa usa os `DeviceProps` de histórico do primeiro `Connect` até o fim do
-pareamento (sucesso, erro ou fim do QR) e é exclusivo **na instância do gateway**: nenhum outro
-pareamento começa enquanto ele mostra o QR, e ele espera os que estão em curso. Pareamentos sem
-histórico continuam simultâneos entre si, com os props de sempre.
-
-A espera pela vez tem teto de 90 segundos (`deviceprops.SlotWait`), para pareamentos com e sem
-histórico. Estourado o teto, o pareamento falha como toda falha de pareamento, com
-`channel.status` `error`, e o comando é confirmado (ack), nunca vai para a DLQ nem prende o
-prefetch:
-
-| Quem esperou | `reason` |
-|---|---|
-| pareamento sem histórico, atrás de um com histórico | `Outro pareamento com histórico está em andamento neste servidor. Tente novamente em instantes.` |
-| pareamento com histórico, atrás de outros em curso | `Há outros pareamentos em andamento neste servidor e o pareamento com histórico precisa acontecer sozinho. Tente novamente em instantes.` |
-
-A fila de espera é por ordem de chegada: um pareamento sem histórico que chega depois de um com
-histórico ainda na fila espera por ele, mas nunca mais que o mesmo teto. O custo da escolha:
-pareamentos com histórico são serializados por instância, e um QR de histórico que ninguém lê
-segura os demais pareamentos daquela instância até o fim do QR. O tempo de vida do QR é o do
-whatsmeow (primeiro código 60 s, os seguintes 20 s, cerca de 160 s ao todo) e não foi encurtado:
-quem espera desiste em 90 s e tenta de novo.
+Os `DeviceProps` de histórico pertencem ao cliente do canal que importa: o registro desse
+cliente envia os props de histórico (`deviceprops.HistoryPayload` no `GetClientPayload` do
+whatsmeow) e os props globais nunca mudam. Cada canal pareia por conta própria, com ou sem
+histórico, sem esperar nem bloquear nenhum outro canal.
 
 ## Onde publicar e onde ouvir
 
