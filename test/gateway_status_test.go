@@ -216,6 +216,9 @@ func TestGatewaySendHandlerPublishesOpaqueMessageIdOnSent(t *testing.T) {
 	if evt.OpaqueMessageID != messageID {
 		t.Fatalf("expected opaqueMessageId=%s (the business Message id) so ingestion can backfill providerMessageId, got %+v", messageID, evt)
 	}
+	if evt.TenantID != "tenant-status-roundtrip-1" {
+		t.Fatalf("expected tenantId on every sent status, even without a resolved lid, got %+v", evt)
+	}
 	if evt.Error != nil {
 		t.Fatalf("expected no error on a successful send, got %+v", evt.Error)
 	}
@@ -328,6 +331,9 @@ func TestGatewaySendHandlerPublishesFailedStatusAndAcksOnSendError(t *testing.T)
 	}
 	if evt.Error.Code != "gateway_send_error" {
 		t.Fatalf("expected the generic code gateway_send_error for a rejected send, got %+v", evt.Error)
+	}
+	if evt.TenantID != "tenant-status-roundtrip-2" {
+		t.Fatalf("expected tenantId on a failed status so ingestion finds the message before it has a provider id, got %+v", evt)
 	}
 
 	select {
