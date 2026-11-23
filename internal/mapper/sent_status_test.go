@@ -36,7 +36,7 @@ func TestPhoneReactionSentStatusReportsTheResolvedLIDAsTheContractLiteral(t *tes
 	}
 }
 
-func TestSentStatusWithoutResolutionKeepsTheOldShape(t *testing.T) {
+func TestSentStatusWithoutResolutionCarriesOnlyTheTenant(t *testing.T) {
 	cases := map[string]struct {
 		to   string
 		chat types.JID
@@ -52,7 +52,7 @@ func TestSentStatusWithoutResolutionKeepsTheOldShape(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal status: %v", err)
 			}
-			want := `{"providerMessageId":"3EB0ABC","opaqueMessageId":"msg-1","status":"sent","timestamp":"1790000000"}`
+			want := `{"providerMessageId":"3EB0ABC","opaqueMessageId":"msg-1","status":"sent","timestamp":"1790000000","tenantId":"tenant-1"}`
 			if string(body) != want {
 				t.Fatalf("got %s, want %s", body, want)
 			}
