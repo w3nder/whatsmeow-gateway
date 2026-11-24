@@ -600,6 +600,7 @@ func (g *gateway) SendHandler(ctx context.Context, cmd amqp.GatewaySendCommand) 
 		if err := g.publisher.PublishStatus(ctx, mapper.StatusEvent{
 			ProviderMessageID: existingProviderID,
 			OpaqueMessageID:   cmd.MessageID,
+			TenantID:          cmd.TenantID,
 			Status:            "sent",
 			Timestamp:         strconv.FormatInt(time.Now().Unix(), 10),
 		}); err != nil {
@@ -681,6 +682,7 @@ func (g *gateway) publishSendFailure(ctx context.Context, cmd amqp.GatewaySendCo
 	if err := g.publisher.PublishStatus(ctx, mapper.StatusEvent{
 		ProviderMessageID: providerID,
 		OpaqueMessageID:   cmd.MessageID,
+		TenantID:          cmd.TenantID,
 		Status:            "failed",
 		Timestamp:         strconv.FormatInt(time.Now().Unix(), 10),
 		Error: &mapper.StatusError{

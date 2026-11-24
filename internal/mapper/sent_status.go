@@ -15,17 +15,14 @@ type ResolvedRecipient struct {
 }
 
 func SentStatus(cmd amqp.GatewaySendCommand, chat types.JID, providerMessageID string, sentAt time.Time) StatusEvent {
-	evt := StatusEvent{
+	return StatusEvent{
 		ProviderMessageID: providerMessageID,
 		OpaqueMessageID:   cmd.MessageID,
 		Status:            "sent",
 		Timestamp:         strconv.FormatInt(sentAt.Unix(), 10),
+		TenantID:          cmd.TenantID,
+		ResolvedRecipient: resolvedRecipient(cmd.To, chat),
 	}
-	if recipient := resolvedRecipient(cmd.To, chat); recipient != nil {
-		evt.TenantID = cmd.TenantID
-		evt.ResolvedRecipient = recipient
-	}
-	return evt
 }
 
 func resolvedRecipient(requested string, chat types.JID) *ResolvedRecipient {
