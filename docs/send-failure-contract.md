@@ -8,9 +8,10 @@ Quando um comando de envio (`GatewaySendCommand`, qualquer `kind`: texto, mídia
 |---|---|
 | `session_missing` | O canal não tem sessão viva nem sessão guardada: o gateway nunca o pareou ou ele foi deslogado. Reenviar sem parear de novo não adianta. `reason` termina em `...is not paired: session: channel has no live session: <channelId>`. |
 | `session_down` | A sessão existe (viva ou retomada sob demanda), mas o socket continuou caído depois de `connectWait` (10 s). O auto-reconnect segue rodando; é transitório. `reason` contém `session: socket still down after 10s, auto-reconnect still running`. |
+| `recipient_not_on_whatsapp` | O WhatsApp respondeu que o destinatário não tem conta: o servidor não devolveu LID para o número (`whatsmeow.ErrRecipientNotOnWhatsApp`). Reenviar para a mesma grafia não adianta; o backend confere o número e reenvia para o LID ou marca o número como sem WhatsApp. |
 | `gateway_send_error` | Todo o resto: falha ao montar a mensagem, mídia, recusa do WhatsApp, timeout de envio, falha ao retomar a sessão. |
 
-A classificação é por erro tipado (`session.ErrNoSession`, `session.ErrSocketDown`, via `errors.Is`), nunca por texto. `error.reason` continua com o texto livre de sempre, inalterado, para consumidores que ainda casam o texto.
+A classificação é por erro tipado (`session.ErrNoSession`, `session.ErrSocketDown`, `whatsmeow.ErrRecipientNotOnWhatsApp`, via `errors.Is`), nunca por texto. `error.reason` continua com o texto livre de sempre, inalterado, para consumidores que ainda casam o texto.
 
 ## Efeitos que não mudam
 

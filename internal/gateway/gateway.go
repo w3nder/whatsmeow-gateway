@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -696,9 +697,10 @@ func (g *gateway) publishSendFailure(ctx context.Context, cmd amqp.GatewaySendCo
 }
 
 const (
-	sendFailureCodeGeneric        = "gateway_send_error"
-	sendFailureCodeSessionMissing = "session_missing"
-	sendFailureCodeSessionDown    = "session_down"
+	sendFailureCodeGeneric                = "gateway_send_error"
+	sendFailureCodeSessionMissing         = "session_missing"
+	sendFailureCodeSessionDown            = "session_down"
+	sendFailureCodeRecipientNotOnWhatsApp = "recipient_not_on_whatsapp"
 )
 
 func sendFailureCode(err error) string {
@@ -707,6 +709,8 @@ func sendFailureCode(err error) string {
 		return sendFailureCodeSessionMissing
 	case errors.Is(err, session.ErrSocketDown):
 		return sendFailureCodeSessionDown
+	case errors.Is(err, whatsmeow.ErrRecipientNotOnWhatsApp):
+		return sendFailureCodeRecipientNotOnWhatsApp
 	default:
 		return sendFailureCodeGeneric
 	}

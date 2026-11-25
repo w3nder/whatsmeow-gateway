@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -355,6 +356,59 @@ func TestGatewaySendHandlerPublishesFailedStatusAndAcksOnSendError(t *testing.T)
 	}
 	if existingProviderID != expectedProviderID {
 		t.Fatalf("expected the ledger's provider_message_id to be %q, got %q", expectedProviderID, existingProviderID)
+	}
+
+	shutdownStatusRoundtripGateway(t, cancel, runErrCh)
+}
+
+func TestGatewaySendHandlerPublishesRecipientNotOnWhatsAppWhenTheServerHasNoLID(t *testing.T) {
+	const messageID = "msg-status-roundtrip-no-lid-1"
+	expectedProviderID := dedupe.DeterministicProviderID(messageID)
+
+	fake := newFakeWAClient()
+	fake.sendErr = fmt.Errorf("%w: no LID found for 15550001111@s.whatsapp.net from server", whatsmeow.ErrRecipientNotOnWhatsApp)
+
+	probeCh, deliveries, _, cancel, runErrCh := setupStatusRoundtripGateway(t, fake, "channel-status-no-lid")
+
+	sendBody, err := json.Marshal(gatewayamqp.GatewaySendCommand{
+		TenantID:  "tenant-status-no-lid",
+		ChannelID: "channel-status-no-lid",
+		MessageID: messageID,
+		To:        "15550001111@s.whatsapp.net",
+		Type:      "text",
+		Text:      "oi",
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal send command: %v", err)
+	}
+	publishCtx, publishCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer publishCancel()
+	if err := probeCh.PublishWithContext(publishCtx, gatewayamqp.GatewaySendExchange, "0", false, false, rabbitmq.Publishing{
+		ContentType: "application/json",
+		Body:        sendBody,
+	}); err != nil {
+		t.Fatalf("failed to publish send command: %v", err)
+	}
+
+	delivery := waitForDelivery(t, deliveries, gatewayamqp.StatusRoutingKey, 10*time.Second)
+	var evt mapper.StatusEvent
+	if err := json.Unmarshal(delivery.Body, &evt); err != nil {
+		t.Fatalf("failed to unmarshal whatsapp.status.v1 event: %v", err)
+	}
+	if evt.Status != "failed" || evt.ProviderMessageID != expectedProviderID || evt.OpaqueMessageID != messageID {
+		t.Fatalf("expected a failed status for %s, got %+v", messageID, evt)
+	}
+	if evt.Error == nil || evt.Error.Code != "recipient_not_on_whatsapp" {
+		t.Fatalf("expected code recipient_not_on_whatsapp, got %+v", evt.Error)
+	}
+	if !strings.Contains(evt.Error.Reason, "no LID found") {
+		t.Fatalf("expected the original reason to be kept, got %q", evt.Error.Reason)
+	}
+	if evt.TenantID != "tenant-status-no-lid" {
+		t.Fatalf("expected tenantId on the failed status, got %+v", evt)
+	}
+	if fake.sendCallCount() != 1 {
+		t.Fatalf("expected WAClient.SendMessage called exactly once, got %d", fake.sendCallCount())
 	}
 
 	shutdownStatusRoundtripGateway(t, cancel, runErrCh)

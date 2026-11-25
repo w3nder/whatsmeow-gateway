@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 
+	"go.mau.fi/whatsmeow"
+
 	"github.com/w3nder/whatsmeow-gateway/internal/session"
 )
 
@@ -20,6 +22,10 @@ func TestSendFailureCodeClassifiesByTypedError(t *testing.T) {
 		{"socket down", session.ErrSocketDown, "session_down"},
 		{"socket down with wait", fmt.Errorf("%w after 10s, auto-reconnect still running", session.ErrSocketDown), "session_down"},
 		{"socket down wrapped", fmt.Errorf("gateway: ensure connected c: %w", fmt.Errorf("%w after 10s", session.ErrSocketDown)), "session_down"},
+		{"recipient not on whatsapp", whatsmeow.ErrRecipientNotOnWhatsApp, "recipient_not_on_whatsapp"},
+		{"server without lid", fmt.Errorf("%w: no LID found for 5511900000000@s.whatsapp.net from server", whatsmeow.ErrRecipientNotOnWhatsApp), "recipient_not_on_whatsapp"},
+		{"recipient not on whatsapp wrapped by send", fmt.Errorf("gateway: send m: %w", fmt.Errorf("%w: no LID found", whatsmeow.ErrRecipientNotOnWhatsApp)), "recipient_not_on_whatsapp"},
+		{"text that only mentions the recipient", errors.New("recipient is not on WhatsApp"), "gateway_send_error"},
 		{"whatsapp rejected", errors.New("boom: whatsapp rejected the message"), "gateway_send_error"},
 		{"text that only mentions the session", errors.New("session: channel has no live session"), "gateway_send_error"},
 		{"text that only mentions the socket", errors.New("session: socket still down after 10s"), "gateway_send_error"},
