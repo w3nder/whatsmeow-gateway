@@ -108,7 +108,7 @@ func buildByType(ctx context.Context, up Uploader, cmd amqp.GatewaySendCommand, 
 	switch cmd.Type {
 	case "text":
 		return buildText(cmd), nil, nil
-	case "image":
+	case "image", "sticker":
 		msg, err := buildMedia(ctx, up, fetch, cmd, whatsmeow.MediaImage)
 		return msg, nil, err
 	case "video":
@@ -214,6 +214,8 @@ func quotedParticipant(cmd amqp.GatewaySendCommand) string {
 	return ""
 }
 
+const stickerSidePx = 512
+
 func buildMedia(ctx context.Context, up Uploader, fetch MediaFetcher, cmd amqp.GatewaySendCommand, mt whatsmeow.MediaType) (*waE2E.Message, error) {
 	if cmd.Media == nil {
 		return nil, fmt.Errorf("mapper: type %q requires media", cmd.Type)
@@ -243,6 +245,21 @@ func buildMedia(ctx context.Context, up Uploader, fetch MediaFetcher, cmd amqp.G
 				FileSHA256:    resp.FileSHA256,
 				FileLength:    proto.Uint64(resp.FileLength),
 				Caption:       optionalString(cmd.Text),
+				ContextInfo:   ctxInfo,
+			},
+		}, nil
+	case "sticker":
+		return &waE2E.Message{
+			StickerMessage: &waE2E.StickerMessage{
+				URL:           proto.String(resp.URL),
+				DirectPath:    proto.String(resp.DirectPath),
+				MediaKey:      resp.MediaKey,
+				Mimetype:      proto.String(cmd.Media.Mime),
+				FileEncSHA256: resp.FileEncSHA256,
+				FileSHA256:    resp.FileSHA256,
+				FileLength:    proto.Uint64(resp.FileLength),
+				Width:         proto.Uint32(stickerSidePx),
+				Height:        proto.Uint32(stickerSidePx),
 				ContextInfo:   ctxInfo,
 			},
 		}, nil

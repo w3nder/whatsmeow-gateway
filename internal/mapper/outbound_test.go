@@ -449,11 +449,30 @@ func TestBuildOutboundContactsMissingPayload(t *testing.T) {
 }
 
 func TestBuildOutboundUnknownType(t *testing.T) {
-	cmd := amqp.GatewaySendCommand{To: "5511999999999@s.whatsapp.net", Type: "sticker"}
+	cmd := amqp.GatewaySendCommand{To: "5511999999999@s.whatsapp.net", Type: "poll"}
 
 	_, _, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch(nil, nil))
 	if err == nil {
 		t.Fatal("expected error for unknown type")
+	}
+}
+
+func TestBuildOutboundStickerSendsStickerMessage(t *testing.T) {
+	cmd := amqp.GatewaySendCommand{To: "5511999999999@s.whatsapp.net", Type: "sticker", Media: &amqp.MediaPayload{URL: "https://s3/figurinha.webp", Mime: "image/webp"}}
+
+	_, msg, _, err := mapper.BuildOutbound(context.Background(), stubUploader{}, cmd, stubFetch([]byte("webp"), nil))
+	if err != nil {
+		t.Fatalf("BuildOutbound: %v", err)
+	}
+	sticker := msg.GetStickerMessage()
+	if sticker == nil {
+		t.Fatal("expected a StickerMessage")
+	}
+	if sticker.GetMimetype() != "image/webp" || sticker.GetWidth() != 512 || sticker.GetHeight() != 512 {
+		t.Fatalf("unexpected sticker: %+v", sticker)
+	}
+	if msg.GetImageMessage() != nil {
+		t.Fatal("sticker must not go as an image")
 	}
 }
 
